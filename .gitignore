@@ -1,0 +1,10 @@
+# Dependências
+node_modules/
+dist/
+*.local
+.env
+.env.local
+
+# Supabase
+supabase/.branches
+supabase/.temp

@@ -1,0 +1,3 @@
+-- seed.sql
+-- No seed data required for F0+F1. Kept as an empty placeholder so that
+-- `supabase db reset` works out of the box.

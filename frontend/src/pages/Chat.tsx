@@ -1,0 +1,663 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react"
+import { useSearchParams } from "react-router-dom"
+import {
+  CheckCircle2,
+  Loader2,
+  Paperclip,
+  Send,
+  UserPlus,
+  X,
+} from "lucide-react"
+import { toast } from "sonner"
+
+import { supabase } from "@/lib/supabase"
+import { proxySendMedia, proxySendText } from "@/lib/api"
+import {
+  contactDisplayName,
+  cn,
+  formatDayLabel,
+  formatListTime,
+  formatPhone,
+  formatTime,
+  isSameDay,
+} from "@/lib/utils"
+import type {
+  Conversation,
+  Message,
+  Profile,
+  WhatsAppInstance,
+} from "@/lib/types"
+import { useAuth } from "@/hooks/use-auth"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Badge } from "@/components/ui/badge"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Skeleton } from "@/components/ui/skeleton"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+
+type Filter = "all" | "mine" | "unassigned"
+
+function MediaMessage({ msg }: { msg: Message }) {
+  const [url, setUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!msg.media_url) return
+    let cancelled = false
+    supabase.storage
+      .from("whatsapp-media")
+      .createSignedUrl(msg.media_url, 3600)
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) {
+          console.error("createSignedUrl", error)
+        } else {
+          setUrl(data.signedUrl)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [msg.media_url])
+
+  if (!msg.media_url) {
+    return <span className="italic">Mídia indisponível</span>
+  }
+  if (!url) {
+    return <Loader2 className="h-4 w-4 animate-spin" />
+  }
+
+  switch (msg.type) {
+    case "image":
+    case "sticker":
+      return (
+        <img
+          src={url}
+          alt={msg.content ?? "Imagem"}
+          className={cn(
+            "max-h-72 rounded-md object-cover",
+            msg.type === "sticker" && "max-h-40 w-40 object-contain",
+          )}
+        />
+      )
+    case "audio":
+      return <audio controls src={url} className="max-w-60" />
+    case "video":
+      return <video controls src={url} className="max-h-72 rounded-md" />
+    case "document":
+      return (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="flex items-center gap-2 text-sm underline underline-offset-2"
+        >
+          <Paperclip className="h-4 w-4" />
+          {msg.content || "Download"}
+        </a>
+      )
+    default:
+      return (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm underline underline-offset-2"
+        >
+          Download
+        </a>
+      )
+  }
+}
+
+function MessageBubble({ msg }: { msg: Message }) {
+  const outbound = msg.direction === "outbound"
+  return (
+    <div className={cn("flex", outbound ? "justify-end" : "justify-start")}>
+      <div
+        className={cn(
+          "max-w-[75%] space-y-1 rounded-lg px-3 py-2 text-sm shadow-sm",
+          outbound
+            ? "bg-primary text-primary-foreground"
+            : "border bg-card text-card-foreground",
+        )}
+      >
+        {msg.media_url && <MediaMessage msg={msg} />}
+        {msg.content && (
+          <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+        )}
+        {!msg.content && !msg.media_url && msg.type === "unknown" && (
+          <p className="italic opacity-70">Mensagem não suportada</p>
+        )}
+        <p
+          className={cn(
+            "text-right text-[10px] leading-none",
+            outbound ? "text-primary-foreground/70" : "text-muted-foreground",
+          )}
+        >
+          {formatTime(msg.sent_at)}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function ConversationItem({
+  conv,
+  selected,
+  onSelect,
+}: {
+  conv: Conversation
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
+  const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
+  const phone = conv.contact ? formatPhone(conv.contact.phone) : ""
+  const closed = conv.status === "closed"
+
+  return (
+    <button
+      onClick={() => onSelect(conv.id)}
+      className={cn(
+        "flex w-full items-start gap-3 rounded-lg p-3 text-left transition-colors hover:bg-accent",
+        selected && "bg-accent",
+        closed && "opacity-60",
+      )}
+    >
+      <Avatar className="mt-0.5 h-10 w-10 shrink-0">
+        <AvatarFallback>{name.slice(0, 2).toUpperCase()}</AvatarFallback>
+      </Avatar>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-sm font-medium">{name}</p>
+          {conv.last_message_at && (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {formatListTime(conv.last_message_at)}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-xs text-muted-foreground">
+            {phone}
+            {conv.assignee && (
+              <span className="ml-1 inline-flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                {conv.assignee.full_name ?? "?"}
+              </span>
+            )}
+          </p>
+          {conv.unread_count > 0 && (
+            <Badge className="h-5 min-w-5 shrink-0 justify-center rounded-full px-1.5">
+              {conv.unread_count}
+            </Badge>
+          )}
+        </div>
+        {conv.last_message_preview && (
+          <p className="truncate text-xs text-muted-foreground">
+            {conv.last_message_preview}
+          </p>
+        )}
+      </div>
+    </button>
+  )
+}
+
+export default function ChatPage() {
+  const { user, profile } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const [instances, setInstances] = useState<WhatsAppInstance[]>([])
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [profiles, setProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [loadingConversations, setLoadingConversations] = useState(true)
+  const [filter, setFilter] = useState<Filter>("all")
+  const [query, setQuery] = useState("")
+  const [text, setText] = useState("")
+  const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null)
+  const [sending, setSending] = useState(false)
+
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  const selected = conversations.find((c) => c.id === selectedId) ?? null
+
+  const loadConversations = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("*, contact:contacts(*), assignee:profiles(id, full_name)")
+      .order("last_message_at", { ascending: false, nullsFirst: false })
+    if (error) {
+      toast.error(error.message)
+    } else {
+      setConversations((data as unknown as Conversation[]) ?? [])
+    }
+    setLoadingConversations(false)
+  }, [])
+
+  const markRead = useCallback(async (id: string) => {
+    await supabase.rpc("mark_conversation_read", { p_conversation_id: id })
+  }, [])
+
+  useEffect(() => {
+    supabase
+      .from("whatsapp_instances")
+      .select("*")
+      .order("created_at", { ascending: true })
+      .then(({ data, error }) => {
+        if (!error) setInstances((data as WhatsAppInstance[]) ?? [])
+      })
+    supabase
+      .from("profiles")
+      .select("id, full_name")
+      .order("full_name")
+      .then(({ data, error }) => {
+        if (!error) setProfiles((data as Pick<Profile, "id" | "full_name">[]) ?? [])
+      })
+    loadConversations()
+  }, [loadConversations])
+
+  // Select conversation from URL (opened from Contacts page).
+  useEffect(() => {
+    const contactPhone = searchParams.get("contact")
+    if (contactPhone && conversations.length > 0 && !selectedId) {
+      const match = conversations.find(
+        (c) => c.contact && c.contact.phone === contactPhone,
+      )
+      if (match) setSelectedId(match.id)
+      if (match || contactPhone) {
+        setSearchParams({}, { replace: true })
+      }
+    }
+  }, [conversations, searchParams, selectedId, setSearchParams])
+
+  // Load messages for the selected conversation and mark it read.
+  useEffect(() => {
+    if (!selectedId) {
+      setMessages([])
+      return
+    }
+    let active = true
+    supabase
+      .from("messages")
+      .select("*")
+      .eq("conversation_id", selectedId)
+      .order("sent_at", { ascending: true })
+      .then(({ data, error }) => {
+        if (active && !error) setMessages((data as Message[]) ?? [])
+      })
+    markRead(selectedId)
+    return () => {
+      active = false
+    }
+  }, [selectedId, markRead])
+
+  // Realtime: conversation list updates (new/updated conversations).
+  useEffect(() => {
+    const channel = supabase
+      .channel("crm-conversations")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "conversations" },
+        () => loadConversations(),
+      )
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [loadConversations])
+
+  // Realtime: new messages in the selected conversation.
+  useEffect(() => {
+    if (!selectedId) return
+    const channel = supabase
+      .channel(`crm-messages-${selectedId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${selectedId}`,
+        },
+        (payload) => {
+          const msg = payload.new as Message
+          setMessages((prev) =>
+            prev.some((m) => m.id === msg.id) ? prev : [...prev, msg],
+          )
+          if (msg.direction === "inbound") markRead(selectedId)
+        },
+      )
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [selectedId, markRead])
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    })
+  }, [messages])
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return conversations.filter((c) => {
+      if (filter === "mine" && c.assigned_to !== user?.id) return false
+      if (filter === "unassigned" && c.assigned_to !== null) return false
+      if (q) {
+        const name = c.contact ? contactDisplayName(c.contact).toLowerCase() : ""
+        const phone = c.contact?.phone ?? ""
+        if (!name.includes(q) && !phone.includes(q)) return false
+      }
+      return true
+    })
+  }, [conversations, filter, query, user?.id])
+
+  const instance = instances[0] ?? null
+
+  async function handleSelect(id: string) {
+    setSelectedId(id)
+  }
+
+  async function handleAssign(conv: Conversation, assigneeId: string | null) {
+    const { error } = await supabase
+      .from("conversations")
+      .update({ assigned_to: assigneeId })
+      .eq("id", conv.id)
+    if (error) toast.error(error.message)
+  }
+
+  async function handleToggleStatus(conv: Conversation) {
+    const next = conv.status === "open" ? "closed" : "open"
+    const { error } = await supabase
+      .from("conversations")
+      .update({ status: next })
+      .eq("id", conv.id)
+    if (error) toast.error(error.message)
+  }
+
+  async function handleSend(e: FormEvent) {
+    e.preventDefault()
+    if (!selected) return
+    if (!text.trim() && !pendingFile) return
+    if (!instance) {
+      toast.error("Nenhuma instância configurada — veja Configurações")
+      return
+    }
+    if (instance.status !== "connected") {
+      toast.error("WhatsApp não está conectado")
+      return
+    }
+    setSending(true)
+    try {
+      if (pendingFile) {
+        await proxySendMedia(
+          selected.instance_id,
+          selected.contact!.phone,
+          text.trim(),
+          pendingFile.file.name,
+          pendingFile.file,
+        )
+      } else {
+        await proxySendText(selected.instance_id, selected.contact!.phone, text.trim())
+      }
+      setText("")
+      setPendingFile(null)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao enviar")
+    } finally {
+      setSending(false)
+    }
+  }
+
+  // Group messages by day for separators.
+  const groupedMessages = useMemo(() => {
+    const groups: { day: string; items: Message[] }[] = []
+    for (const msg of messages) {
+      const last = groups[groups.length - 1]
+      if (last && isSameDay(last.day, msg.sent_at)) {
+        last.items.push(msg)
+      } else {
+        groups.push({ day: msg.sent_at, items: [msg] })
+      }
+    }
+    return groups
+  }, [messages])
+
+  const contactName = selected?.contact
+    ? contactDisplayName(selected.contact)
+    : ""
+
+  return (
+    <div className="flex h-full min-h-0">
+      {/* Left: conversation list */}
+      <aside className="flex w-80 shrink-0 flex-col border-r">
+        <div className="border-b p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex gap-1">
+              {(
+                [
+                  ["all", "Todas"],
+                  ["mine", "Minhas"],
+                  ["unassigned", "Sem dono"],
+                ] as [Filter, string][]
+              ).map(([key, label]) => (
+                <Button
+                  key={key}
+                  size="sm"
+                  variant={filter === key ? "default" : "ghost"}
+                  onClick={() => setFilter(key)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <Input
+            placeholder="Buscar conversa..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <div className="flex-1 space-y-1 overflow-y-auto p-2">
+          {loadingConversations ? (
+            <div className="space-y-2 p-2">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">
+              {conversations.length === 0
+                ? "Nenhuma conversa ainda. Quando alguém mandar mensagem, aparece aqui."
+                : "Nada encontrado."}
+            </p>
+          ) : (
+            filtered.map((c) => (
+              <ConversationItem
+                key={c.id}
+                conv={c}
+                selected={c.id === selectedId}
+                onSelect={handleSelect}
+              />
+            ))
+          )}
+        </div>
+      </aside>
+
+      {/* Right: thread */}
+      <section className="flex min-w-0 flex-1 flex-col">
+        {!selected ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
+            {!instance && (
+              <>
+                <p className="text-sm">
+                  Nenhuma instância do WhatsApp configurada.
+                </p>
+                {profile?.role === "admin" ? (
+                  <p className="text-sm">
+                    Vá em <b>Configurações → WhatsApp</b> para criar e parear.
+                  </p>
+                ) : (
+                  <p className="text-sm">Peça ao admin para configurar o WhatsApp.</p>
+                )}
+              </>
+            )}
+            {instance && (
+              <p className="text-sm">Selecione uma conversa para começar.</p>
+            )}
+          </div>
+        ) : (
+          <>
+            <header className="flex h-16 shrink-0 items-center justify-between border-b px-4">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{contactName}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {selected.contact ? formatPhone(selected.contact.phone) : ""}
+                  {" · "}
+                  {instance
+                    ? instance.status === "connected"
+                      ? "conectado"
+                      : "WhatsApp desconectado"
+                    : "sem instância"}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {selected.assigned_to === user?.id ? (
+                  <Badge variant="secondary">Atribuída a você</Badge>
+                ) : selected.assigned_to ? (
+                  <Badge variant="outline">
+                    {selected.assignee?.full_name ?? "Atribuída"}
+                  </Badge>
+                ) : (
+                  <Badge variant="outline">Não atribuída</Badge>
+                )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm">
+                      <UserPlus className="mr-1 h-4 w-4" /> Atribuir
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel>Atribuir conversa</DropdownMenuLabel>
+                    <DropdownMenuItem onClick={() => handleAssign(selected, user?.id ?? null)}>
+                      A mim
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    {profiles
+                      .filter((p) => p.id !== user?.id)
+                      .map((p) => (
+                        <DropdownMenuItem
+                          key={p.id}
+                          onClick={() => handleAssign(selected, p.id)}
+                        >
+                          {p.full_name ?? p.id.slice(0, 8)}
+                        </DropdownMenuItem>
+                      ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleToggleStatus(selected)}
+                >
+                  {selected.status === "open" ? "Fechar" : "Reabrir"}
+                </Button>
+              </div>
+            </header>
+
+            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+              {groupedMessages.length === 0 ? (
+                <p className="pt-10 text-center text-sm text-muted-foreground">
+                  Sem mensagens nesta conversa.
+                </p>
+              ) : (
+                groupedMessages.map((group) => (
+                  <div key={group.day} className="space-y-3">
+                    <div className="flex justify-center">
+                      <span className="rounded-full bg-muted px-3 py-0.5 text-xs text-muted-foreground">
+                        {formatDayLabel(group.day)}
+                      </span>
+                    </div>
+                    {group.items.map((msg) => (
+                      <MessageBubble key={msg.id} msg={msg} />
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+
+            <form
+              onSubmit={handleSend}
+              className="flex shrink-0 items-end gap-2 border-t p-3"
+            >
+              {pendingFile && (
+                <div className="flex max-w-60 items-center gap-2 rounded-md border bg-muted/50 px-2 py-1 text-xs">
+                  <Paperclip className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{pendingFile.file.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingFile(null)
+                      if (fileInputRef.current) fileInputRef.current.value = ""
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) setPendingFile({ file })
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => fileInputRef.current?.click()}
+                title="Anexar"
+              >
+                <Paperclip className="h-5 w-5" />
+              </Button>
+              <Input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder={pendingFile ? "Legenda (opcional)..." : "Digite uma mensagem..."}
+                className="flex-1"
+              />
+              <Button
+                type="submit"
+                size="icon"
+                disabled={sending || (!text.trim() && !pendingFile)}
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            </form>
+          </>
+        )}
+      </section>
+    </div>
+  )
+}
