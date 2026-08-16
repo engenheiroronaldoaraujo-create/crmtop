@@ -23,7 +23,17 @@ export function formatPhone(phone: string): string {
       return `+${n.slice(0, 2)} (${n.slice(2, 4)}) ${n.slice(4, 9)}-${n.slice(9)}`
     }
     if (n.length === 12 && n.startsWith("55")) {
-      return `+${n.slice(0, 2)} (${n.slice(2, 4)}) ${n.slice(4, 8)}-${n.slice(8)}`
+      // 55 + DDD + 8 digits: routing JID of pre-ninth-digit Brazilian numbers.
+      // Insert the 9th digit only for mobile ranges (6–9); landlines (2–5) keep
+      // their 8 digits. Display-only — the stored value is never changed.
+      const ddd = n.slice(2, 4)
+      const num = n.slice(4) // 8 digits
+      const first = num[0]
+      if (first === "6" || first === "7" || first === "8" || first === "9") {
+        const mobile = "9" + num // 9 digits
+        return `+55 (${ddd}) ${mobile.slice(0, 5)}-${mobile.slice(5)}`
+      }
+      return `+55 (${ddd}) ${num.slice(0, 4)}-${num.slice(4)}`
     }
     return `+${n}`
   }
