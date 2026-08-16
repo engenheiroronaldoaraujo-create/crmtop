@@ -13,16 +13,24 @@ export function isRealPhone(phone: string | null | undefined): phone is string {
 // country code (10/11 digits, common in the WhatsApp contact list) are assumed
 // Brazilian and shown with +55. Display-only: the stored value is untouched.
 export function formatPhone(phone: string): string {
-  if (!isRealPhone(phone)) return phone
-  let d = phone.replace(/\D/g, "")
-  if (d.length === 10 || d.length === 11) d = "55" + d
-  if (d.length === 13 && d.startsWith("55")) {
-    return `+${d.slice(0, 2)} (${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`
+  if (!phone) return phone
+  const d = phone.replace(/\D/g, "")
+  // Canonical 10–13 digit phones (with or without the 55 country code).
+  if (/^\d{10,13}$/.test(d)) {
+    let n = d
+    if (n.length === 10 || n.length === 11) n = "55" + n
+    if (n.length === 13 && n.startsWith("55")) {
+      return `+${n.slice(0, 2)} (${n.slice(2, 4)}) ${n.slice(4, 9)}-${n.slice(9)}`
+    }
+    if (n.length === 12 && n.startsWith("55")) {
+      return `+${n.slice(0, 2)} (${n.slice(2, 4)}) ${n.slice(4, 8)}-${n.slice(8)}`
+    }
+    return `+${n}`
   }
-  if (d.length === 12 && d.startsWith("55")) {
-    return `+${d.slice(0, 2)} (${d.slice(2, 4)}) ${d.slice(4, 8)}-${d.slice(8)}`
-  }
-  return `+${d}`
+  // A long digit string (e.g. a stray LID or un-normalized value) must never be
+  // shown raw — present it as a best-effort Brazilian phone instead.
+  if (d.length >= 10) return formatLidAsPhone(phone) ?? phone
+  return phone
 }
 
 export function formatTime(iso: string): string {
