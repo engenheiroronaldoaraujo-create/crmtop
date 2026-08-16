@@ -47,17 +47,64 @@ function stripNumberSuffix(jid: string): string {
   return (jid.split("@")[0] ?? "").replace(/[^\d]/g, "");
 }
 
-// CANONICAL phone rule (single source of truth). LIDs have 14–16 digits and
-// must NEVER be treated as phones.
-//   - 10/11 digits -> "55" + digits (national, missing country code)
-//   - 12/13 digits -> digits (E.164 BR with country code)
-//   - anything else -> null (14+ is LID, <10 is garbage)
+// CANONICAL Brazilian phone validation — v2 (plano de numeração ANATEL).
+// v1 only checked length (10–13 digits), which let 13-digit LIDs through as
+// phones (e.g. DDDs 36/70 which don't exist, or a 13-digit number whose
+// subscriber doesn't start with 9). v2 requires semantic validity.
+//   Valid DDDs (closed list): 11-19, 21, 22, 24, 27, 28, 31-35, 37, 38,
+//     41-49, 51, 53, 54, 55, 61-69, 71, 73, 74, 75, 77, 79, 81-89, 91-99
+//   - 10/11 digits (no DDI): DDD valid; 11-digit subscriber starts with 9,
+//     10-digit subscriber starts with 2-9 -> "55"+digits.
+//   - 12 digits: ^55 + valid DDD + [2-9]\d{7}$  (landlines & legacy mobiles).
+//   - 13 digits: ^55 + valid DDD + 9\d{8}$      (mobile).
+//   - any other length, or failed check -> null.
+const VALID_BR_DDDS = new Set<number>([
+  11, 12, 13, 14, 15, 16, 17, 18, 19,
+  21, 22, 24, 27, 28,
+  31, 32, 33, 34, 35, 37, 38,
+  41, 42, 43, 44, 45, 46, 47, 48, 49,
+  51, 53, 54, 55,
+  61, 62, 63, 64, 65, 66, 67, 68, 69,
+  71, 73, 74, 75, 77, 79,
+  81, 82, 83, 84, 85, 86, 87, 88, 89,
+  91, 92, 93, 94, 95, 96, 97, 98, 99,
+]);
+
+// Returns true iff `digits` (only digits, with or without the 55 prefix) is a
+// structurally valid Brazilian phone under the v2 rule.
+function isValidBrPhone(digits: string): boolean {
+  if (digits.length === 10 || digits.length === 11) {
+    const ddd = Number(digits.slice(0, 2));
+    if (!VALID_BR_DDDS.has(ddd)) return false;
+    const sub = digits.slice(2);
+    if (digits.length === 11) return sub[0] === "9"; // mobile
+    return /^[2-9]/.test(sub); // landline / legacy mobile
+  }
+  if (digits.length === 12) {
+    if (!digits.startsWith("55")) return false;
+    const ddd = Number(digits.slice(2, 4));
+    if (!VALID_BR_DDDS.has(ddd)) return false;
+    return /^[2-9]\d{7}$/.test(digits.slice(4));
+  }
+  if (digits.length === 13) {
+    if (!digits.startsWith("55")) return false;
+    const ddd = Number(digits.slice(2, 4));
+    if (!VALID_BR_DDDS.has(ddd)) return false;
+    return /^9\d{8}$/.test(digits.slice(4));
+  }
+  return false;
+}
+
+// Returns the canonical phone ("55" + 12/13 digits) or null. A null return
+// means the value is NOT a valid BR phone — callers treat it as a LID when the
+// digit length is >= 12, or as junk otherwise.
 function normalizePhoneStrict(input: string | null | undefined): string | null {
   if (!input) return null;
   const digits = input.replace(/[^\d]/g, "");
+  if (!isValidBrPhone(digits)) return null;
+  // Canonical form always carries the 55 country code.
   if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-  if (digits.length === 12 || digits.length === 13) return digits;
-  return null;
+  return digits; // 12/13 digits already include "55"
 }
 
 // Accepts @s.whatsapp.net (phone) and @lid (WhatsApp Linked Identity).
@@ -89,7 +136,7 @@ function resolveIdentity(
     const digits = stripNumberSuffix(jid);
     const phone = normalizePhoneStrict(digits);
     if (phone) return { phone, lid: null };
-    if (digits.length >= 14) return { phone: null, lid: `lid:${digits}` };
+    if (digits.length >= 12) return { phone: null, lid: `lid:${digits}` };
     return { phone: null, lid: null };
   }
 
@@ -511,7 +558,7 @@ async function handleContacts(
     if (jid.endsWith("@s.whatsapp.net")) {
       const digits = stripNumberSuffix(jid);
       phone = normalizePhoneStrict(digits);
-      if (!phone && digits.length >= 14) lid = `lid:${digits}`;
+      if (!phone && digits.length >= 12) lid = `lid:${digits}`;
     } else if (jid.endsWith("@lid")) {
       const digits = stripNumberSuffix(jid);
       lid = digits.length >= 8 ? `lid:${digits}` : null;
