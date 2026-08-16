@@ -602,7 +602,9 @@ async function actionSyncContacts(
     } else {
       withLid += 1;
       // `number` (when present) may carry the real phone for LID contacts.
-      const phone = c.number ? c.number.replace(/[^\d]/g, "") : null;
+      // MUST normalize via normalizePhoneStrict — raw digits can be a LID
+      // (14+ digits) which must NEVER be stored in the phone column.
+      const phone = normalizePhoneStrict(c.number);
       if (!lidRowsMap.has(key)) {
         lidRowsMap.set(key, {
           lid: key,
@@ -637,21 +639,41 @@ async function actionSyncContacts(
     imported += chunk.length;
   }
 
-  // Backfill display names from the chat list: for 1:1 chats the chat-level
-  // pushName IS the contact's real name (LID chats included). One fast call.
+  // Backfill display names AND phones from the chat list. The findChats response
+  // carries both pushName and lastMessage.key.remoteJidAlt (the real phone).
+  // Falls back to the chat-level pushName for LID contacts with no lastMessage
+  // — so a name is captured even when we never resolved a phone.
   let named = 0;
   try {
     const { res, data } = await callEvolution(`/chat/findChats/${instance_name}`, { method: "POST", body: {} });
     if (res.ok && Array.isArray(data)) {
-      const namePhoneRows: Array<{ phone: string; push_name: string }> = [];
+      const namePhoneRows: Array<{ phone: string; push_name: string; jid: string }> = [];
       const nameLidRows: Array<{ lid: string; push_name: string }> = [];
       for (const chat of data) {
         if (chat.isGroup) continue;
-        const key = historyPhone(chat.remoteJid ?? "");
-        const name = (chat.pushName ?? chat.lastMessage?.pushName ?? "").trim();
-        if (!key || !name || name.toLowerCase() === "você") continue;
-        if (!key.startsWith("lid:")) namePhoneRows.push({ phone: key, push_name: name });
-        else nameLidRows.push({ lid: key, push_name: name });
+        const jid = chat.remoteJid ?? "";
+        const pushName = (chat.pushName ?? chat.lastMessage?.pushName ?? "").trim();
+        if (!pushName || pushName.toLowerCase() === "você") continue;
+        // Skip names that are just the contact's own identifier digits.
+        const lidDigits = jid.endsWith("@lid") ? jid.split("@")[0].replace(/[^\d]/g, "") : "";
+        if (lidDigits && pushName === lidDigits) continue;
+
+        // Extract the real phone from the last message's remoteJidAlt.
+        const lastMsgAlt = chat.lastMessage?.key?.remoteJidAlt ?? null;
+        let phone: string | null = null;
+        if (lastMsgAlt) {
+          const clean = lastMsgAlt.endsWith("@s.whatsapp.net")
+            ? lastMsgAlt.split("@")[0]
+            : lastMsgAlt;
+          phone = normalizePhoneStrict(clean);
+        }
+
+        if (phone) {
+          namePhoneRows.push({ phone, push_name: pushName, jid });
+        } else if (jid.endsWith("@lid")) {
+          nameLidRows.push({ lid: `lid:${lidDigits}`, push_name: pushName });
+        }
+        // A chat with neither phone nor LID (e.g. @g.us already filtered) is skipped.
       }
       for (let i = 0; i < namePhoneRows.length; i += 200) {
         const chunk = namePhoneRows.slice(i, i + 200);
@@ -665,7 +687,7 @@ async function actionSyncContacts(
       }
     }
   } catch (err) {
-    console.error("syncContacts name backfill error", err);
+    console.error("syncContacts name/phone backfill error", err);
   }
 
   return jsonResponse(200, { ok: true, total: contacts.length, withPhone, withLid, imported, named });
@@ -1196,6 +1218,25 @@ async function actionLinkConversationPhone(
   return jsonResponse(200, { ok: true, merged: false, phone, contact_id: contact.id });
 }
 
+// TEMP: dump findChats structure to inspect lastMessage fields.
+async function actionDebugChats(
+  supabase: Supabase,
+  body: { instance_id?: string; limit?: number },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const { res, data } = await callEvolution(`/chat/findChats/${instance_name}`, { method: "POST", body: {} });
+  if (!res.ok) return jsonResponse(500, { error: "findChats failed" });
+  const list = Array.isArray(data) ? data : [];
+  const sample = list.slice(0, body.limit ?? 5).map((c: any) => ({
+    remoteJid: c.remoteJid,
+    pushName: c.pushName,
+    lastMessageKeys: Object.keys(c.lastMessage ?? {}),
+    lastMessageRemoteJidAlt: c.lastMessage?.key?.remoteJidAlt ?? null,
+    lastMessageRemoteJid: c.lastMessage?.key?.remoteJid ?? null,
+  }));
+  return jsonResponse(200, { total: list.length, sample });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -1326,6 +1367,10 @@ Deno.serve(async (req) => {
       case "link-conversation-phone": {
         await requireAdmin(user);
         return await actionLinkConversationPhone(supabase, body);
+      }
+      case "debug-chats": {
+        await requireAdmin(user);
+        return await actionDebugChats(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

@@ -488,6 +488,11 @@ async function handleMessages(
 // Ingest the contact list (`contacts.set`/`contacts.upsert`). The address book
 // is imported as CRM contacts; LID entries keep the LID and the real phone when
 // the server provides it (via `number` or a phone-based remoteJid).
+//
+// Evolution contact payloads look like { id, pushName, number, remoteJid } —
+// NOT a RawMessage — so we can't use resolveIdentity() here. We resolve phone
+// and lid directly: a phone-based remoteJid yields a phone; a LID remoteJid
+// yields a lid, and the real phone (when available) comes from `number`.
 async function handleContacts(
   supabase: Supabase,
   data:
@@ -499,12 +504,26 @@ async function handleContacts(
   let processed = 0;
   for (const contact of list) {
     const jid = contact.remoteJid ?? "";
-    const { phone, lid } = resolveIdentity(jid);
-    // `contact.number` may carry the real phone for LIDs — validate strictly.
-    const finalPhone = phone ?? normalizePhoneStrict(contact.number);
-    if (!finalPhone && !lid) continue;
+
+    let phone: string | null = null;
+    let lid: string | null = null;
+
+    if (jid.endsWith("@s.whatsapp.net")) {
+      const digits = stripNumberSuffix(jid);
+      phone = normalizePhoneStrict(digits);
+      if (!phone && digits.length >= 14) lid = `lid:${digits}`;
+    } else if (jid.endsWith("@lid")) {
+      const digits = stripNumberSuffix(jid);
+      lid = digits.length >= 8 ? `lid:${digits}` : null;
+      phone = normalizePhoneStrict(contact.number);
+    } else {
+      // No usable remoteJid — fall back to `number` for the phone.
+      phone = normalizePhoneStrict(contact.number);
+    }
+
+    if (!phone && !lid) continue;
     try {
-      await upsertContact(supabase, finalPhone, lid, contact.pushName ?? null, jid || null);
+      await upsertContact(supabase, phone, lid, contact.pushName ?? null, jid || null);
       processed += 1;
     } catch (err) {
       console.error("handleContacts upsert failed", err);
