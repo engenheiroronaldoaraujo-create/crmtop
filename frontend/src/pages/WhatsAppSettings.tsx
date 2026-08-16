@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { Cable, Download, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
+import { BookUser, Cable, Download, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
@@ -10,6 +10,7 @@ import {
   proxyGetStatus,
   proxyLogoutInstance,
   proxySetWebhook,
+  proxySyncContacts,
   proxySyncHistory,
 } from "@/lib/api"
 import type { WhatsAppInstance } from "@/lib/types"
@@ -58,6 +59,7 @@ export default function WhatsAppSettings() {
   const [deleting, setDeleting] = useState(false)
   const [settingWebhook, setSettingWebhook] = useState(false)
   const [syncingHistory, setSyncingHistory] = useState(false)
+  const [syncingContacts, setSyncingContacts] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -214,6 +216,20 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleSyncContacts() {
+    if (!instance) return
+    setSyncingContacts(true)
+    try {
+      const data = await proxySyncContacts(instance.id)
+      toast.success(`Contatos sincronizados (${data?.imported ?? 0} importados)`)
+      if (data?.message) console.info(data.message)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao sincronizar contatos")
+    } finally {
+      setSyncingContacts(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -334,6 +350,14 @@ export default function WhatsAppSettings() {
             >
               <Download className="mr-2 h-4 w-4" />
               {syncingHistory ? "Habilitando..." : "Sincronizar histórico"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleSyncContacts}
+              disabled={syncingContacts}
+            >
+              <BookUser className="mr-2 h-4 w-4" />
+              {syncingContacts ? "Sincronizando..." : "Sincronizar contatos"}
             </Button>
             <div className="flex items-center gap-2">
               <Button

@@ -11,6 +11,7 @@ const STORAGE_BUCKET = "whatsapp-media";
 const WEBHOOK_EVENTS = [
   "MESSAGES_UPSERT",
   "MESSAGES_SET",
+  "CONTACTS_SET",
   "CONTACTS_UPSERT",
   "CONNECTION_UPDATE",
 ];
@@ -467,6 +468,64 @@ async function actionSyncHistory(
   return jsonResponse(200, { ok: true, message: "syncFullHistory habilitado — reconecte a instância para puxar o histórico" });
 }
 
+// Pulls the full WhatsApp address book from Evolution and imports it as
+// contacts. Tries the v2 endpoint first, falls back to v1. The contact objects
+// on this server carry the phone in `remoteJid` (not `number`).
+async function actionSyncContacts(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+
+  let contacts: Array<{ id?: string; number?: string; remoteJid?: string; pushName?: string; isGroup?: boolean }> = [];
+  const attempts: Array<() => Promise<{ res: Response; data: any; text: string }>> = [
+    () => callEvolution(`/chat/findContacts/${instance_name}`, { method: "POST", body: {} }),
+    () => callEvolution(`/contact/findContacts/${instance_name}`, { method: "GET" }),
+  ];
+  for (const attempt of attempts) {
+    const { res, data, text } = await attempt();
+    if (res.ok) {
+      const list = Array.isArray(data) ? data : (data?.contacts ?? data?.data);
+      if (Array.isArray(list)) {
+        contacts = list;
+        break;
+      }
+    } else {
+      console.error("syncContacts attempt failed", text.slice(0, 300));
+    }
+  }
+
+  if (contacts.length === 0) {
+    return jsonResponse(400, { error: "falha ao buscar a lista de contatos da Evolution" });
+  }
+
+  // Bulk upsert by phone (idempotent, fast). Only sets push_name when present
+  // so existing rows keep their manual `name` and `source`.
+  const rows: Array<{ phone: string; push_name?: string | null }> = [];
+  let withPhone = 0;
+  for (const c of contacts) {
+    const jid = c.remoteJid ?? "";
+    if (!jid.endsWith("@s.whatsapp.net")) continue;
+    const phone = jid.split("@")[0].replace(/[^\d]/g, "");
+    if (phone.length < 10) continue;
+    withPhone += 1;
+    rows.push({ phone, ...(c.pushName ? { push_name: c.pushName } : {}) });
+  }
+
+  const CHUNK = 500;
+  let imported = 0;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
+    if (error) {
+      console.error("syncContacts bulk upsert failed", error.message);
+      return jsonResponse(500, { error: `falha ao gravar contatos: ${error.message}` });
+    }
+    imported += chunk.length;
+  }
+  return jsonResponse(200, { ok: true, total: contacts.length, withPhone, imported });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -581,6 +640,10 @@ Deno.serve(async (req) => {
       case "sync-history": {
         await requireAdmin(user);
         return await actionSyncHistory(supabase, body);
+      }
+      case "sync-contacts": {
+        await requireAdmin(user);
+        return await actionSyncContacts(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

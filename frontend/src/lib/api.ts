@@ -123,3 +123,7 @@ export function proxySetWebhook(instance_id: string) {
 export function proxySyncHistory(instance_id: string) {
   return postJson("evolution-proxy", { action: "sync-history", instance_id })
 }
+
+export function proxySyncContacts(instance_id: string) {
+  return postJson("evolution-proxy", { action: "sync-contacts", instance_id })
+}

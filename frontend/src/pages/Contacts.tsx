@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { Pencil, Plus, Search, Trash2, MessageCircle } from "lucide-react"
 import { toast } from "sonner"
@@ -50,43 +50,57 @@ export default function ContactsPage() {
   const navigate = useNavigate()
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
-  const [query, setQuery] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<ContactForm>(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [total, setTotal] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   const isAdmin = profile?.role === "admin"
+  const PAGE_SIZE = 100
 
-  async function loadContacts() {
-    setLoading(true)
-    const { data, error } = await supabase
+  async function fetchContacts(reset: boolean) {
+    if (reset) setLoading(true)
+    else setLoadingMore(true)
+    const offset = reset ? 0 : contacts.length
+    let builder = supabase
       .from("contacts")
-      .select("*")
+      .select("*", { count: "exact" })
+    const q = queryValue.trim()
+    if (q) {
+      builder = builder.or(
+        `name.ilike.%${q}%,push_name.ilike.%${q}%,phone.ilike.%${q}%`,
+      )
+    }
+    const { data, error, count } = await builder
       .order("updated_at", { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1)
     if (error) {
       toast.error(error.message)
     } else {
-      setContacts((data as Contact[]) ?? [])
+      setContacts(
+        reset ? ((data as Contact[]) ?? []) : [...contacts, ...((data as Contact[]) ?? [])],
+      )
+      setTotal(count ?? 0)
     }
     setLoading(false)
+    setLoadingMore(false)
   }
 
+  // Debounced server-side search.
+  const [queryValue, setQueryValue] = useState("")
   useEffect(() => {
-    loadContacts()
-  }, [])
+    const t = window.setTimeout(() => fetchContacts(true), 350)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryValue])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return contacts
-    return contacts.filter(
-      (c) =>
-        (c.name?.toLowerCase().includes(q) ?? false) ||
-        (c.push_name?.toLowerCase().includes(q) ?? false) ||
-        c.phone.includes(q),
-    )
-  }, [contacts, query])
+  useEffect(() => {
+    fetchContacts(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function openCreate() {
     setEditingId(null)
@@ -137,7 +151,7 @@ export default function ContactsPage() {
     }
     toast.success(editingId ? "Contato atualizado" : "Contato criado")
     setDialogOpen(false)
-    loadContacts()
+    fetchContacts(true)
   }
 
   async function handleDelete(contact: Contact) {
@@ -150,7 +164,7 @@ export default function ContactsPage() {
       return
     }
     toast.success("Contato excluído")
-    loadContacts()
+    fetchContacts(true)
   }
 
   function openChat(contact: Contact) {
@@ -172,8 +186,8 @@ export default function ContactsPage() {
           <Input
             className="pl-9"
             placeholder="Buscar por nome ou telefone..."
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            value={queryValue}
+            onChange={(e) => setQueryValue(e.target.value)}
           />
         </div>
       </div>
@@ -181,9 +195,9 @@ export default function ContactsPage() {
       <div className="flex-1 overflow-auto p-6">
         {loading ? (
           <p className="text-muted-foreground">Carregando...</p>
-        ) : filtered.length === 0 ? (
+        ) : contacts.length === 0 ? (
           <p className="text-muted-foreground">
-            {query ? "Nenhum contato encontrado." : "Nenhum contato ainda."}
+            {queryValue ? "Nenhum contato encontrado." : "Nenhum contato ainda."}
           </p>
         ) : (
           <Table>
@@ -197,7 +211,7 @@ export default function ContactsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((c) => (
+              {contacts.map((c) => (
                 <TableRow key={c.id}>
                   <TableCell className="font-medium">
                     {c.name || c.push_name || "—"}
@@ -253,6 +267,13 @@ export default function ContactsPage() {
               ))}
             </TableBody>
           </Table>
+        )}
+        {!loading && contacts.length > 0 && contacts.length < total && (
+          <div className="flex justify-center pt-4">
+            <Button variant="outline" onClick={() => fetchContacts(false)} disabled={loadingMore}>
+              {loadingMore ? "Carregando..." : `Carregar mais (${contacts.length} de ${total})`}
+            </Button>
+          </div>
         )}
       </div>
 

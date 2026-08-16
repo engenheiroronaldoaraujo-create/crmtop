@@ -373,18 +373,20 @@ async function handleMessages(
   return jsonResponse(200, { ok: true, processed: list.length });
 }
 
-// Enrich contacts seen in message activity (`contacts.upsert`). The bulk
-// `contacts.set` (full WhatsApp address book) is intentionally NOT ingested —
-// contacts only enter the CRM when they have message activity.
+// Ingest the contact list (`contacts.set` on connect, `contacts.upsert` on
+// updates). The full WhatsApp address book is imported as CRM contacts; the
+// 60-day window applies only to messages, not to contacts. The contact objects
+// on this server carry the phone in `remoteJid`.
 async function handleContacts(
   supabase: Supabase,
-  data: Array<{ id?: string; pushName?: string; number?: string }> | { id?: string; pushName?: string; number?: string } | null,
+  data: Array<{ id?: string; pushName?: string; number?: string; remoteJid?: string }> | { id?: string; pushName?: string; number?: string; remoteJid?: string } | null,
 ): Promise<Response> {
   const list = Array.isArray(data) ? data : data ? [data] : [];
   let processed = 0;
   for (const contact of list) {
-    const phone = (contact.number ?? "").replace(/[^\d]/g, "") ||
-      (contact.id ?? "").split("@")[0].replace(/[^\d]/g, "");
+    const jid = contact.remoteJid ?? "";
+    if (!jid.endsWith("@s.whatsapp.net")) continue;
+    const phone = jid.split("@")[0].replace(/[^\d]/g, "");
     if (phone.length < 10) continue;
     try {
       await upsertContact(supabase, phone, contact.pushName ?? null);
@@ -422,6 +424,7 @@ Deno.serve(async (req) => {
       case "messages.upsert":
       case "messages.set":
         return await handleMessages(supabase, instanceName, payload.data);
+      case "contacts.set":
       case "contacts.upsert":
         return await handleContacts(supabase, payload.data);
       default:
