@@ -72,5 +72,5 @@ export function contactDisplayName(c: {
 }): string {
   const n = c.name || c.push_name
   if (n) return n
-  return isRealPhone(c.phone) ? c.phone : "Contato WhatsApp"
+  return isRealPhone(c.phone) ? formatPhone(c.phone) : "Contato WhatsApp"
 }
