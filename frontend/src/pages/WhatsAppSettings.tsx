@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { BookUser, Cable, Download, LogOut, MessagesSquare, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
+import { BookUser, Cable, Download, LogOut, MessagesSquare, Plus, QrCode, RefreshCw, Trash2, UserRound } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
@@ -13,6 +13,7 @@ import {
   proxySyncContacts,
   proxySyncHistory,
   proxySyncMessages,
+  proxySyncNames,
 } from "@/lib/api"
 import type { WhatsAppInstance } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -62,6 +63,7 @@ export default function WhatsAppSettings() {
   const [syncingHistory, setSyncingHistory] = useState(false)
   const [syncingContacts, setSyncingContacts] = useState(false)
   const [syncingMessages, setSyncingMessages] = useState(false)
+  const [syncingNames, setSyncingNames] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -247,6 +249,21 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleSyncNames() {
+    if (!instance) return
+    setSyncingNames(true)
+    try {
+      const data = await proxySyncNames(instance.id)
+      const done = data?.done ? "Concluído" : `continua (página ${data?.page ?? "?"})`
+      toast.success(`Sincronização de nomes: ${done}`)
+      if (data?.message) console.info(data.message)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao sincronizar nomes")
+    } finally {
+      setSyncingNames(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -383,6 +400,14 @@ export default function WhatsAppSettings() {
             >
               <MessagesSquare className="mr-2 h-4 w-4" />
               {syncingMessages ? "Sincronizando..." : "Sincronizar mensagens"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleSyncNames}
+              disabled={syncingNames}
+            >
+              <UserRound className="mr-2 h-4 w-4" />
+              {syncingNames ? "Sincronizando..." : "Sincronizar nomes"}
             </Button>
             <div className="flex items-center gap-2">
               <Button

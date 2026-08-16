@@ -761,7 +761,7 @@ async function actionSyncMessages(
 // inbound message carries the sender's name. Resumable via whatsapp_instances.sync_page.
 async function actionSyncNames(
   supabase: Supabase,
-  body: { instance_id?: string; max_pages?: number },
+  body: { instance_id?: string; max_pages?: number; reset?: boolean },
 ): Promise<Response> {
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
   const instance_id = body.instance_id ?? "";
@@ -771,7 +771,7 @@ async function actionSyncNames(
     .select("sync_page")
     .eq("id", instance_id)
     .single();
-  let page = (inst?.sync_page ?? 0) + 1;
+  let page = body.reset ? 1 : (inst?.sync_page ?? 0) + 1;
   const BUDGET = Math.min(body.max_pages ?? 500, 60);
   const pageCap = page + BUDGET;
 
