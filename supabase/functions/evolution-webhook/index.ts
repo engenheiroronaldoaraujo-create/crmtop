@@ -251,6 +251,15 @@ async function processMessage(
   const { type, content, mediaMessage } = mapMessageType(raw);
   const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
   const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
+
+  // Business rule: keep only the last 60 days of history. WhatsApp's sync sends
+  // whatever it has (often arbitrary dates) — we filter it out here so the inbox
+  // stays a clean 60-day window.
+  const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
+  if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
+    return;
+  }
+
   const preview = type === "text"
     ? content.slice(0, 140)
     : content.slice(0, 140) || `[${type}]`;
@@ -364,8 +373,9 @@ async function handleMessages(
   return jsonResponse(200, { ok: true, processed: list.length });
 }
 
-// Ingest the contact list emitted on connect (`contacts.set`) and on contact
-// updates (`contacts.upsert`). Data items: { id, pushName, number, ... }.
+// Enrich contacts seen in message activity (`contacts.upsert`). The bulk
+// `contacts.set` (full WhatsApp address book) is intentionally NOT ingested —
+// contacts only enter the CRM when they have message activity.
 async function handleContacts(
   supabase: Supabase,
   data: Array<{ id?: string; pushName?: string; number?: string }> | { id?: string; pushName?: string; number?: string } | null,
@@ -412,7 +422,6 @@ Deno.serve(async (req) => {
       case "messages.upsert":
       case "messages.set":
         return await handleMessages(supabase, instanceName, payload.data);
-      case "contacts.set":
       case "contacts.upsert":
         return await handleContacts(supabase, payload.data);
       default:

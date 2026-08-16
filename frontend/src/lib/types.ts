@@ -15,6 +15,7 @@ export type Contact = {
   email: string | null
   notes: string | null
   opted_out: boolean
+  source: "whatsapp" | "manual"
   created_at: string
   updated_at: string
 }

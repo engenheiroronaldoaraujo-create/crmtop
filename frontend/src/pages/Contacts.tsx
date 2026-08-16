@@ -120,6 +120,7 @@ export default function ContactsPage() {
       email: form.email || null,
       notes: form.notes || null,
       opted_out: form.opted_out,
+      source: "manual",
     }
     let error: { message: string } | null = null
     if (editingId) {
