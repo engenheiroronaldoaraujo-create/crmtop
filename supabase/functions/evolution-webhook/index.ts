@@ -28,6 +28,10 @@ interface RawMessage {
     senderPn?: string;
     remoteJidAlt?: string;
   };
+  // Alguns servidores Evolution/versões colocam esses campos no nível raiz do
+  // item, fora do `key` — lemos dos dois lugares.
+  senderPn?: string;
+  remoteJidAlt?: string;
   pushName?: string;
   message?: Record<string, unknown>;
   messageType?: string;
@@ -195,10 +199,11 @@ async function processMessage(
   if (!isRelevantJid(jid)) return;
 
   // EVOLUTION_IDENTITY_RESOLVED — a camada central decide phone/LID.
+  // Lê remoteJidAlt/senderPn tanto no `key` quanto no nível raiz do item.
   const identity = normalizeWhatsAppIdentity({
     remoteJid: jid,
-    remoteJidAlt: raw.key?.remoteJidAlt,
-    senderPn: raw.key?.senderPn,
+    remoteJidAlt: raw.key?.remoteJidAlt ?? raw.remoteJidAlt,
+    senderPn: raw.key?.senderPn ?? raw.senderPn,
   });
   const { phone, lid } = identity;
   if (!phone && !lid) {
@@ -206,6 +211,24 @@ async function processMessage(
     return;
   }
   if (identity.isLid) console.info("EVOLUTION_LID_DETECTED", identity.lid, phone ? `phone=${phone}` : "sem phone");
+
+  // Diagnóstico temporário: guarda o key bruto dos LIDs para conferir onde a
+  // Evolution envia o telefone alternativo. Best effort (nunca quebra o fluxo).
+  if (identity.isLid) {
+    await supabase
+      .from("webhook_lid_log")
+      .upsert(
+        {
+          instance_name: instanceName,
+          message_id: raw.key?.id ?? null,
+          key: raw.key ?? null,
+          push_name: raw.pushName ?? null,
+          resolved_phone: Boolean(phone),
+        },
+        { onConflict: "instance_name,message_id", ignoreDuplicates: true },
+      )
+      .then(() => {}, () => {});
+  }
 
   const fromMe = Boolean(raw.key?.fromMe);
   const evolutionId = raw.key?.id ?? null;

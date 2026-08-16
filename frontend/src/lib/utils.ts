@@ -52,6 +52,18 @@ export function isRealPhone(phone: string | null | undefined): phone is string {
   return typeof phone === "string" && isValidBrPhone(phone.replace(/\D/g, ""))
 }
 
+// Extrai o número embutido de um JID @s.whatsapp.net (telefone do WhatsApp,
+// BR ou internacional). NUNCA deriva número de @lid (LID é identificador, não
+// telefone). JIDs @s.whatsapp.net com 14+ dígitos são LIDs embrulhados e são
+// rejeitados.
+export function phoneFromJid(jid: string | null | undefined): string | null {
+  if (!jid) return null
+  if (!jid.endsWith("@s.whatsapp.net")) return null
+  const digits = jid.split("@")[0].replace(/\D/g, "")
+  if (digits.length >= 10 && digits.length <= 13) return digits
+  return null
+}
+
 // Displays phone numbers in Brazilian E.164 format. Numbers stored without the
 // country code (10/11 digits, common in the WhatsApp contact list) are assumed
 // Brazilian and shown with +55. Display-only: the stored value is untouched.
@@ -128,13 +140,14 @@ export function contactDisplayName(c: {
   name?: string | null
   push_name?: string | null
   phone?: string | null
-  lid?: string | null
+  jid?: string | null
 }): string {
   const n = c.name || c.push_name
   if (n) return n
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
-  // Um LID é um identificador WhatsApp, NÃO um telefone. Sem um telefone real
-  // registrado, não derivamos um número falso a partir do LID — o contato é
-  // identificado como "sem número" até que o telefone real seja backfillado.
+  // JID @s.whatsapp.net carrega o número (BR ou internacional) embutido.
+  const jidPhone = phoneFromJid(c.jid)
+  if (jidPhone) return `+${jidPhone}`
+  // LID é identificador WhatsApp, não telefone — nunca derivar número.
   return "Contato sem número"
 }

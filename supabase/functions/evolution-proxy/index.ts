@@ -790,15 +790,19 @@ async function mergeLidIntoPhone(
 
 // Resolve { phone, lid } from a message key. LID JIDs carry the real phone in
 // `remoteJidAlt` / `senderPn`. LIDs (14+ digits) are never accepted as phones.
-function resolveKeyIdentity(key: {
-  remoteJid?: string;
-  senderPn?: string;
-  remoteJidAlt?: string;
-}): { phone: string | null; lid: string | null } {
+// `extra` cobre servidores que enviam esses campos no nível raiz do item.
+function resolveKeyIdentity(
+  key: {
+    remoteJid?: string;
+    senderPn?: string;
+    remoteJidAlt?: string;
+  },
+  extra?: { senderPn?: string; remoteJidAlt?: string },
+): { phone: string | null; lid: string | null } {
   const identity = normalizeWhatsAppIdentity({
     remoteJid: key?.remoteJid,
-    remoteJidAlt: key?.remoteJidAlt,
-    senderPn: key?.senderPn,
+    remoteJidAlt: key?.remoteJidAlt ?? extra?.remoteJidAlt,
+    senderPn: key?.senderPn ?? extra?.senderPn,
   });
   return { phone: identity.phone, lid: identity.lid };
 }
@@ -850,11 +854,14 @@ async function actionSyncMessages(
     const phoneContactMap = new Map<string, { phone: string; push_name?: string | null; jid?: string | null }>();
     const lidContactMap = new Map<string, { lid: string; phone?: string | null; push_name?: string | null; jid?: string | null }>();
     const pageRecords: any[] = [];
+    // Diagnóstico temporário (migration 025): LIDs sem phone resolvido nos
+    // últimos 7 dias, para ver o key bruto que a Evolution retorna.
+    const diagRows: Array<Record<string, unknown>> = [];
 
     let pageAllOld = true;
     for (const rec of records) {
       const jid = rec?.key?.remoteJid ?? "";
-      const { phone, lid } = resolveKeyIdentity(rec.key ?? {});
+      const { phone, lid } = resolveKeyIdentity(rec.key ?? {}, rec ?? {});
       const key = phone ?? lid;
       if (!key) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
@@ -862,6 +869,16 @@ async function actionSyncMessages(
       pageAllOld = false;
       const pushName = rec.pushName && !rec?.key?.fromMe ? String(rec.pushName) : undefined;
       if (lid) {
+        // Diagnóstico: registra LID sem phone (janela de 7 dias).
+        if (!phone && ts && ts * 1000 > Date.now() - 7 * 24 * 60 * 60 * 1000) {
+          diagRows.push({
+            instance_name: instance_name,
+            message_id: rec?.key?.id ?? null,
+            key: rec?.key ?? null,
+            push_name: rec?.pushName ?? null,
+            resolved_phone: false,
+          });
+        }
         // LID row (with the resolved phone when available) — so the existing
         // lid contact gets the phone backfilled instead of a new contact.
         if (!lidContactMap.has(lid)) {
@@ -969,7 +986,7 @@ async function actionSyncMessages(
     // Messages: build rows with conversation ids and bulk insert (dedup).
     const finalRows: any[] = [];
     for (const rec of pageRecords) {
-      const { phone, lid } = resolveKeyIdentity(rec.key ?? {});
+      const { phone, lid } = resolveKeyIdentity(rec.key ?? {}, rec ?? {});
       const key = lid ?? phone;
       const convId = key ? convByKey.get(key) : undefined;
       if (!convId) continue;
@@ -994,6 +1011,18 @@ async function actionSyncMessages(
       });
       if (error) return jsonResponse(500, { error: `messages upsert: ${error.message}` });
       importedMessages += chunk.length;
+    }
+
+    // Diagnóstico temporário (migration 025): grava os LIDs sem phone desta
+    // página. Best effort — falha aqui não interrompe o sync.
+    if (diagRows.length > 0) {
+      for (let i = 0; i < diagRows.length; i += 200) {
+        const chunk = diagRows.slice(i, i + 200);
+        await supabase
+          .from("webhook_lid_log")
+          .upsert(chunk, { onConflict: "instance_name,message_id", ignoreDuplicates: true })
+          .then(() => {}, () => {});
+      }
     }
 
     // Persist progress so a later invocation resumes here.
@@ -1071,7 +1100,7 @@ async function actionSyncNames(
       // Skip names that are just the contact's own identifier digits.
       if (name === key.replace(/^lid:/, "")) continue;
       if (!nameMap.has(key)) {
-        const { phone } = resolveKeyIdentity(rec.key ?? {});
+        const { phone } = resolveKeyIdentity(rec.key ?? {}, rec ?? {});
         nameMap.set(key, {
           push_name: name,
           lid: key.startsWith("lid:"),
