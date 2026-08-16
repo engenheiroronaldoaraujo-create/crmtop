@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { BookUser, Cable, Download, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
+import { BookUser, Cable, Download, LogOut, MessagesSquare, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
@@ -12,6 +12,7 @@ import {
   proxySetWebhook,
   proxySyncContacts,
   proxySyncHistory,
+  proxySyncMessages,
 } from "@/lib/api"
 import type { WhatsAppInstance } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -60,6 +61,7 @@ export default function WhatsAppSettings() {
   const [settingWebhook, setSettingWebhook] = useState(false)
   const [syncingHistory, setSyncingHistory] = useState(false)
   const [syncingContacts, setSyncingContacts] = useState(false)
+  const [syncingMessages, setSyncingMessages] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -230,6 +232,21 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleSyncMessages() {
+    if (!instance) return
+    setSyncingMessages(true)
+    try {
+      const data = await proxySyncMessages(instance.id)
+      const done = data?.done ? "Concluído" : `continua (página ${data?.page ?? "?"})`
+      toast.success(`Sincronização de mensagens: ${done}`)
+      if (data?.message) console.info(data.message)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao sincronizar mensagens")
+    } finally {
+      setSyncingMessages(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -358,6 +375,14 @@ export default function WhatsAppSettings() {
             >
               <BookUser className="mr-2 h-4 w-4" />
               {syncingContacts ? "Sincronizando..." : "Sincronizar contatos"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleSyncMessages}
+              disabled={syncingMessages}
+            >
+              <MessagesSquare className="mr-2 h-4 w-4" />
+              {syncingMessages ? "Sincronizando..." : "Sincronizar mensagens"}
             </Button>
             <div className="flex items-center gap-2">
               <Button

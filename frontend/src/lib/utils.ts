@@ -5,7 +5,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export function isRealPhone(phone: string | null | undefined): boolean {
+  return typeof phone === "string" && /^\d{10,15}$/.test(phone)
+}
+
 export function formatPhone(phone: string): string {
+  if (!isRealPhone(phone)) return phone
   const d = phone.replace(/\D/g, "")
   if (d.length === 13 && d.startsWith("55")) {
     return `+${d.slice(0, 2)} (${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`

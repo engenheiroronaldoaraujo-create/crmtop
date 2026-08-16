@@ -127,3 +127,7 @@ export function proxySyncHistory(instance_id: string) {
 export function proxySyncContacts(instance_id: string) {
   return postJson("evolution-proxy", { action: "sync-contacts", instance_id })
 }
+
+export function proxySyncMessages(instance_id: string) {
+  return postJson("evolution-proxy", { action: "sync-messages", instance_id })
+}

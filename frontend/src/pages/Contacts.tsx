@@ -4,7 +4,7 @@ import { Pencil, Plus, Search, Trash2, MessageCircle } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { formatPhone } from "@/lib/utils"
+import { formatPhone, isRealPhone } from "@/lib/utils"
 import type { Contact } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { Button } from "@/components/ui/button"
@@ -222,7 +222,7 @@ export default function ContactsPage() {
                     )}
                   </TableCell>
                   <TableCell className="font-mono text-xs">
-                    {formatPhone(c.phone)}
+                    {isRealPhone(c.phone) ? formatPhone(c.phone) : "—"}
                   </TableCell>
                   <TableCell>{c.email || "—"}</TableCell>
                   <TableCell>

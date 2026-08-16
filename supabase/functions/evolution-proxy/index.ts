@@ -1,4 +1,4 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+﻿import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -114,21 +114,25 @@ async function upsertContact(
   supabase: Supabase,
   phone: string,
   pushName: string | null,
+  jid: string | null = null,
 ): Promise<string> {
   const { data: existing } = await supabase
     .from("contacts")
-    .select("id, push_name")
+    .select("id, push_name, jid")
     .eq("phone", phone)
     .maybeSingle();
   if (existing) {
-    if (pushName && existing.push_name !== pushName) {
-      await supabase.from("contacts").update({ push_name: pushName }).eq("id", existing.id);
+    const patch: Record<string, unknown> = {};
+    if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
+    if (jid && !existing.jid) patch.jid = jid;
+    if (Object.keys(patch).length > 0) {
+      await supabase.from("contacts").update(patch).eq("id", existing.id);
     }
     return existing.id;
   }
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null })
+    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null, jid })
     .select("id")
     .single();
   if (error) {
@@ -465,7 +469,7 @@ async function actionSyncHistory(
   if (!res.ok) {
     return jsonResponse(res.status, { error: `syncFullHistory failed: ${text}` });
   }
-  return jsonResponse(200, { ok: true, message: "syncFullHistory habilitado — reconecte a instância para puxar o histórico" });
+  return jsonResponse(200, { ok: true, message: "syncFullHistory habilitado â€” reconecte a instÃ¢ncia para puxar o histÃ³rico" });
 }
 
 // Pulls the full WhatsApp address book from Evolution and imports it as
@@ -501,7 +505,7 @@ async function actionSyncContacts(
 
   // Bulk upsert by phone (idempotent, fast). Only sets push_name when present
   // so existing rows keep their manual `name` and `source`.
-  const rows: Array<{ phone: string; push_name?: string | null }> = [];
+  const rows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
   let withPhone = 0;
   for (const c of contacts) {
     const jid = c.remoteJid ?? "";
@@ -509,7 +513,7 @@ async function actionSyncContacts(
     const phone = jid.split("@")[0].replace(/[^\d]/g, "");
     if (phone.length < 10) continue;
     withPhone += 1;
-    rows.push({ phone, ...(c.pushName ? { push_name: c.pushName } : {}) });
+    rows.push({ phone, ...(c.pushName ? { push_name: c.pushName } : {}), jid: c.remoteJid ?? null });
   }
 
   const CHUNK = 500;
@@ -524,6 +528,196 @@ async function actionSyncContacts(
     imported += chunk.length;
   }
   return jsonResponse(200, { ok: true, total: contacts.length, withPhone, imported });
+}
+
+// Maps an Evolution message record to { type, content }. Mirrors the webhook's
+// mapping (media is stored without the file during bulk sync).
+function mapMessageRecord(rec: any): { type: string; content: string } {
+  const msg = rec.message ?? {};
+  const unwrap = (m: any): any => {
+    if (m?.ephemeralMessage?.message) return unwrap(m.ephemeralMessage.message);
+    if (m?.viewOnceMessage?.message) return unwrap(m.viewOnceMessage.message);
+    if (m?.documentWithCaptionMessage?.message) return unwrap(m.documentWithCaptionMessage.message);
+    return m;
+  };
+  const m = unwrap(msg);
+  if (m?.conversation !== undefined) return { type: "text", content: String(m.conversation ?? "") };
+  if (m?.extendedTextMessage) return { type: "text", content: String(m.extendedTextMessage.text ?? "") };
+  const mediaTypes: Record<string, string> = {
+    imageMessage: "image", audioMessage: "audio", videoMessage: "video",
+    documentMessage: "document", stickerMessage: "sticker",
+  };
+  for (const [key, type] of Object.entries(mediaTypes)) {
+    if (m?.[key]) {
+      const md = m[key];
+      const content = type === "document"
+        ? String(md.fileName ?? md.caption ?? "")
+        : String(md.caption ?? "");
+      return { type, content };
+    }
+  }
+  return { type: "unknown", content: "" };
+}
+
+function historyPhone(jid: string): string | null {
+  if (jid.endsWith("@s.whatsapp.net")) {
+    const d = jid.split("@")[0].replace(/[^\d]/g, "");
+    return d.length >= 10 ? d : null;
+  }
+  if (jid.endsWith("@lid")) {
+    const d = jid.split("@")[0].replace(/[^\d]/g, "");
+    return d.length >= 8 ? `lid:${d}` : null;
+  }
+  return null;
+}
+
+// Bulk-imports message history for an instance via POST /chat/findMessages
+// (50/page, newest first). Idempotent (dedup by evolution_message_id); only the
+// last 60 days are kept. Resumable: progress is stored in
+// whatsapp_instances.sync_page so repeated invocations continue instead of
+// restarting (each invocation is capped by the platform's ~150s timeout).
+async function actionSyncMessages(
+  supabase: Supabase,
+  body: { instance_id?: string; max_pages?: number },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const instance_id = body.instance_id ?? "";
+  const CUTOFF = Date.now() - 60 * 24 * 60 * 60 * 1000;
+
+  const { data: inst } = await supabase
+    .from("whatsapp_instances")
+    .select("sync_page")
+    .eq("id", instance_id)
+    .single();
+  let page = (inst?.sync_page ?? 0) + 1;
+  const BUDGET = Math.min(body.max_pages ?? 500, 40); // keep each run under the timeout
+  const pageCap = page + BUDGET;
+
+  let importedMessages = 0;
+  let newConversations = 0;
+  let done = false;
+  let pages = 0;
+
+  while (!done && page < pageCap) {
+    const { res, data, text } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+      method: "POST",
+      body: { page },
+    });
+    if (!res.ok) {
+      return jsonResponse(res.status, { error: `findMessages falhou (página ${page}): ${text.slice(0, 300)}` });
+    }
+    pages = data?.messages?.pages ?? 0;
+    const records = data?.messages?.records;
+    if (!Array.isArray(records) || records.length === 0) {
+      done = true;
+      break;
+    }
+
+    // Per-page bulk import: contacts, conversations, messages.
+    const contactRows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
+    const pageRecords: any[] = [];
+
+    let pageAllOld = true;
+    for (const rec of records) {
+      const jid = rec?.key?.remoteJid ?? "";
+      const phone = historyPhone(jid);
+      if (!phone) continue;
+      const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
+      if (ts && ts * 1000 < CUTOFF) continue; // keep only last 60 days
+      pageAllOld = false;
+      contactRows.push({ phone, ...(rec.pushName ? { push_name: String(rec.pushName) } : {}) , jid: rec?.key?.remoteJid ?? null });
+      pageRecords.push(rec);
+    }
+
+    if (pageAllOld) {
+      done = true;
+      break;
+    }
+
+    // Contacts: bulk create-or-ignore, then load phone -> id.
+    for (let i = 0; i < contactRows.length; i += 500) {
+      const chunk = contactRows.slice(i, i + 500);
+      const { error } = await supabase
+        .from("contacts")
+        .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true });
+      if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
+    }
+    const contactIds = new Map<string, string>();
+    {
+      const { data: existing } = await supabase
+        .from("contacts")
+        .select("phone,id")
+        .in("phone", contactRows.map((c) => c.phone));
+      for (const c of existing ?? []) contactIds.set(c.phone, c.id);
+    }
+
+    // Conversations: bulk create-or-ignore returning contact_id -> id.
+    const contactIdToPhone = new Map<string, string>();
+    for (const [phone, contactId] of contactIds) contactIdToPhone.set(contactId, phone);
+    const convRows = [...contactIds.entries()].map(([phone, contactId]) => ({ contact_id: contactId, instance_id }));
+    const convByContact = new Map<string, string>();
+    for (let i = 0; i < convRows.length; i += 200) {
+      const chunk = convRows.slice(i, i + 200);
+      const { data: convData, error } = await supabase
+        .from("conversations")
+        .upsert(chunk, { onConflict: "contact_id,instance_id", ignoreDuplicates: true })
+        .select("id,contact_id");
+      if (error) return jsonResponse(500, { error: `conversations upsert: ${error.message}` });
+      for (const row of convData ?? []) {
+        newConversations += 1;
+        const phone = contactIdToPhone.get(row.contact_id);
+        if (phone) convByContact.set(phone, row.id);
+      }
+    }
+
+    // Messages: build rows with conversation ids and bulk insert (dedup).
+    const finalRows: any[] = [];
+    for (const rec of pageRecords) {
+      const phone = historyPhone(rec?.key?.remoteJid ?? "");
+      const convId = phone ? convByContact.get(phone) : undefined;
+      if (!convId) continue;
+      const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
+      const { type, content } = mapMessageRecord(rec);
+      finalRows.push({
+        conversation_id: convId,
+        evolution_message_id: rec?.key?.id ?? null,
+        direction: rec?.key?.fromMe ? "outbound" : "inbound",
+        type,
+        content: content || null,
+        media_url: null,
+        sent_at: ts ? new Date(ts * 1000).toISOString() : new Date().toISOString(),
+      });
+    }
+    for (let i = 0; i < finalRows.length; i += 200) {
+      const chunk = finalRows.slice(i, i + 200);
+      const { error } = await supabase.from("messages").upsert(chunk, {
+        onConflict: "conversation_id,evolution_message_id",
+        ignoreDuplicates: true,
+      });
+      if (error) return jsonResponse(500, { error: `messages upsert: ${error.message}` });
+      importedMessages += chunk.length;
+    }
+
+    // Persist progress so a later invocation resumes here.
+    await supabase.from("whatsapp_instances").update({ sync_page: page }).eq("id", instance_id);
+    page += 1;
+  }
+
+  if (done) {
+    await supabase.from("whatsapp_instances").update({ sync_page: Math.max(page, pages) }).eq("id", instance_id);
+  }
+
+  // Refresh every conversation's last_message_* from the real latest message.
+  await supabase.rpc("refresh_conversation_previews", { p_instance_id: instance_id });
+
+  return jsonResponse(200, {
+    ok: true,
+    done,
+    page,
+    totalPages: pages,
+    newConversations,
+    importedMessages,
+  });
 }
 
 async function actionLogoutInstance(
@@ -555,7 +749,7 @@ async function actionDeleteInstance(
   try {
     instance_name = await getInstanceName(supabase, instance_id);
   } catch {
-    // Row may already be gone — still clean up Evolution below if possible.
+    // Row may already be gone â€” still clean up Evolution below if possible.
   }
 
   if (instance_name) {
@@ -644,6 +838,10 @@ Deno.serve(async (req) => {
       case "sync-contacts": {
         await requireAdmin(user);
         return await actionSyncContacts(supabase, body);
+      }
+      case "sync-messages": {
+        await requireAdmin(user);
+        return await actionSyncMessages(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

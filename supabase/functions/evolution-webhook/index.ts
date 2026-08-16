@@ -1,4 +1,4 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+﻿import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -41,14 +41,24 @@ function stripNumberSuffix(jid: string): string {
   return (jid.split("@")[0] ?? "").replace(/[^\d]/g, "");
 }
 
-// Groups, status, broadcast lists and channels are out of scope for F1.
+// Groups, status, broadcast lists and channels are out of scope for F1. LID
+// JIDs (new WhatsApp user ids without a phone) are accepted and stored as
+// `lid:<digits>` identifiers.
 function isRelevantJid(jid: string): boolean {
   if (!jid) return false;
   if (jid.endsWith("@g.us")) return false;
   if (jid.endsWith("@broadcast")) return false;
   if (jid.endsWith("@newsletter")) return false;
-  if (!jid.endsWith("@s.whatsapp.net")) return false;
-  return stripNumberSuffix(jid).length >= 10;
+  if (jid.endsWith("@s.whatsapp.net")) return stripNumberSuffix(jid).length >= 10;
+  if (jid.endsWith("@lid")) return stripNumberSuffix(jid).length >= 8;
+  return false;
+}
+
+function jidToPhone(jid: string): string | null {
+  const digits = stripNumberSuffix(jid);
+  if (jid.endsWith("@s.whatsapp.net")) return digits;
+  if (jid.endsWith("@lid")) return `lid:${digits}`;
+  return null;
 }
 
 function mapMessageType(raw: RawMessage): {
@@ -173,21 +183,25 @@ async function upsertContact(
   supabase: Supabase,
   phone: string,
   pushName: string | null,
+  jid: string | null = null,
 ): Promise<string> {
   const { data: existing } = await supabase
     .from("contacts")
-    .select("id, name, push_name")
+    .select("id, name, push_name, jid")
     .eq("phone", phone)
     .maybeSingle();
   if (existing) {
-    if (pushName && existing.push_name !== pushName) {
-      await supabase.from("contacts").update({ push_name: pushName }).eq("id", existing.id);
+    const patch: Record<string, unknown> = {};
+    if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
+    if (jid && !existing.jid) patch.jid = jid;
+    if (Object.keys(patch).length > 0) {
+      await supabase.from("contacts").update(patch).eq("id", existing.id);
     }
     return existing.id;
   }
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null })
+    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null, jid })
     .select("id")
     .single();
   if (error) {
@@ -245,7 +259,8 @@ async function processMessage(
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
   if (!isRelevantJid(jid)) return;
-  const phone = stripNumberSuffix(jid);
+  const phone = jidToPhone(jid) ?? "";
+  if (!phone) return;
   const fromMe = Boolean(raw.key?.fromMe);
   const evolutionId = raw.key?.id ?? null;
   const { type, content, mediaMessage } = mapMessageType(raw);
@@ -253,7 +268,7 @@ async function processMessage(
   const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
 
   // Business rule: keep only the last 60 days of history. WhatsApp's sync sends
-  // whatever it has (often arbitrary dates) — we filter it out here so the inbox
+  // whatever it has (often arbitrary dates) â€” we filter it out here so the inbox
   // stays a clean 60-day window.
   const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
   if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
@@ -264,7 +279,7 @@ async function processMessage(
     ? content.slice(0, 140)
     : content.slice(0, 140) || `[${type}]`;
 
-  const contactId = await upsertContact(supabase, phone, raw.pushName ?? null);
+  const contactId = await upsertContact(supabase, phone, raw.pushName ?? null, jid);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   let mediaUrl: string | null = null;
@@ -351,7 +366,7 @@ async function handleMessages(
     .eq("instance_name", instanceName)
     .maybeSingle();
   if (!instance) {
-    // Unknown instance — nothing to do.
+    // Unknown instance â€” nothing to do.
     return jsonResponse(200, { ok: true, skipped: "unknown instance" });
   }
 
@@ -384,12 +399,10 @@ async function handleContacts(
   const list = Array.isArray(data) ? data : data ? [data] : [];
   let processed = 0;
   for (const contact of list) {
-    const jid = contact.remoteJid ?? "";
-    if (!jid.endsWith("@s.whatsapp.net")) continue;
-    const phone = jid.split("@")[0].replace(/[^\d]/g, "");
-    if (phone.length < 10) continue;
+    const phone = jidToPhone(contact.remoteJid ?? "");
+    if (!phone) continue;
     try {
-      await upsertContact(supabase, phone, contact.pushName ?? null);
+      await upsertContact(supabase, phone, contact.pushName ?? null, contact.remoteJid ?? null);
       processed += 1;
     } catch (err) {
       console.error("handleContacts upsert failed", err);

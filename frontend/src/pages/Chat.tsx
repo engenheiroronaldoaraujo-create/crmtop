@@ -26,6 +26,7 @@ import {
   formatListTime,
   formatPhone,
   formatTime,
+  isRealPhone,
   isSameDay,
 } from "@/lib/utils"
 import type {
@@ -165,7 +166,6 @@ function ConversationItem({
   onSelect: (id: string) => void
 }) {
   const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
-  const phone = conv.contact ? formatPhone(conv.contact.phone) : ""
   const closed = conv.status === "closed"
 
   return (
@@ -191,7 +191,7 @@ function ConversationItem({
         </div>
         <div className="flex items-center justify-between gap-2">
           <p className="truncate text-xs text-muted-foreground">
-            {phone}
+            {conv.contact && isRealPhone(conv.contact.phone) && formatPhone(conv.contact.phone)}
             {conv.assignee && (
               <span className="ml-1 inline-flex items-center gap-1">
                 <CheckCircle2 className="h-3 w-3" />
@@ -404,6 +404,10 @@ export default function ChatPage() {
       toast.error("WhatsApp não está conectado")
       return
     }
+    if (selected.contact && !isRealPhone(selected.contact.phone)) {
+      toast.error("Este contato não possui telefone cadastrado (contato via ID do WhatsApp).")
+      return
+    }
     setSending(true)
     try {
       if (pendingFile) {
@@ -530,7 +534,7 @@ export default function ChatPage() {
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold">{contactName}</p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {selected.contact ? formatPhone(selected.contact.phone) : ""}
+                  {selected.contact && isRealPhone(selected.contact.phone) ? formatPhone(selected.contact.phone) : "WhatsApp"}
                   {" · "}
                   {instance
                     ? instance.status === "connected"
