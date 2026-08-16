@@ -1142,14 +1142,16 @@ async function actionSyncNames(
       }
     }
     const namePhoneRows: Array<{ phone: string; push_name: string }> = [];
-    const nameLidRows: Array<{ lid: string; push_name: string; phone: string | null }> = [];
+    const nameLidRows: Array<{ lid: string; push_name: string }> = [];
     for (const [key, v] of nameMap) {
-      if (v.lid) nameLidRows.push({ lid: key, push_name: v.push_name, phone: v.phone ?? null });
+      if (v.lid) nameLidRows.push({ lid: key, push_name: v.push_name });
       else namePhoneRows.push({ phone: key, push_name: v.push_name });
     }
     for (let i = 0; i < namePhoneRows.length; i += 200) {
       const chunk = namePhoneRows.slice(i, i + 200);
-      const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
+      const { error } = await supabase
+        .from("contacts")
+        .upsert(chunk, { onConflict: "phone" });
       if (error) {
         console.error("syncNames upsert failed", error.message);
         lastError = `${error.message} (page ${page})`;
@@ -1159,8 +1161,13 @@ async function actionSyncNames(
     }
     for (let i = 0; i < nameLidRows.length; i += 200) {
       const chunk = nameLidRows.slice(i, i + 200);
-      // On conflict lid: set push_name AND backfill the phone when present.
-      const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
+      // On conflict lid: set push_name only. Do NOT re-write `phone` here — the
+      // real phone for a LID (when available) is already merged in during
+      // sync-messages; re-setting it here would collide with the separate
+      // phone-based contact that owns that number (contacts_phone_key).
+      const { error } = await supabase
+        .from("contacts")
+        .upsert(chunk, { onConflict: "lid" });
       if (error) {
         console.error("syncNames upsert failed", error.message);
         lastError = `${error.message} (page ${page})`;
