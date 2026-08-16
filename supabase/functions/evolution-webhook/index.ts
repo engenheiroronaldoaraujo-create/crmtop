@@ -279,7 +279,10 @@ async function processMessage(
     ? content.slice(0, 140)
     : content.slice(0, 140) || `[${type}]`;
 
-  const contactId = await upsertContact(supabase, phone, raw.pushName ?? null, jid);
+  // Outbound echoes carry the business's own pushName ("Você") — never use it
+  // as the contact's name; only inbound messages carry the contact's real name.
+  const pushName = !fromMe ? raw.pushName ?? null : null;
+  const contactId = await upsertContact(supabase, phone, pushName, jid);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   let mediaUrl: string | null = null;

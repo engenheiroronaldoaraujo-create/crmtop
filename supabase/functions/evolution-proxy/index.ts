@@ -625,7 +625,11 @@ async function actionSyncMessages(
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
       if (ts && ts * 1000 < CUTOFF) continue; // keep only last 60 days
       pageAllOld = false;
-      contactRows.push({ phone, ...(rec.pushName ? { push_name: String(rec.pushName) } : {}) , jid: rec?.key?.remoteJid ?? null });
+      contactRows.push({
+        phone,
+        ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
+        jid: rec?.key?.remoteJid ?? null,
+      });
       pageRecords.push(rec);
     }
 
