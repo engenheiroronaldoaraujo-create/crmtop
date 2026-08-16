@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
+import { Cable, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
@@ -9,6 +9,7 @@ import {
   proxyGetQr,
   proxyGetStatus,
   proxyLogoutInstance,
+  proxySetWebhook,
 } from "@/lib/api"
 import type { WhatsAppInstance } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -54,6 +55,7 @@ export default function WhatsAppSettings() {
   const [qrLoading, setQrLoading] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [settingWebhook, setSettingWebhook] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -182,6 +184,20 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleSetWebhook() {
+    if (!instance) return
+    setSettingWebhook(true)
+    try {
+      const data = await proxySetWebhook(instance.id)
+      toast.success("Webhook configurado na Evolution")
+      if (data?.url) console.info("webhook url:", data.url)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao configurar webhook")
+    } finally {
+      setSettingWebhook(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -287,6 +303,14 @@ export default function WhatsAppSettings() {
                 WhatsApp conectado. As mensagens chegam em tempo real no Chat.
               </p>
             )}
+            <Button
+              variant="secondary"
+              onClick={handleSetWebhook}
+              disabled={settingWebhook}
+            >
+              <Cable className="mr-2 h-4 w-4" />
+              {settingWebhook ? "Configurando..." : "Configurar webhook"}
+            </Button>
             <div className="flex items-center gap-2">
               <Button
                 variant="destructive"

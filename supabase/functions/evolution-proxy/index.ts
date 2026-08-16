@@ -232,11 +232,12 @@ async function actionCreateInstance(
     });
 
     // Point Evolution at our webhook.
-    await callEvolution(`/webhook/set/${instance_name}`, {
+    const webhookUrl = `${SUPABASE_URL}/functions/v1/evolution-webhook?token=${WEBHOOK_SECRET}`;
+    const wh = await callEvolution(`/webhook/set/${instance_name}`, {
       method: "POST",
       body: {
         enabled: true,
-        url: `${SUPABASE_URL}/functions/v1/evolution-webhook?token=${WEBHOOK_SECRET}`,
+        url: webhookUrl,
         events: WEBHOOK_EVENTS,
         base64: false,
       },
@@ -245,6 +246,7 @@ async function actionCreateInstance(
     return jsonResponse(200, {
       instance: { id: row.id, instance_name },
       qrcode: data?.qrcode ?? null,
+      webhook: wh.res.ok ? { ok: true, url: webhookUrl } : { ok: false, error: JSON.stringify(wh.data?.error ?? wh.data) },
     });
   } catch (err) {
     console.error("create-instance error", err);
@@ -401,6 +403,29 @@ async function actionSendMedia(
   });
 }
 
+// (Re)configures the Evolution webhook for an existing instance. Needed when an
+// instance was created outside the app flow or the webhook was lost.
+async function actionSetWebhook(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const webhookUrl = `${SUPABASE_URL}/functions/v1/evolution-webhook?token=${WEBHOOK_SECRET}`;
+  const { res, data } = await callEvolution(`/webhook/set/${instance_name}`, {
+    method: "POST",
+    body: {
+      enabled: true,
+      url: webhookUrl,
+      events: WEBHOOK_EVENTS,
+      base64: false,
+    },
+  });
+  if (!res.ok) {
+    return jsonResponse(res.status, { error: `webhook config failed: ${JSON.stringify(data?.error ?? data)}` });
+  }
+  return jsonResponse(200, { ok: true, url: webhookUrl, events: WEBHOOK_EVENTS });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -507,6 +532,10 @@ Deno.serve(async (req) => {
       case "delete-instance": {
         await requireAdmin(user);
         return await actionDeleteInstance(supabase, body);
+      }
+      case "set-webhook": {
+        await requireAdmin(user);
+        return await actionSetWebhook(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

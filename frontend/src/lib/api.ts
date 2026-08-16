@@ -115,3 +115,7 @@ export function proxyLogoutInstance(instance_id: string) {
 export function proxyDeleteInstance(instance_id: string) {
   return postJson("evolution-proxy", { action: "delete-instance", instance_id })
 }
+
+export function proxySetWebhook(instance_id: string) {
+  return postJson("evolution-proxy", { action: "set-webhook", instance_id })
+}
