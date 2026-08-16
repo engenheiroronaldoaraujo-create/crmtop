@@ -416,6 +416,45 @@ async function actionLogoutInstance(
   return jsonResponse(200, { ok: true });
 }
 
+// Removes the connection entirely: deletes the instance in Evolution, then
+// deletes its conversations (and their messages) and the instance row. Contacts
+// are kept (central entity, shared across instances).
+async function actionDeleteInstance(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_id = body.instance_id ?? "";
+  if (!instance_id) return jsonResponse(400, { error: "instance_id is required" });
+
+  let instance_name: string | null = null;
+  try {
+    instance_name = await getInstanceName(supabase, instance_id);
+  } catch {
+    // Row may already be gone — still clean up Evolution below if possible.
+  }
+
+  if (instance_name) {
+    try {
+      await callEvolution(`/instance/delete/${instance_name}`, { method: "DELETE" });
+    } catch (err) {
+      console.error("evolution instance delete failed", err);
+    }
+  }
+
+  const { data: conversations } = await supabase
+    .from("conversations")
+    .select("id")
+    .eq("instance_id", instance_id);
+  const conversationIds = (conversations ?? []).map((c) => c.id);
+  if (conversationIds.length > 0) {
+    await supabase.from("messages").delete().in("conversation_id", conversationIds);
+    await supabase.from("conversations").delete().in("id", conversationIds);
+  }
+  await supabase.from("whatsapp_instances").delete().eq("id", instance_id);
+
+  return jsonResponse(200, { ok: true });
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -464,6 +503,10 @@ Deno.serve(async (req) => {
       case "logout-instance": {
         await requireAdmin(user);
         return await actionLogoutInstance(supabase, body);
+      }
+      case "delete-instance": {
+        await requireAdmin(user);
+        return await actionDeleteInstance(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

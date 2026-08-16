@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { LogOut, Plus, QrCode, RefreshCw } from "lucide-react"
+import { LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
 import {
   proxyCreateInstance,
+  proxyDeleteInstance,
   proxyGetQr,
   proxyGetStatus,
   proxyLogoutInstance,
@@ -52,6 +53,7 @@ export default function WhatsAppSettings() {
   const [qr, setQr] = useState<{ base64: string | null; pairingCode: string | null } | null>(null)
   const [qrLoading, setQrLoading] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -162,6 +164,24 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleDelete() {
+    if (!instance) return
+    if (!window.confirm(
+      "Excluir a conexão do WhatsApp? Isso remove o pareamento na Evolution e apaga as conversas e mensagens desta instância (os contatos são mantidos).",
+    )) return
+    setDeleting(true)
+    try {
+      await proxyDeleteInstance(instance.id)
+      setQr(null)
+      toast.success("Conexão excluída")
+      await loadInstances()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao excluir")
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -267,14 +287,24 @@ export default function WhatsAppSettings() {
                 WhatsApp conectado. As mensagens chegam em tempo real no Chat.
               </p>
             )}
-            <Button
-              variant="destructive"
-              onClick={handleLogout}
-              disabled={disconnecting}
-            >
-              <LogOut className="mr-2 h-4 w-4" />
-              {disconnecting ? "Desconectando..." : "Desconectar"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="destructive"
+                onClick={handleLogout}
+                disabled={disconnecting}
+              >
+                <LogOut className="mr-2 h-4 w-4" />
+                {disconnecting ? "Desconectando..." : "Desconectar"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleDelete}
+                disabled={deleting}
+              >
+                <Trash2 className="mr-2 h-4 w-4 text-destructive" />
+                {deleting ? "Excluindo..." : "Excluir conexão"}
+              </Button>
+            </div>
           </CardContent>
         </Card>
       )}
