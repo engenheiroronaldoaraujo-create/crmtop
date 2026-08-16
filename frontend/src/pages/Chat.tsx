@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   Loader2,
   Paperclip,
+  Phone,
   Send,
   UserPlus,
   X,
@@ -18,7 +19,7 @@ import {
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { proxySendMedia, proxySendText } from "@/lib/api"
+import { proxyLinkConversationPhone, proxySendMedia, proxySendText } from "@/lib/api"
 import {
   contactDisplayName,
   cn,
@@ -392,6 +393,26 @@ export default function ChatPage() {
     if (error) toast.error(error.message)
   }
 
+  async function handleLinkPhone(conv: Conversation) {
+    const phone = window.prompt(
+      "Informe o telefone deste contato (com DDI, ex.: 5511940136791):",
+      "",
+    )
+    if (!phone) return
+    const digits = phone.replace(/\D/g, "")
+    if (digits.length < 10 || digits.length > 13) {
+      toast.error("Telefone inválido — use 10 a 13 dígitos (ex.: 5511940136791)")
+      return
+    }
+    try {
+      await proxyLinkConversationPhone(conv.id, digits)
+      toast.success("Telefone vinculado ao contato")
+      loadConversations()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao vincular telefone")
+    }
+  }
+
   async function handleSend(e: FormEvent) {
     e.preventDefault()
     if (!selected) return
@@ -585,6 +606,15 @@ export default function ChatPage() {
                 >
                   {selected.status === "open" ? "Fechar" : "Reabrir"}
                 </Button>
+                {selected.contact && !isRealPhone(selected.contact.phone) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleLinkPhone(selected)}
+                  >
+                    <Phone className="mr-1 h-4 w-4" /> Vincular telefone
+                  </Button>
+                )}
               </div>
             </header>
 
