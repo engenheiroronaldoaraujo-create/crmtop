@@ -10,6 +10,34 @@ const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 const STORAGE_BUCKET = "whatsapp-media";
 const WEBHOOK_EVENTS = ["MESSAGES_UPSERT", "MESSAGES_SET", "CONNECTION_UPDATE"];
 
+// Evolution validates the webhook/set payload against a JSON schema that
+// requires a nested `webhook` object (v1-style schema, used by this server).
+function webhookPayload(url: string): Record<string, unknown> {
+  return {
+    webhook: {
+      enabled: true,
+      url,
+      events: WEBHOOK_EVENTS,
+    },
+  };
+}
+
+// This Evolution server validates /settings/set against a JSON schema that
+// requires the settings fields directly at the root of the body (no wrapper)
+// and requires ALL of them (v1-style). Sending only syncFullHistory would 400.
+function syncSettingsPayload(): Record<string, unknown> {
+  return {
+    rejectCall: false,
+    msgCall: "",
+    groupsIgnore: false,
+    alwaysOnline: false,
+    readMessages: false,
+    readStatus: false,
+    syncFullHistory: true,
+    wavoipToken: "",
+  };
+}
+
 function serviceClient() {
   return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -57,7 +85,7 @@ async function getInstanceName(supabase: Supabase, instanceId: string): Promise<
 async function callEvolution(
   path: string,
   init: { method?: string; body?: unknown } = {},
-): Promise<{ res: Response; data: any }> {
+): Promise<{ res: Response; data: any; text: string }> {
   const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
     method: init.method ?? "GET",
     headers: {
@@ -66,14 +94,14 @@ async function callEvolution(
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
-  let data: any = null;
   const text = await res.text();
+  let data: any = null;
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
     data = null;
   }
-  return { res, data };
+  return { res, data, text };
 }
 
 async function upsertContact(
@@ -228,19 +256,14 @@ async function actionCreateInstance(
     // syncFullHistory gives the ~60 day history pull (coverage is decided by WhatsApp).
     await callEvolution(`/settings/set/${instance_name}`, {
       method: "POST",
-      body: { settings: { syncFullHistory: true } },
+      body: syncSettingsPayload(),
     });
 
     // Point Evolution at our webhook.
     const webhookUrl = `${SUPABASE_URL}/functions/v1/evolution-webhook?token=${WEBHOOK_SECRET}`;
     const wh = await callEvolution(`/webhook/set/${instance_name}`, {
       method: "POST",
-      body: {
-        enabled: true,
-        url: webhookUrl,
-        events: WEBHOOK_EVENTS,
-        base64: false,
-      },
+      body: webhookPayload(webhookUrl),
     });
 
     return jsonResponse(200, {
@@ -411,19 +434,31 @@ async function actionSetWebhook(
 ): Promise<Response> {
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
   const webhookUrl = `${SUPABASE_URL}/functions/v1/evolution-webhook?token=${WEBHOOK_SECRET}`;
-  const { res, data } = await callEvolution(`/webhook/set/${instance_name}`, {
+  const { res, text } = await callEvolution(`/webhook/set/${instance_name}`, {
     method: "POST",
-    body: {
-      enabled: true,
-      url: webhookUrl,
-      events: WEBHOOK_EVENTS,
-      base64: false,
-    },
+    body: webhookPayload(webhookUrl),
   });
   if (!res.ok) {
-    return jsonResponse(res.status, { error: `webhook config failed: ${JSON.stringify(data?.error ?? data)}` });
+    return jsonResponse(res.status, { error: `webhook config failed: ${text}` });
   }
   return jsonResponse(200, { ok: true, url: webhookUrl, events: WEBHOOK_EVENTS });
+}
+
+// Enables syncFullHistory on an existing instance so the ~60 day history is
+// pulled on the next connection (coverage decided by WhatsApp). Best effort.
+async function actionSyncHistory(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const { res, text } = await callEvolution(`/settings/set/${instance_name}`, {
+    method: "POST",
+    body: syncSettingsPayload(),
+  });
+  if (!res.ok) {
+    return jsonResponse(res.status, { error: `syncFullHistory failed: ${text}` });
+  }
+  return jsonResponse(200, { ok: true, message: "syncFullHistory habilitado — reconecte a instância para puxar o histórico" });
 }
 
 async function actionLogoutInstance(
@@ -536,6 +571,10 @@ Deno.serve(async (req) => {
       case "set-webhook": {
         await requireAdmin(user);
         return await actionSetWebhook(supabase, body);
+      }
+      case "sync-history": {
+        await requireAdmin(user);
+        return await actionSyncHistory(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

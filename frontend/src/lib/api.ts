@@ -119,3 +119,7 @@ export function proxyDeleteInstance(instance_id: string) {
 export function proxySetWebhook(instance_id: string) {
   return postJson("evolution-proxy", { action: "set-webhook", instance_id })
 }
+
+export function proxySyncHistory(instance_id: string) {
+  return postJson("evolution-proxy", { action: "sync-history", instance_id })
+}

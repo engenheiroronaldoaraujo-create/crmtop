@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { Cable, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
+import { Cable, Download, LogOut, Plus, QrCode, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
@@ -10,6 +10,7 @@ import {
   proxyGetStatus,
   proxyLogoutInstance,
   proxySetWebhook,
+  proxySyncHistory,
 } from "@/lib/api"
 import type { WhatsAppInstance } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -56,6 +57,7 @@ export default function WhatsAppSettings() {
   const [disconnecting, setDisconnecting] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [settingWebhook, setSettingWebhook] = useState(false)
+  const [syncingHistory, setSyncingHistory] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
@@ -198,6 +200,20 @@ export default function WhatsAppSettings() {
     }
   }
 
+  async function handleSyncHistory() {
+    if (!instance) return
+    setSyncingHistory(true)
+    try {
+      const data = await proxySyncHistory(instance.id)
+      toast.success("Histórico habilitado. Desconecte e reconecte para puxar as mensagens")
+      if (data?.message) console.info(data.message)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao habilitar histórico")
+    } finally {
+      setSyncingHistory(false)
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
 
   return (
@@ -310,6 +326,14 @@ export default function WhatsAppSettings() {
             >
               <Cable className="mr-2 h-4 w-4" />
               {settingWebhook ? "Configurando..." : "Configurar webhook"}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleSyncHistory}
+              disabled={syncingHistory}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              {syncingHistory ? "Habilitando..." : "Sincronizar histórico"}
             </Button>
             <div className="flex items-center gap-2">
               <Button
