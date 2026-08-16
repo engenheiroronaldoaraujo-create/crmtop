@@ -87,8 +87,8 @@ Deno.serve(async (req) => {
         if (!ALLOWED_ROLES.includes(role ?? "")) {
           return jsonResponse(400, { error: "role must be admin or vendedor" });
         }
-        if (temp_password.length < 6) {
-          return jsonResponse(400, { error: "temp_password must be at least 6 characters" });
+        if (temp_password.length < 8) {
+          return jsonResponse(400, { error: "temp_password must be at least 8 characters" });
         }
         const { data, error } = await supabase.auth.admin.createUser({
           email,
@@ -128,8 +128,8 @@ Deno.serve(async (req) => {
         const { user_id } = body;
         const temp_password = body.temp_password ?? "";
         if (!user_id) return jsonResponse(400, { error: "user_id is required" });
-        if (temp_password.length < 6) {
-          return jsonResponse(400, { error: "temp_password must be at least 6 characters" });
+        if (temp_password.length < 8) {
+          return jsonResponse(400, { error: "temp_password must be at least 8 characters" });
         }
         const { error } = await supabase.auth.admin.updateUserById(user_id, {
           password: temp_password,
@@ -143,6 +143,23 @@ Deno.serve(async (req) => {
         if (!user_id) return jsonResponse(400, { error: "user_id is required" });
         if (!ALLOWED_ROLES.includes(role ?? "")) {
           return jsonResponse(400, { error: "role must be admin or vendedor" });
+        }
+        // Block demoting the last remaining admin.
+        if (role === "vendedor") {
+          const { data: target } = await supabase
+            .from("profiles")
+            .select("role")
+            .eq("id", user_id)
+            .maybeSingle();
+          if (target?.role === "admin") {
+            const { count, error: countError } = await supabase
+              .from("profiles")
+              .select("id", { count: "exact", head: true })
+              .eq("role", "admin");
+            if (!countError && (count ?? 0) <= 1) {
+              return jsonResponse(400, { error: "cannot demote the last admin" });
+            }
+          }
         }
         const { error } = await supabase
           .from("profiles")

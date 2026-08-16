@@ -541,6 +541,12 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  // Fail-closed: if the webhook secret is missing, reject everything. Without
+  // this, a misconfigured deploy would accept unauthenticated payloads.
+  if (!WEBHOOK_SECRET) {
+    return jsonResponse(500, { error: "webhook secret not configured" });
+  }
+
   try {
     const url = new URL(req.url);
     if (url.searchParams.get("token") !== WEBHOOK_SECRET) {
