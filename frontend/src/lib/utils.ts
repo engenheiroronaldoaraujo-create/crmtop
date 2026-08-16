@@ -65,6 +65,25 @@ export function formatListTime(iso: string): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
 }
 
+// Formats the digits of a LID as a Brazilian phone number for DISPLAY ONLY.
+// A LID is an opaque identifier, not a real phone, so the resulting number is
+// derived (never used as a send target — the chat still blocks sending to
+// contacts without a real phone). Brazilian numbers are 10–11 digits; we take
+// the trailing phone-like digits and prepend the +55 country code.
+export function formatLidAsPhone(lid: string | null | undefined): string | null {
+  if (!lid) return null
+  const d = lid.replace(/^lid:/, "").replace(/[^\d]/g, "")
+  if (d.length < 10) return null
+  let phone: string
+  if (d.startsWith("55") && (d.length === 12 || d.length === 13)) {
+    phone = d
+  } else {
+    const core = d.length >= 11 ? d.slice(-11) : d
+    phone = core.startsWith("55") ? core : `55${core}`
+  }
+  return formatPhone(phone)
+}
+
 export function contactDisplayName(c: {
   name?: string | null
   push_name?: string | null
@@ -74,15 +93,10 @@ export function contactDisplayName(c: {
   const n = c.name || c.push_name
   if (n) return n
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
-  // LID-only contact with no name: the only available number is the LID. Show
-  // its digits (masking the middle) so the conversation is identifiable,
-  // instead of a generic "Contato sem número".
-  if (c.lid) {
-    const digits = c.lid.replace(/^lid:/, "").replace(/[^\d]/g, "")
-    if (digits.length >= 4) {
-      return `•••• ${digits.slice(-4)}`
-    }
-    return digits || "Contato sem número"
-  }
+  // LID-only contact with no name: the only available number is the LID. Present
+  // it formatted as a standard Brazilian phone (55 xx xxxxx-xxxx) so the
+  // conversation is identifiable, instead of a generic "Contato sem número".
+  const lidPhone = formatLidAsPhone(c.lid)
+  if (lidPhone) return lidPhone
   return "Contato sem número"
 }
