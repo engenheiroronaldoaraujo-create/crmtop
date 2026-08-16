@@ -112,19 +112,47 @@ async function callEvolution(
 
 async function upsertContact(
   supabase: Supabase,
-  phone: string,
+  phone: string | null,
+  lid: string | null,
   pushName: string | null,
   jid: string | null = null,
 ): Promise<string> {
-  const { data: existing } = await supabase
-    .from("contacts")
-    .select("id, push_name, jid")
-    .eq("phone", phone)
-    .maybeSingle();
+  let existing: { id: string; phone: string | null; lid: string | null; push_name: string | null; jid: string | null } | null = null;
+
+  if (lid) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("lid", lid)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
+  if (!existing && phone) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("phone", phone)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
+  if (!existing && lid) {
+    // Legacy: pre-LID data stored the LID inside `phone` as `lid:<digits>`.
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("phone", `lid:${lid.replace(/^lid:/, "")}`)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
   if (existing) {
     const patch: Record<string, unknown> = {};
     if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
-    if (jid && !existing.jid) patch.jid = jid;
+    if (jid && existing.jid !== jid) patch.jid = jid;
+    if (phone && existing.phone !== phone) patch.phone = phone;
+    if (lid && existing.lid !== lid) patch.lid = lid;
     if (Object.keys(patch).length > 0) {
       await supabase.from("contacts").update(patch).eq("id", existing.id);
     }
@@ -132,12 +160,15 @@ async function upsertContact(
   }
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null, jid })
+    .insert({ phone, lid, push_name: pushName ?? null, name: pushName ?? null, jid })
     .select("id")
     .single();
   if (error) {
-    const { data: again } = await supabase.from("contacts").select("id").eq("phone", phone).maybeSingle();
-    if (again) return again.id;
+    const filter = lid ? { field: "lid", value: lid } : phone ? { field: "phone", value: phone } : null;
+    if (filter) {
+      const { data: again } = await supabase.from("contacts").select("id").eq(filter.field, filter.value).maybeSingle();
+      if (again) return again.id;
+    }
     throw error;
   }
   return data.id;
@@ -183,7 +214,8 @@ function sanitizePhone(phone: string): string {
 async function recordOutboundMessage(
   supabase: Supabase,
   instanceId: string,
-  phone: string,
+  phone: string | null,
+  lid: string | null,
   userId: string,
   msg: {
     evolutionId: string | null;
@@ -193,7 +225,7 @@ async function recordOutboundMessage(
     sentAt: string;
   },
 ): Promise<{ conversationId: string }> {
-  const contactId = await upsertContact(supabase, phone, null);
+  const contactId = await upsertContact(supabase, phone, lid, null);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   await supabase.from("messages").upsert(
@@ -330,16 +362,41 @@ async function actionSendText(
   user: { id: string },
   body: { instance_id?: string; phone?: string; text?: string },
 ): Promise<Response> {
-  const phone = sanitizePhone(body.phone ?? "");
   const text = (body.text ?? "").trim();
-  if (!phone) return jsonResponse(400, { error: "phone is required" });
   if (!text) return jsonResponse(400, { error: "text is required" });
+  if (!body.phone) return jsonResponse(400, { error: "phone is required" });
 
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
-  // This Evolution server uses the v1 schema: `{ number, text }`.
+
+  // Resolve the contact to decide the send target: real phone when available,
+  // otherwise the LID (Evolution recent versions accept `lid:<digits>`).
+  const phoneDigits = sanitizePhone(body.phone ?? "");
+  let sendTarget: string | null = null;
+  let contactPhone: string | null = null;
+  let contactLid: string | null = null;
+
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select("phone, lid")
+    .or(`phone.eq.${phoneDigits},lid.eq.lid:${phoneDigits}`)
+    .maybeSingle();
+
+  if (contact) {
+    contactPhone = contact.phone ?? null;
+    contactLid = contact.lid ?? null;
+  } else {
+    // No existing contact row: the provided number is a plain phone.
+    contactPhone = phoneDigits;
+  }
+
+  if (contactPhone) sendTarget = contactPhone;
+  else if (contactLid) sendTarget = `lid:${contactLid.replace(/^lid:/, "")}`;
+
+  if (!sendTarget) return jsonResponse(400, { error: "no phone or LID for this contact" });
+
   const { res, data, text: respText } = await callEvolution(`/message/sendText/${instance_name}`, {
     method: "POST",
-    body: { number: phone, text },
+    body: { number: sendTarget, text },
   });
   if (!res.ok) {
     return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
@@ -347,7 +404,7 @@ async function actionSendText(
 
   const evolutionId = data?.key?.id ?? null;
   const sentAt = new Date().toISOString();
-  const { conversationId } = await recordOutboundMessage(supabase, body.instance_id!, phone, user.id, {
+  const { conversationId } = await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
     evolutionId,
     type: "text",
     content: text,
@@ -367,14 +424,34 @@ async function actionSendMedia(
   formData: FormData,
 ): Promise<Response> {
   const instance_id = String(formData.get("instance_id") ?? "");
-  const phone = sanitizePhone(String(formData.get("phone") ?? ""));
   const caption = String(formData.get("caption") ?? "");
   const file = formData.get("file") as Blob | null;
   if (!instance_id) return jsonResponse(400, { error: "instance_id is required" });
-  if (!phone) return jsonResponse(400, { error: "phone is required" });
+  if (!formData.get("phone")) return jsonResponse(400, { error: "phone is required" });
   if (!file || file.size === 0) return jsonResponse(400, { error: "file is required" });
 
   const instance_name = await getInstanceName(supabase, instance_id);
+  const phoneDigits = sanitizePhone(String(formData.get("phone") ?? ""));
+
+  // Resolve contact target: real phone when available, otherwise LID.
+  let sendTarget: string | null = null;
+  let contactPhone: string | null = null;
+  let contactLid: string | null = null;
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select("phone, lid")
+    .or(`phone.eq.${phoneDigits},lid.eq.lid:${phoneDigits}`)
+    .maybeSingle();
+  if (contact) {
+    contactPhone = contact.phone ?? null;
+    contactLid = contact.lid ?? null;
+  } else {
+    contactPhone = phoneDigits;
+  }
+  if (contactPhone) sendTarget = contactPhone;
+  else if (contactLid) sendTarget = `lid:${contactLid.replace(/^lid:/, "")}`;
+  if (!sendTarget) return jsonResponse(400, { error: "no phone or LID for this contact" });
+
   const fileType = file.type ?? "";
   let mediatype = "document";
   if (fileType.startsWith("image/")) mediatype = "image";
@@ -383,7 +460,7 @@ async function actionSendMedia(
   const fileName = String(formData.get("fileName") ?? "file");
 
   const form = new FormData();
-  form.append("number", phone);
+  form.append("number", sendTarget);
   form.append("mediatype", mediatype);
   form.append("media", file, fileName);
   if (caption) form.append("caption", caption);
@@ -423,7 +500,7 @@ async function actionSendMedia(
   }
 
   const typeMap: Record<string, string> = { image: "image", video: "video", audio: "audio", document: "document" };
-  const { conversationId } = await recordOutboundMessage(supabase, instance_id, phone, user.id, {
+  const { conversationId } = await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
     evolutionId,
     type: typeMap[mediatype] ?? "document",
     content: caption || null,
@@ -503,27 +580,58 @@ async function actionSyncContacts(
     return jsonResponse(400, { error: "falha ao buscar a lista de contatos da Evolution" });
   }
 
-  // Bulk upsert by phone (idempotent, fast). Only sets push_name when present
-  // so existing rows keep their manual `name` and `source`.
-  const rowsMap = new Map<string, { phone: string; push_name?: string | null; jid?: string | null }>();
+  // Bulk upsert (idempotent, fast). Phone-based rows key on `phone`; LID rows
+  // key on `lid` — never store the LID in the phone column.
+  const phoneRowsMap = new Map<string, { phone: string; push_name?: string | null; jid?: string | null }>();
+  const lidRowsMap = new Map<string, { lid: string; phone?: string | null; push_name?: string | null; jid?: string | null }>();
   let withPhone = 0;
+  let withLid = 0;
   for (const c of contacts) {
-    const phone = historyPhone(c.remoteJid ?? "");
-    if (!phone) continue;
-    withPhone += 1;
-    if (!rowsMap.has(phone)) {
-      rowsMap.set(phone, { phone, ...(c.pushName ? { push_name: c.pushName } : {}), jid: c.remoteJid ?? null });
+    const jid = c.remoteJid ?? "";
+    const key = historyPhone(jid);
+    if (!key) continue;
+    if (!key.startsWith("lid:")) {
+      withPhone += 1;
+      if (!phoneRowsMap.has(key)) {
+        phoneRowsMap.set(key, {
+          phone: key,
+          ...(c.pushName ? { push_name: c.pushName } : {}),
+          jid: jid || null,
+        });
+      }
+    } else {
+      withLid += 1;
+      // `number` (when present) may carry the real phone for LID contacts.
+      const phone = c.number ? c.number.replace(/[^\d]/g, "") : null;
+      if (!lidRowsMap.has(key)) {
+        lidRowsMap.set(key, {
+          lid: key,
+          ...(phone ? { phone } : {}),
+          ...(c.pushName ? { push_name: c.pushName } : {}),
+          jid: jid || null,
+        });
+      }
     }
   }
-  const rows = [...rowsMap.values()];
 
   const CHUNK = 500;
   let imported = 0;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
+  const phoneRows = [...phoneRowsMap.values()];
+  for (let i = 0; i < phoneRows.length; i += CHUNK) {
+    const chunk = phoneRows.slice(i, i + CHUNK);
     const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
     if (error) {
-      console.error("syncContacts bulk upsert failed", error.message);
+      console.error("syncContacts phone upsert failed", error.message);
+      return jsonResponse(500, { error: `falha ao gravar contatos: ${error.message}` });
+    }
+    imported += chunk.length;
+  }
+  const lidRows = [...lidRowsMap.values()];
+  for (let i = 0; i < lidRows.length; i += CHUNK) {
+    const chunk = lidRows.slice(i, i + CHUNK);
+    const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
+    if (error) {
+      console.error("syncContacts lid upsert failed", error.message);
       return jsonResponse(500, { error: `falha ao gravar contatos: ${error.message}` });
     }
     imported += chunk.length;
@@ -535,29 +643,32 @@ async function actionSyncContacts(
   try {
     const { res, data } = await callEvolution(`/chat/findChats/${instance_name}`, { method: "POST", body: {} });
     if (res.ok && Array.isArray(data)) {
-      const nameRows: Array<{ phone: string; push_name: string }> = [];
+      const namePhoneRows: Array<{ phone: string; push_name: string }> = [];
+      const nameLidRows: Array<{ lid: string; push_name: string }> = [];
       for (const chat of data) {
         if (chat.isGroup) continue;
-        const phone = historyPhone(chat.remoteJid ?? "");
+        const key = historyPhone(chat.remoteJid ?? "");
         const name = (chat.pushName ?? chat.lastMessage?.pushName ?? "").trim();
-        if (!phone || !name || name.toLowerCase() === "você") continue;
-        nameRows.push({ phone, push_name: name });
+        if (!key || !name || name.toLowerCase() === "você") continue;
+        if (!key.startsWith("lid:")) namePhoneRows.push({ phone: key, push_name: name });
+        else nameLidRows.push({ lid: key, push_name: name });
       }
-      for (let i = 0; i < nameRows.length; i += 200) {
-        const chunk = nameRows.slice(i, i + 200);
+      for (let i = 0; i < namePhoneRows.length; i += 200) {
+        const chunk = namePhoneRows.slice(i, i + 200);
         const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
-        if (error) {
-          console.error("syncContacts name backfill failed", error.message);
-        } else {
-          named += chunk.length;
-        }
+        if (!error) named += chunk.length;
+      }
+      for (let i = 0; i < nameLidRows.length; i += 200) {
+        const chunk = nameLidRows.slice(i, i + 200);
+        const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
+        if (!error) named += chunk.length;
       }
     }
   } catch (err) {
     console.error("syncContacts name backfill error", err);
   }
 
-  return jsonResponse(200, { ok: true, total: contacts.length, withPhone, imported, named });
+  return jsonResponse(200, { ok: true, total: contacts.length, withPhone, withLid, imported, named });
 }
 
 // Maps an Evolution message record to { type, content }. Mirrors the webhook's
@@ -646,22 +757,31 @@ async function actionSyncMessages(
     }
 
     // Per-page bulk import: contacts, conversations, messages.
-    const contactRows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
+    const phoneContactRows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
+    const lidContactRows: Array<{ lid: string; phone?: string | null; push_name?: string | null; jid?: string | null }> = [];
     const pageRecords: any[] = [];
 
     let pageAllOld = true;
     for (const rec of records) {
       const jid = rec?.key?.remoteJid ?? "";
-      const phone = historyPhone(jid);
-      if (!phone) continue;
+      const key = historyPhone(jid);
+      if (!key) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
       if (ts && ts * 1000 < CUTOFF) continue; // keep only last 60 days
       pageAllOld = false;
-      contactRows.push({
-        phone,
-        ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
-        jid: rec?.key?.remoteJid ?? null,
-      });
+      if (!key.startsWith("lid:")) {
+        phoneContactRows.push({
+          phone: key,
+          ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
+          jid: jid || null,
+        });
+      } else {
+        lidContactRows.push({
+          lid: key,
+          ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
+          jid: jid || null,
+        });
+      }
       pageRecords.push(rec);
     }
 
@@ -670,28 +790,42 @@ async function actionSyncMessages(
       break;
     }
 
-    // Contacts: bulk create-or-ignore, then load phone -> id.
-    for (let i = 0; i < contactRows.length; i += 500) {
-      const chunk = contactRows.slice(i, i + 500);
+    // Contacts: bulk create-or-ignore (phone rows + lid rows).
+    for (let i = 0; i < phoneContactRows.length; i += 500) {
+      const chunk = phoneContactRows.slice(i, i + 500);
       const { error } = await supabase
         .from("contacts")
         .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true });
       if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
     }
+    for (let i = 0; i < lidContactRows.length; i += 500) {
+      const chunk = lidContactRows.slice(i, i + 500);
+      const { error } = await supabase
+        .from("contacts")
+        .upsert(chunk, { onConflict: "lid", ignoreDuplicates: true });
+      if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
+    }
+
+    // Load contact ids by key (phone or lid) for the page.
     const contactIds = new Map<string, string>();
-    {
+    if (phoneContactRows.length > 0) {
       const { data: existing } = await supabase
         .from("contacts")
         .select("phone,id")
-        .in("phone", contactRows.map((c) => c.phone));
+        .in("phone", phoneContactRows.map((c) => c.phone));
       for (const c of existing ?? []) contactIds.set(c.phone, c.id);
+    }
+    if (lidContactRows.length > 0) {
+      const { data: existing } = await supabase
+        .from("contacts")
+        .select("lid,id")
+        .in("lid", lidContactRows.map((c) => c.lid));
+      for (const c of existing ?? []) contactIds.set(c.lid, c.id);
     }
 
     // Conversations: bulk create-or-ignore returning contact_id -> id.
-    const contactIdToPhone = new Map<string, string>();
-    for (const [phone, contactId] of contactIds) contactIdToPhone.set(contactId, phone);
-    const convRows = [...contactIds.entries()].map(([phone, contactId]) => ({ contact_id: contactId, instance_id }));
-    const convByContact = new Map<string, string>();
+    const convRows = [...contactIds.entries()].map(([, contactId]) => ({ contact_id: contactId, instance_id }));
+    const convByKey = new Map<string, string>();
     for (let i = 0; i < convRows.length; i += 200) {
       const chunk = convRows.slice(i, i + 200);
       const { data: convData, error } = await supabase
@@ -699,18 +833,20 @@ async function actionSyncMessages(
         .upsert(chunk, { onConflict: "contact_id,instance_id", ignoreDuplicates: true })
         .select("id,contact_id");
       if (error) return jsonResponse(500, { error: `conversations upsert: ${error.message}` });
+      const idByContact = new Map<string, string>();
+      for (const [key, contactId] of contactIds) idByContact.set(contactId, key);
       for (const row of convData ?? []) {
         newConversations += 1;
-        const phone = contactIdToPhone.get(row.contact_id);
-        if (phone) convByContact.set(phone, row.id);
+        const key = idByContact.get(row.contact_id);
+        if (key) convByKey.set(key, row.id);
       }
     }
 
     // Messages: build rows with conversation ids and bulk insert (dedup).
     const finalRows: any[] = [];
     for (const rec of pageRecords) {
-      const phone = historyPhone(rec?.key?.remoteJid ?? "");
-      const convId = phone ? convByContact.get(phone) : undefined;
+      const key = historyPhone(rec?.key?.remoteJid ?? "");
+      const convId = key ? convByKey.get(key) : undefined;
       if (!convId) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
       const { type, content } = mapMessageRecord(rec);
@@ -795,27 +931,44 @@ async function actionSyncNames(
       break;
     }
 
-    // Dedupe by phone: the same contact appears multiple times per page and
-    // ON CONFLICT DO UPDATE can't affect the same row twice in one statement.
-    const nameMap = new Map<string, string>();
+    // Dedupe by key (phone or lid): the same contact appears multiple times per
+    // page and ON CONFLICT DO UPDATE can't affect the same row twice in one
+    // statement.
+    const nameMap = new Map<string, { push_name: string; lid?: boolean }>();
     for (const rec of records) {
       if (rec?.key?.fromMe) continue; // outbound echoes carry the business's own name
-      const phone = historyPhone(rec?.key?.remoteJid ?? "");
+      const key = historyPhone(rec?.key?.remoteJid ?? "");
       const name = String(rec.pushName ?? "").trim();
       const lower = name.toLowerCase();
-      if (!phone || !name || lower === "você" || lower === "voce") continue;
-      // Skip names that are just the contact's own identifier digits (no real
-      // name available).
-      if (name === phone.replace(/^lid:/, "")) continue;
-      if (!nameMap.has(phone)) nameMap.set(phone, name);
+      if (!key || !name || lower === "você" || lower === "voce") continue;
+      // Skip names that are just the contact's own identifier digits.
+      if (name === key.replace(/^lid:/, "")) continue;
+      if (!nameMap.has(key)) {
+        nameMap.set(key, { push_name: name, lid: key.startsWith("lid:") });
+      }
     }
-    const nameRows = [...nameMap.entries()].map(([phone, push_name]) => ({ phone, push_name }));
-    for (let i = 0; i < nameRows.length; i += 200) {
-      const chunk = nameRows.slice(i, i + 200);
+    const namePhoneRows: Array<{ phone: string; push_name: string }> = [];
+    const nameLidRows: Array<{ lid: string; push_name: string }> = [];
+    for (const [key, v] of nameMap) {
+      if (v.lid) nameLidRows.push({ lid: key, push_name: v.push_name });
+      else namePhoneRows.push({ phone: key, push_name: v.push_name });
+    }
+    for (let i = 0; i < namePhoneRows.length; i += 200) {
+      const chunk = namePhoneRows.slice(i, i + 200);
       const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
       if (error) {
         console.error("syncNames upsert failed", error.message);
-        lastError = `${error.message} (page ${page}, chunk ${nameRows.length} rows)`;
+        lastError = `${error.message} (page ${page})`;
+      } else {
+        named += chunk.length;
+      }
+    }
+    for (let i = 0; i < nameLidRows.length; i += 200) {
+      const chunk = nameLidRows.slice(i, i + 200);
+      const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
+      if (error) {
+        console.error("syncNames upsert failed", error.message);
+        lastError = `${error.message} (page ${page})`;
       } else {
         named += chunk.length;
       }

@@ -5,7 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export function isRealPhone(phone: string | null | undefined): boolean {
+export function isRealPhone(phone: string | null | undefined): phone is string {
   return typeof phone === "string" && /^\d{10,15}$/.test(phone)
 }
 
@@ -68,14 +68,12 @@ export function formatListTime(iso: string): string {
 export function contactDisplayName(c: {
   name?: string | null
   push_name?: string | null
-  phone: string
+  phone?: string | null
+  lid?: string | null
 }): string {
   const n = c.name || c.push_name
   if (n) return n
-  // Se tem telefone real, mostra formatado
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
-  // Se for LID, mostra o identificador (sem o prefixo "lid:")
-  if (c.phone.startsWith("lid:")) return c.phone.slice(4)
-  // Fallback final
-  return "Contato WhatsApp"
+  // LID-only contact with no name: show a neutral label, never the raw LID.
+  return "Contato sem número"
 }

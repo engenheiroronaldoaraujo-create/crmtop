@@ -26,7 +26,13 @@ interface EvolutionMedia {
 }
 
 interface RawMessage {
-  key?: { remoteJid?: string; fromMe?: boolean; id?: string };
+  key?: {
+    remoteJid?: string;
+    fromMe?: boolean;
+    id?: string;
+    senderPn?: string;
+    remoteJidAlt?: string;
+  };
   pushName?: string;
   message?: Record<string, unknown>;
   messageType?: string;
@@ -41,9 +47,8 @@ function stripNumberSuffix(jid: string): string {
   return (jid.split("@")[0] ?? "").replace(/[^\d]/g, "");
 }
 
-// Groups, status, broadcast lists and channels are out of scope for F1. LID
-// JIDs (new WhatsApp user ids without a phone) are accepted and stored as
-// `lid:<digits>` identifiers.
+// Accepts @s.whatsapp.net (phone) and @lid (WhatsApp Linked Identity).
+// Groups, broadcasts, newsletters and status are out of scope.
 function isRelevantJid(jid: string): boolean {
   if (!jid) return false;
   if (jid.endsWith("@g.us")) return false;
@@ -54,15 +59,43 @@ function isRelevantJid(jid: string): boolean {
   return false;
 }
 
-function jidToPhone(jid: string): string | null {
-  const digits = stripNumberSuffix(jid);
+// Resolve identity from a JID and message metadata. For LID JIDs the real phone
+// number comes in `key.senderPn` and/or `key.remoteJidAlt` (Evolution sends
+// "5511999999999@s.whatsapp.net" or plain digits). phone is E.164 with country
+// code; lid is stored as "lid:<digits>".
+function resolveIdentity(
+  jid: string,
+  rawMessage?: {
+    senderPn?: string;
+    remoteJidAlt?: string;
+  },
+): { phone: string | null; lid: string | null } {
+  // Case 1: regular phone JID.
   if (jid.endsWith("@s.whatsapp.net")) {
-    // Brazilian numbers are often stored without the country code.
-    if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-    return digits.length >= 10 ? digits : null;
+    const digits = jid.split("@")[0].replace(/[^\d]/g, "");
+    if (digits.length === 10 || digits.length === 11) return { phone: `55${digits}`, lid: null };
+    return { phone: digits.length >= 10 ? digits : null, lid: null };
   }
-  if (jid.endsWith("@lid")) return `lid:${digits}`;
-  return null;
+
+  // Case 2: LID JID — try to recover the real phone from message metadata.
+  if (jid.endsWith("@lid")) {
+    const lid = `lid:${stripNumberSuffix(jid)}`;
+    let phone: string | null = null;
+    for (const candidate of [rawMessage?.senderPn, rawMessage?.remoteJidAlt]) {
+      if (!candidate) continue;
+      const c = candidate.endsWith("@s.whatsapp.net")
+        ? candidate.split("@")[0]
+        : candidate;
+      const digits = c.replace(/[^\d]/g, "");
+      if (digits.length >= 10 && digits.length <= 15) {
+        phone = digits.length === 10 || digits.length === 11 ? `55${digits}` : digits;
+        break;
+      }
+    }
+    return { phone, lid };
+  }
+
+  return { phone: null, lid: null };
 }
 
 function mapMessageType(raw: RawMessage): {
@@ -183,39 +216,79 @@ async function uploadMedia(
   return true;
 }
 
+// Merge-aware contact upsert by phone and/or LID. Order:
+// 1. By LID (if given) → update missing phone/lid on the existing row.
+// 2. Else by phone (if given) → update missing lid.
+// 3. Else insert. Handles races by re-reading on unique violation.
 async function upsertContact(
   supabase: Supabase,
-  phone: string,
+  phone: string | null,
+  lid: string | null,
   pushName: string | null,
   jid: string | null = null,
 ): Promise<string> {
-  const { data: existing } = await supabase
-    .from("contacts")
-    .select("id, name, push_name, jid")
-    .eq("phone", phone)
-    .maybeSingle();
+  let existing: { id: string; phone: string | null; lid: string | null; push_name: string | null; jid: string | null } | null = null;
+
+  if (lid) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("lid", lid)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
+  if (!existing && phone) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("phone", phone)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
+  // Legacy fallback: pre-LID data stored the LID inside `phone` as `lid:<digits>`.
+  if (!existing && lid) {
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, phone, lid, push_name, jid")
+      .eq("phone", `lid:${lid.replace(/^lid:/, "")}`)
+      .maybeSingle();
+    if (data) existing = data;
+  }
+
   if (existing) {
     const patch: Record<string, unknown> = {};
     if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
-    if (jid && !existing.jid) patch.jid = jid;
+    if (jid && existing.jid !== jid) patch.jid = jid;
+    if (phone && existing.phone !== phone) patch.phone = phone;
+    if (lid && existing.lid !== lid) patch.lid = lid;
     if (Object.keys(patch).length > 0) {
       await supabase.from("contacts").update(patch).eq("id", existing.id);
     }
     return existing.id;
   }
+
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ phone, push_name: pushName ?? null, name: pushName ?? null, jid })
+    .insert({ phone, lid, push_name: pushName ?? null, name: pushName ?? null, jid })
     .select("id")
     .single();
   if (error) {
     // Race: another webhook call created it meanwhile.
-    const { data: again } = await supabase
-      .from("contacts")
-      .select("id")
-      .eq("phone", phone)
-      .maybeSingle();
-    if (again) return again.id;
+    const filter = lid
+      ? { field: "lid", value: lid }
+      : phone
+      ? { field: "phone", value: phone }
+      : null;
+    if (filter) {
+      const { data: again } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq(filter.field, filter.value)
+        .maybeSingle();
+      if (again) return again.id;
+    }
     throw error;
   }
   return data.id;
@@ -263,17 +336,20 @@ async function processMessage(
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
   if (!isRelevantJid(jid)) return;
-  const phone = jidToPhone(jid) ?? "";
-  if (!phone) return;
+
+  const { phone, lid } = resolveIdentity(jid, {
+    senderPn: raw.key?.senderPn,
+    remoteJidAlt: raw.key?.remoteJidAlt,
+  });
+  if (!phone && !lid) return;
+
   const fromMe = Boolean(raw.key?.fromMe);
   const evolutionId = raw.key?.id ?? null;
   const { type, content, mediaMessage } = mapMessageType(raw);
   const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
   const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
 
-  // Business rule: keep only the last 60 days of history. WhatsApp's sync sends
-  // whatever it has (often arbitrary dates) â€” we filter it out here so the inbox
-  // stays a clean 60-day window.
+  // Business rule: keep only the last 60 days of history.
   const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
   if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
     return;
@@ -283,10 +359,10 @@ async function processMessage(
     ? content.slice(0, 140)
     : content.slice(0, 140) || `[${type}]`;
 
-  // Outbound echoes carry the business's own pushName ("Você") — never use it
-  // as the contact's name; only inbound messages carry the contact's real name.
+  // Outbound echoes carry the business's own pushName ("Você") — only inbound
+  // messages carry the contact's real name.
   const pushName = !fromMe ? raw.pushName ?? null : null;
-  const contactId = await upsertContact(supabase, phone, pushName, jid);
+  const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   let mediaUrl: string | null = null;
@@ -320,8 +396,6 @@ async function processMessage(
   );
 
   if (error) {
-    // evolution_message_id can be NULL for some events; that's fine, the
-    // insert is not deduplicated in that case. Log anything else.
     console.error("message insert failed", error.message, { conversationId, evolutionId });
   }
 
@@ -373,7 +447,6 @@ async function handleMessages(
     .eq("instance_name", instanceName)
     .maybeSingle();
   if (!instance) {
-    // Unknown instance â€” nothing to do.
     return jsonResponse(200, { ok: true, skipped: "unknown instance" });
   }
 
@@ -383,8 +456,7 @@ async function handleMessages(
     ? [data]
     : [];
 
-  // Limited concurrency: history batches (`messages.set`) can be large, but
-  // media downloads are network-bound, so a little parallelism helps.
+  // Limited concurrency for large history batches.
   const BATCH = 10;
   for (let i = 0; i < list.length; i += BATCH) {
     const chunk = list.slice(i, i + BATCH);
@@ -395,21 +467,26 @@ async function handleMessages(
   return jsonResponse(200, { ok: true, processed: list.length });
 }
 
-// Ingest the contact list (`contacts.set` on connect, `contacts.upsert` on
-// updates). The full WhatsApp address book is imported as CRM contacts; the
-// 60-day window applies only to messages, not to contacts. The contact objects
-// on this server carry the phone in `remoteJid`.
+// Ingest the contact list (`contacts.set`/`contacts.upsert`). The address book
+// is imported as CRM contacts; LID entries keep the LID and the real phone when
+// the server provides it (via `number` or a phone-based remoteJid).
 async function handleContacts(
   supabase: Supabase,
-  data: Array<{ id?: string; pushName?: string; number?: string; remoteJid?: string }> | { id?: string; pushName?: string; number?: string; remoteJid?: string } | null,
+  data:
+    | Array<{ id?: string; pushName?: string; number?: string; remoteJid?: string }>
+    | { id?: string; pushName?: string; number?: string; remoteJid?: string }
+    | null,
 ): Promise<Response> {
   const list = Array.isArray(data) ? data : data ? [data] : [];
   let processed = 0;
   for (const contact of list) {
-    const phone = jidToPhone(contact.remoteJid ?? "");
-    if (!phone) continue;
+    const jid = contact.remoteJid ?? "";
+    const { phone, lid } = resolveIdentity(jid);
+    // Prefer the `number` field when present (may carry the real phone for LIDs).
+    const finalPhone = phone ?? (contact.number ? `55${contact.number.replace(/[^\d]/g, "")}`.replace(/^5555/, "55") : null);
+    if (!finalPhone && !lid) continue;
     try {
-      await upsertContact(supabase, phone, contact.pushName ?? null, contact.remoteJid ?? null);
+      await upsertContact(supabase, finalPhone, lid, contact.pushName ?? null, jid || null);
       processed += 1;
     } catch (err) {
       console.error("handleContacts upsert failed", err);

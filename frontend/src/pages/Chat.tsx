@@ -408,18 +408,19 @@ export default function ChatPage() {
       toast.error("Este contato não possui telefone cadastrado (contato via ID do WhatsApp).")
       return
     }
+    const targetPhone = selected.contact?.phone ?? ""
     setSending(true)
     try {
       if (pendingFile) {
         await proxySendMedia(
           selected.instance_id,
-          selected.contact!.phone,
+          targetPhone,
           text.trim(),
           pendingFile.file.name,
           pendingFile.file,
         )
       } else {
-        await proxySendText(selected.instance_id, selected.contact!.phone, text.trim())
+        await proxySendText(selected.instance_id, targetPhone, text.trim())
       }
       setText("")
       setPendingFile(null)

@@ -9,13 +9,15 @@ export type Profile = {
 
 export type Contact = {
   id: string
-  phone: string
+  phone: string | null
+  lid: string | null
   name: string | null
   push_name: string | null
   email: string | null
   notes: string | null
   opted_out: boolean
   source: "whatsapp" | "manual"
+  jid: string | null
   created_at: string
   updated_at: string
 }

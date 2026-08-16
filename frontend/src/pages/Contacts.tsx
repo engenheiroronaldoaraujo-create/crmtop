@@ -112,7 +112,7 @@ export default function ContactsPage() {
     setEditingId(contact.id)
     setForm({
       name: contact.name ?? "",
-      phone: contact.phone,
+      phone: contact.phone ?? "",
       email: contact.email ?? "",
       notes: contact.notes ?? "",
       opted_out: contact.opted_out,
@@ -168,7 +168,7 @@ export default function ContactsPage() {
   }
 
   function openChat(contact: Contact) {
-    navigate(`/?contact=${encodeURIComponent(contact.phone)}`)
+    navigate(`/?contact=${encodeURIComponent(contact.phone ?? "")}`)
   }
 
   return (
