@@ -28,7 +28,7 @@ UI da F1 gerencia uma só.
 
 ```
 supabase/
-  migrations/           001..023 (profiles, contacts, instances, conversations, messages, status)
+  migrations/           001..024 (profiles, contacts, instances, conversations, messages, status, repair)
   functions/
     _shared/
       cors.ts                    CORS + jsonResponse

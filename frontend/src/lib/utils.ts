@@ -55,7 +55,8 @@ export function isRealPhone(phone: string | null | undefined): phone is string {
 // Displays phone numbers in Brazilian E.164 format. Numbers stored without the
 // country code (10/11 digits, common in the WhatsApp contact list) are assumed
 // Brazilian and shown with +55. Display-only: the stored value is untouched.
-// Only valid BR phones are formatted; LIDs are rendered via formatLidAsPhone.
+// Only valid BR phones are formatted; anything else is returned untouched so a
+// raw long digit string is never presented as a phone.
 export function formatPhone(phone: string): string {
   if (!phone) return phone
   // isRealPhone applies the v2 semantic rule; callers (contactDisplayName) also
@@ -123,40 +124,6 @@ export function formatListTime(iso: string): string {
   return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
 }
 
-// Formats the digits of a LID as a Brazilian phone number for DISPLAY ONLY.
-// A LID is an opaque identifier, not a real phone, so the resulting number is
-// derived (never used as a send target — the chat still blocks sending to
-// contacts without a real phone). Brazilian numbers are 10–11 digits; we take
-// the trailing phone-like digits and prepend the +55 country code.
-export function formatLidAsPhone(lid: string | null | undefined): string | null {
-  if (!lid) return null
-  const d = lid.replace(/^lid:/, "").replace(/[^\d]/g, "")
-  if (d.length < 10) return null
-  let digits: string
-  if (d.startsWith("55") && (d.length === 12 || d.length === 13)) {
-    digits = d
-  } else {
-    const core = d.length >= 11 ? d.slice(-11) : d
-    digits = core.startsWith("55") ? core : `55${core}`
-  }
-  // Render a best-effort BR phone (with separators) so the LID is never shown as
-  // a raw 12+ digit sequence. Display-only — never used as a send target.
-  if (digits.length === 13 && digits.startsWith("55")) {
-    return `+${digits.slice(0, 2)} (${digits.slice(2, 4)}) ${digits.slice(4, 9)}-${digits.slice(9)}`
-  }
-  if (digits.length === 12 && digits.startsWith("55")) {
-    const ddd = digits.slice(2, 4)
-    const num = digits.slice(4) // 8 digits
-    const first = num[0]
-    if (first === "6" || first === "7" || first === "8" || first === "9") {
-      const mobile = "9" + num // 9 digits
-      return `+55 (${ddd}) ${mobile.slice(0, 5)}-${mobile.slice(5)}`
-    }
-    return `+55 (${ddd}) ${num.slice(0, 4)}-${num.slice(4)}`
-  }
-  return `+${digits}`
-}
-
 export function contactDisplayName(c: {
   name?: string | null
   push_name?: string | null
@@ -166,10 +133,8 @@ export function contactDisplayName(c: {
   const n = c.name || c.push_name
   if (n) return n
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
-  // LID-only contact with no name: the only available number is the LID. Present
-  // it formatted as a standard Brazilian phone (55 xx xxxxx-xxxx) so the
-  // conversation is identifiable, instead of a generic "Contato sem número".
-  const lidPhone = formatLidAsPhone(c.lid)
-  if (lidPhone) return lidPhone
+  // Um LID é um identificador WhatsApp, NÃO um telefone. Sem um telefone real
+  // registrado, não derivamos um número falso a partir do LID — o contato é
+  // identificado como "sem número" até que o telefone real seja backfillado.
   return "Contato sem número"
 }
