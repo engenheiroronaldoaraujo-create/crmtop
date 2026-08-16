@@ -56,7 +56,11 @@ function isRelevantJid(jid: string): boolean {
 
 function jidToPhone(jid: string): string | null {
   const digits = stripNumberSuffix(jid);
-  if (jid.endsWith("@s.whatsapp.net")) return digits;
+  if (jid.endsWith("@s.whatsapp.net")) {
+    // Brazilian numbers are often stored without the country code.
+    if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+    return digits.length >= 10 ? digits : null;
+  }
   if (jid.endsWith("@lid")) return `lid:${digits}`;
   return null;
 }

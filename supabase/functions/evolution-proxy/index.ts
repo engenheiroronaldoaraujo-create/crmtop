@@ -505,14 +505,17 @@ async function actionSyncContacts(
 
   // Bulk upsert by phone (idempotent, fast). Only sets push_name when present
   // so existing rows keep their manual `name` and `source`.
-  const rows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
+  const rowsMap = new Map<string, { phone: string; push_name?: string | null; jid?: string | null }>();
   let withPhone = 0;
   for (const c of contacts) {
     const phone = historyPhone(c.remoteJid ?? "");
     if (!phone) continue;
     withPhone += 1;
-    rows.push({ phone, ...(c.pushName ? { push_name: c.pushName } : {}), jid: c.remoteJid ?? null });
+    if (!rowsMap.has(phone)) {
+      rowsMap.set(phone, { phone, ...(c.pushName ? { push_name: c.pushName } : {}), jid: c.remoteJid ?? null });
+    }
   }
+  const rows = [...rowsMap.values()];
 
   const CHUNK = 500;
   let imported = 0;
@@ -525,7 +528,36 @@ async function actionSyncContacts(
     }
     imported += chunk.length;
   }
-  return jsonResponse(200, { ok: true, total: contacts.length, withPhone, imported });
+
+  // Backfill display names from the chat list: for 1:1 chats the chat-level
+  // pushName IS the contact's real name (LID chats included). One fast call.
+  let named = 0;
+  try {
+    const { res, data } = await callEvolution(`/chat/findChats/${instance_name}`, { method: "POST", body: {} });
+    if (res.ok && Array.isArray(data)) {
+      const nameRows: Array<{ phone: string; push_name: string }> = [];
+      for (const chat of data) {
+        if (chat.isGroup) continue;
+        const phone = historyPhone(chat.remoteJid ?? "");
+        const name = (chat.pushName ?? chat.lastMessage?.pushName ?? "").trim();
+        if (!phone || !name || name.toLowerCase() === "você") continue;
+        nameRows.push({ phone, push_name: name });
+      }
+      for (let i = 0; i < nameRows.length; i += 200) {
+        const chunk = nameRows.slice(i, i + 200);
+        const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
+        if (error) {
+          console.error("syncContacts name backfill failed", error.message);
+        } else {
+          named += chunk.length;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("syncContacts name backfill error", err);
+  }
+
+  return jsonResponse(200, { ok: true, total: contacts.length, withPhone, imported, named });
 }
 
 // Maps an Evolution message record to { type, content }. Mirrors the webhook's
@@ -560,6 +592,8 @@ function mapMessageRecord(rec: any): { type: string; content: string } {
 function historyPhone(jid: string): string | null {
   if (jid.endsWith("@s.whatsapp.net")) {
     const d = jid.split("@")[0].replace(/[^\d]/g, "");
+    // Brazilian numbers are often stored without the country code.
+    if (d.length === 10 || d.length === 11) return `55${d}`;
     return d.length >= 10 ? d : null;
   }
   if (jid.endsWith("@lid")) {
@@ -722,6 +756,82 @@ async function actionSyncMessages(
   });
 }
 
+// Backfills contact display names from INBOUND message pushNames. WhatsApp
+// often omits names from the contact/chat lists for unsaved users, but every
+// inbound message carries the sender's name. Resumable via whatsapp_instances.sync_page.
+async function actionSyncNames(
+  supabase: Supabase,
+  body: { instance_id?: string; max_pages?: number },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const instance_id = body.instance_id ?? "";
+
+  const { data: inst } = await supabase
+    .from("whatsapp_instances")
+    .select("sync_page")
+    .eq("id", instance_id)
+    .single();
+  let page = (inst?.sync_page ?? 0) + 1;
+  const BUDGET = Math.min(body.max_pages ?? 500, 60);
+  const pageCap = page + BUDGET;
+
+  let named = 0;
+  let done = false;
+  let pages = 0;
+  let lastError: string | null = null;
+
+  while (!done && page < pageCap) {
+    const { res, data, text } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+      method: "POST",
+      body: { page },
+    });
+    if (!res.ok) {
+      return jsonResponse(res.status, { error: `findMessages falhou (página ${page}): ${text.slice(0, 300)}` });
+    }
+    pages = data?.messages?.pages ?? 0;
+    const records = data?.messages?.records;
+    if (!Array.isArray(records) || records.length === 0) {
+      done = true;
+      break;
+    }
+
+    // Dedupe by phone: the same contact appears multiple times per page and
+    // ON CONFLICT DO UPDATE can't affect the same row twice in one statement.
+    const nameMap = new Map<string, string>();
+    for (const rec of records) {
+      if (rec?.key?.fromMe) continue; // outbound echoes carry the business's own name
+      const phone = historyPhone(rec?.key?.remoteJid ?? "");
+      const name = String(rec.pushName ?? "").trim();
+      const lower = name.toLowerCase();
+      if (!phone || !name || lower === "você" || lower === "voce") continue;
+      // Skip names that are just the contact's own identifier digits (no real
+      // name available).
+      if (name === phone.replace(/^lid:/, "")) continue;
+      if (!nameMap.has(phone)) nameMap.set(phone, name);
+    }
+    const nameRows = [...nameMap.entries()].map(([phone, push_name]) => ({ phone, push_name }));
+    for (let i = 0; i < nameRows.length; i += 200) {
+      const chunk = nameRows.slice(i, i + 200);
+      const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
+      if (error) {
+        console.error("syncNames upsert failed", error.message);
+        lastError = `${error.message} (page ${page}, chunk ${nameRows.length} rows)`;
+      } else {
+        named += chunk.length;
+      }
+    }
+
+    await supabase.from("whatsapp_instances").update({ sync_page: page }).eq("id", instance_id);
+    page += 1;
+  }
+
+  if (done) {
+    await supabase.from("whatsapp_instances").update({ sync_page: Math.max(page, pages) }).eq("id", instance_id);
+  }
+
+  return jsonResponse(200, { ok: true, done, page, totalPages: pages, named, lastError });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -844,6 +954,10 @@ Deno.serve(async (req) => {
       case "sync-messages": {
         await requireAdmin(user);
         return await actionSyncMessages(supabase, body);
+      }
+      case "sync-names": {
+        await requireAdmin(user);
+        return await actionSyncNames(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });
