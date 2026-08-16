@@ -8,7 +8,13 @@ const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
-const WEBHOOK_EVENTS = ["MESSAGES_UPSERT", "MESSAGES_SET", "CONNECTION_UPDATE"];
+const WEBHOOK_EVENTS = [
+  "MESSAGES_UPSERT",
+  "MESSAGES_SET",
+  "CONTACTS_SET",
+  "CONTACTS_UPSERT",
+  "CONNECTION_UPDATE",
+];
 
 // Evolution validates the webhook/set payload against a JSON schema that
 // requires a nested `webhook` object (v1-style schema, used by this server).

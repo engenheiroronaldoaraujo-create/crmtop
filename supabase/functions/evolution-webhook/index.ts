@@ -364,6 +364,28 @@ async function handleMessages(
   return jsonResponse(200, { ok: true, processed: list.length });
 }
 
+// Ingest the contact list emitted on connect (`contacts.set`) and on contact
+// updates (`contacts.upsert`). Data items: { id, pushName, number, ... }.
+async function handleContacts(
+  supabase: Supabase,
+  data: Array<{ id?: string; pushName?: string; number?: string }> | { id?: string; pushName?: string; number?: string } | null,
+): Promise<Response> {
+  const list = Array.isArray(data) ? data : data ? [data] : [];
+  let processed = 0;
+  for (const contact of list) {
+    const phone = (contact.number ?? "").replace(/[^\d]/g, "") ||
+      (contact.id ?? "").split("@")[0].replace(/[^\d]/g, "");
+    if (phone.length < 10) continue;
+    try {
+      await upsertContact(supabase, phone, contact.pushName ?? null);
+      processed += 1;
+    } catch (err) {
+      console.error("handleContacts upsert failed", err);
+    }
+  }
+  return jsonResponse(200, { ok: true, processed });
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -390,6 +412,9 @@ Deno.serve(async (req) => {
       case "messages.upsert":
       case "messages.set":
         return await handleMessages(supabase, instanceName, payload.data);
+      case "contacts.set":
+      case "contacts.upsert":
+        return await handleContacts(supabase, payload.data);
       default:
         return jsonResponse(200, { ok: true, ignored: event });
     }
