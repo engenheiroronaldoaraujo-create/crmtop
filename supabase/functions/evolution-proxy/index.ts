@@ -700,6 +700,72 @@ function mapMessageRecord(rec: any): { type: string; content: string } {
   return { type: "unknown", content: "" };
 }
 
+// Merges a LID-only contact into an existing phone-based contact (the same
+// person): moves conversations/messages, transfers the LID, deletes the dup.
+async function mergeLidIntoPhone(
+  supabase: Supabase,
+  lidKey: string,
+  phoneContactId: string,
+): Promise<void> {
+  const { data: lidContact } = await supabase
+    .from("contacts")
+    .select("id, push_name")
+    .eq("lid", lidKey)
+    .maybeSingle();
+  if (!lidContact) return;
+  const lidId = lidContact.id;
+
+  const { data: phoneConvs } = await supabase
+    .from("conversations")
+    .select("id, instance_id")
+    .eq("contact_id", phoneContactId);
+  const phoneConvByInstance = new Map<string, string>(
+    (phoneConvs ?? []).map((c: any) => [c.instance_id, c.id]),
+  );
+  const { data: lidConvs } = await supabase
+    .from("conversations")
+    .select("id, instance_id")
+    .eq("contact_id", lidId);
+
+  for (const lc of lidConvs ?? []) {
+    const pc = phoneConvByInstance.get(lc.instance_id);
+    if (pc) {
+      // Move only messages not already present in the target conversation.
+      const { data: msgs } = await supabase
+        .from("messages")
+        .select("id, evolution_message_id")
+        .eq("conversation_id", lc.id);
+      for (const m of msgs ?? []) {
+        if (!m.evolution_message_id) {
+          await supabase.from("messages").update({ conversation_id: pc }).eq("id", m.id);
+          continue;
+        }
+        const { data: dup } = await supabase
+          .from("messages")
+          .select("id")
+          .eq("conversation_id", pc)
+          .eq("evolution_message_id", m.evolution_message_id)
+          .maybeSingle();
+        if (!dup) {
+          await supabase.from("messages").update({ conversation_id: pc }).eq("id", m.id);
+        }
+      }
+      await supabase.from("conversations").delete().eq("id", lc.id);
+    } else {
+      await supabase.from("conversations").update({ contact_id: phoneContactId }).eq("id", lc.id);
+    }
+  }
+
+  const patch: Record<string, unknown> = { lid: lidKey };
+  if (lidContact.push_name) patch.push_name = lidContact.push_name;
+  await supabase
+    .from("contacts")
+    .update(patch)
+    .eq("id", phoneContactId)
+    .is("lid", null);
+  await supabase.from("contacts").delete().eq("id", lidId);
+}
+
 function historyPhone(jid: string): string | null {
   if (jid.endsWith("@s.whatsapp.net")) {
     const d = jid.split("@")[0].replace(/[^\d]/g, "");
@@ -712,6 +778,38 @@ function historyPhone(jid: string): string | null {
     return d.length >= 8 ? `lid:${d}` : null;
   }
   return null;
+}
+
+// Resolve { phone, lid } from a message key. LID JIDs carry the real phone in
+// `remoteJidAlt` / `senderPn` (e.g. "5511999999999@s.whatsapp.net").
+function resolveKeyIdentity(key: {
+  remoteJid?: string;
+  senderPn?: string;
+  remoteJidAlt?: string;
+}): { phone: string | null; lid: string | null } {
+  const jid = key?.remoteJid ?? "";
+  if (jid.endsWith("@s.whatsapp.net")) {
+    const d = jid.split("@")[0].replace(/[^\d]/g, "");
+    if (d.length === 10 || d.length === 11) return { phone: `55${d}`, lid: null };
+    return { phone: d.length >= 10 ? d : null, lid: null };
+  }
+  if (jid.endsWith("@lid")) {
+    const lid = `lid:${jid.split("@")[0].replace(/[^\d]/g, "")}`;
+    let phone: string | null = null;
+    for (const candidate of [key?.senderPn, key?.remoteJidAlt]) {
+      if (!candidate) continue;
+      const c = candidate.endsWith("@s.whatsapp.net")
+        ? candidate.split("@")[0]
+        : candidate;
+      const d = c.replace(/[^\d]/g, "");
+      if (d.length >= 10 && d.length <= 15) {
+        phone = d.length === 10 || d.length === 11 ? `55${d}` : d;
+        break;
+      }
+    }
+    return { phone, lid };
+  }
+  return { phone: null, lid: null };
 }
 
 // Bulk-imports message history for an instance via POST /chat/findMessages
@@ -741,6 +839,7 @@ async function actionSyncMessages(
   let done = false;
   let pages = 0;
 
+
   while (!done && page < pageCap) {
     const { res, data, text } = await callEvolution(`/chat/findMessages/${instance_name}`, {
       method: "POST",
@@ -757,53 +856,80 @@ async function actionSyncMessages(
     }
 
     // Per-page bulk import: contacts, conversations, messages.
-    const phoneContactRows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
-    const lidContactRows: Array<{ lid: string; phone?: string | null; push_name?: string | null; jid?: string | null }> = [];
+    const phoneContactMap = new Map<string, { phone: string; push_name?: string | null; jid?: string | null }>();
+    const lidContactMap = new Map<string, { lid: string; phone?: string | null; push_name?: string | null; jid?: string | null }>();
     const pageRecords: any[] = [];
 
     let pageAllOld = true;
     for (const rec of records) {
       const jid = rec?.key?.remoteJid ?? "";
-      const key = historyPhone(jid);
+      const { phone, lid } = resolveKeyIdentity(rec.key ?? {});
+      const key = phone ?? lid;
       if (!key) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
       if (ts && ts * 1000 < CUTOFF) continue; // keep only last 60 days
       pageAllOld = false;
-      if (!key.startsWith("lid:")) {
-        phoneContactRows.push({
-          phone: key,
-          ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
-          jid: jid || null,
-        });
-      } else {
-        lidContactRows.push({
-          lid: key,
-          ...(rec.pushName && !rec?.key?.fromMe ? { push_name: String(rec.pushName) } : {}),
-          jid: jid || null,
-        });
+      const pushName = rec.pushName && !rec?.key?.fromMe ? String(rec.pushName) : undefined;
+      if (lid) {
+        // LID row (with the resolved phone when available) — so the existing
+        // lid contact gets the phone backfilled instead of a new contact.
+        if (!lidContactMap.has(lid)) {
+          lidContactMap.set(lid, {
+            lid,
+            ...(phone ? { phone } : {}),
+            ...(pushName ? { push_name: pushName } : {}),
+            jid: jid || null,
+          });
+        }
+      } else if (phone) {
+        if (!phoneContactMap.has(phone)) {
+          phoneContactMap.set(phone, { phone, ...(pushName ? { push_name: pushName } : {}), jid: jid || null });
+        }
       }
       pageRecords.push(rec);
     }
+    const phoneContactRows = [...phoneContactMap.values()];
+    const lidContactRows = [...lidContactMap.values()];
 
     if (pageAllOld) {
       done = true;
       break;
     }
 
-    // Contacts: bulk create-or-ignore (phone rows + lid rows).
+    // Contacts: bulk merge (creates new + backfills phone/lid on existing).
     for (let i = 0; i < phoneContactRows.length; i += 500) {
       const chunk = phoneContactRows.slice(i, i + 500);
       const { error } = await supabase
         .from("contacts")
-        .upsert(chunk, { onConflict: "phone", ignoreDuplicates: true });
+        .upsert(chunk, { onConflict: "phone" });
       if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
     }
     for (let i = 0; i < lidContactRows.length; i += 500) {
       const chunk = lidContactRows.slice(i, i + 500);
-      const { error } = await supabase
-        .from("contacts")
-        .upsert(chunk, { onConflict: "lid", ignoreDuplicates: true });
-      if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
+      // If a lid row's phone already belongs to a DIFFERENT contact (the same
+      // person as a phone-based address book entry), MERGE the lid contact into
+      // the phone contact instead of creating a duplicate.
+      const safeChunk: Array<Record<string, unknown>> = [];
+      for (const r of chunk) {
+        if (r.phone) {
+          const { data: existing } = await supabase
+            .from("contacts")
+            .select("id, lid")
+            .eq("phone", r.phone)
+            .maybeSingle();
+          if (existing && existing.lid !== r.lid) {
+            await mergeLidIntoPhone(supabase, String(r.lid), existing.id);
+            continue;
+          }
+        }
+        safeChunk.push(r);
+      }
+      if (safeChunk.length > 0) {
+        const { error } = await supabase
+          .from("contacts")
+          .upsert(safeChunk, { onConflict: "lid" });
+        if (error) return jsonResponse(500, { error: `contacts upsert: ${error.message}` });
+      }
     }
 
     // Load contact ids by key (phone or lid) for the page.
@@ -845,7 +971,8 @@ async function actionSyncMessages(
     // Messages: build rows with conversation ids and bulk insert (dedup).
     const finalRows: any[] = [];
     for (const rec of pageRecords) {
-      const key = historyPhone(rec?.key?.remoteJid ?? "");
+      const { phone, lid } = resolveKeyIdentity(rec.key ?? {});
+      const key = lid ?? phone;
       const convId = key ? convByKey.get(key) : undefined;
       if (!convId) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
@@ -985,6 +1112,24 @@ async function actionSyncNames(
   return jsonResponse(200, { ok: true, done, page, totalPages: pages, named, lastError });
 }
 
+// TEMP: dump full message key objects to check for senderPn / remoteJidAlt.
+async function actionDebugKeys(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, { method: "POST", body: { page: 1 } });
+  if (!res.ok) return jsonResponse(500, { error: "findMessages failed" });
+  const records = data?.messages?.records ?? [];
+  const keys = records.slice(0, 8).map((r: any) => ({
+    fullKey: r.key ?? null,
+    pushName: r.pushName,
+    sender: r.sender ?? null,
+    participant: r.key?.participant ?? null,
+  }));
+  return jsonResponse(200, { keys });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -1111,6 +1256,10 @@ Deno.serve(async (req) => {
       case "sync-names": {
         await requireAdmin(user);
         return await actionSyncNames(supabase, body);
+      }
+      case "debug-keys": {
+        await requireAdmin(user);
+        return await actionDebugKeys(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });
