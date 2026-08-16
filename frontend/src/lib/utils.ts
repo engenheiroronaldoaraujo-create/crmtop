@@ -72,5 +72,10 @@ export function contactDisplayName(c: {
 }): string {
   const n = c.name || c.push_name
   if (n) return n
-  return isRealPhone(c.phone) ? formatPhone(c.phone) : "Contato WhatsApp"
+  // Se tem telefone real, mostra formatado
+  if (isRealPhone(c.phone)) return formatPhone(c.phone)
+  // Se for LID, mostra o identificador (sem o prefixo "lid:")
+  if (c.phone.startsWith("lid:")) return c.phone.slice(4)
+  // Fallback final
+  return "Contato WhatsApp"
 }
