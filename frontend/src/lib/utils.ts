@@ -6,7 +6,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function isRealPhone(phone: string | null | undefined): phone is string {
-  return typeof phone === "string" && /^\d{10,15}$/.test(phone)
+  return typeof phone === "string" && /^\d{10,13}$/.test(phone)
 }
 
 // Displays phone numbers in Brazilian E.164 format. Numbers stored without the

@@ -47,6 +47,19 @@ function stripNumberSuffix(jid: string): string {
   return (jid.split("@")[0] ?? "").replace(/[^\d]/g, "");
 }
 
+// CANONICAL phone rule (single source of truth). LIDs have 14–16 digits and
+// must NEVER be treated as phones.
+//   - 10/11 digits -> "55" + digits (national, missing country code)
+//   - 12/13 digits -> digits (E.164 BR with country code)
+//   - anything else -> null (14+ is LID, <10 is garbage)
+function normalizePhoneStrict(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const digits = input.replace(/[^\d]/g, "");
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  if (digits.length === 12 || digits.length === 13) return digits;
+  return null;
+}
+
 // Accepts @s.whatsapp.net (phone) and @lid (WhatsApp Linked Identity).
 // Groups, broadcasts, newsletters and status are out of scope.
 function isRelevantJid(jid: string): boolean {
@@ -60,9 +73,9 @@ function isRelevantJid(jid: string): boolean {
 }
 
 // Resolve identity from a JID and message metadata. For LID JIDs the real phone
-// number comes in `key.senderPn` and/or `key.remoteJidAlt` (Evolution sends
-// "5511999999999@s.whatsapp.net" or plain digits). phone is E.164 with country
-// code; lid is stored as "lid:<digits>".
+// number comes in `key.senderPn` and/or `key.remoteJidAlt`. phone is E.164 BR
+// (10–13 digits after the canonical rule); lid is stored as "lid:<digits>".
+// LIDs (14+ digits) are NEVER accepted as phones.
 function resolveIdentity(
   jid: string,
   rawMessage?: {
@@ -70,11 +83,14 @@ function resolveIdentity(
     remoteJidAlt?: string;
   },
 ): { phone: string | null; lid: string | null } {
-  // Case 1: regular phone JID.
+  // Case 1: JID ends with @s.whatsapp.net. Normally a phone, but Evolution
+  // sometimes wraps a LID inside a @s.whatsapp.net JID (14+ digits).
   if (jid.endsWith("@s.whatsapp.net")) {
-    const digits = jid.split("@")[0].replace(/[^\d]/g, "");
-    if (digits.length === 10 || digits.length === 11) return { phone: `55${digits}`, lid: null };
-    return { phone: digits.length >= 10 ? digits : null, lid: null };
+    const digits = stripNumberSuffix(jid);
+    const phone = normalizePhoneStrict(digits);
+    if (phone) return { phone, lid: null };
+    if (digits.length >= 14) return { phone: null, lid: `lid:${digits}` };
+    return { phone: null, lid: null };
   }
 
   // Case 2: LID JID — try to recover the real phone from message metadata.
@@ -83,12 +99,14 @@ function resolveIdentity(
     let phone: string | null = null;
     for (const candidate of [rawMessage?.senderPn, rawMessage?.remoteJidAlt]) {
       if (!candidate) continue;
-      const c = candidate.endsWith("@s.whatsapp.net")
+      // A candidate that is itself a LID is never a phone.
+      if (candidate.endsWith("@lid")) continue;
+      const clean = candidate.endsWith("@s.whatsapp.net")
         ? candidate.split("@")[0]
         : candidate;
-      const digits = c.replace(/[^\d]/g, "");
-      if (digits.length >= 10 && digits.length <= 15) {
-        phone = digits.length === 10 || digits.length === 11 ? `55${digits}` : digits;
+      const normalized = normalizePhoneStrict(clean);
+      if (normalized) {
+        phone = normalized;
         break;
       }
     }
@@ -261,7 +279,7 @@ async function upsertContact(
     const patch: Record<string, unknown> = {};
     if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
     if (jid && existing.jid !== jid) patch.jid = jid;
-    if (phone && existing.phone !== phone) patch.phone = phone;
+    if (phone && !existing.phone) patch.phone = phone;
     if (lid && existing.lid !== lid) patch.lid = lid;
     if (Object.keys(patch).length > 0) {
       await supabase.from("contacts").update(patch).eq("id", existing.id);
@@ -482,8 +500,8 @@ async function handleContacts(
   for (const contact of list) {
     const jid = contact.remoteJid ?? "";
     const { phone, lid } = resolveIdentity(jid);
-    // Prefer the `number` field when present (may carry the real phone for LIDs).
-    const finalPhone = phone ?? (contact.number ? `55${contact.number.replace(/[^\d]/g, "")}`.replace(/^5555/, "55") : null);
+    // `contact.number` may carry the real phone for LIDs — validate strictly.
+    const finalPhone = phone ?? normalizePhoneStrict(contact.number);
     if (!finalPhone && !lid) continue;
     try {
       await upsertContact(supabase, finalPhone, lid, contact.pushName ?? null, jid || null);

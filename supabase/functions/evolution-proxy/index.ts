@@ -151,7 +151,7 @@ async function upsertContact(
     const patch: Record<string, unknown> = {};
     if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
     if (jid && existing.jid !== jid) patch.jid = jid;
-    if (phone && existing.phone !== phone) patch.phone = phone;
+    if (phone && !existing.phone) patch.phone = phone;
     if (lid && existing.lid !== lid) patch.lid = lid;
     if (Object.keys(patch).length > 0) {
       await supabase.from("contacts").update(patch).eq("id", existing.id);
@@ -766,12 +766,25 @@ async function mergeLidIntoPhone(
   await supabase.from("contacts").delete().eq("id", lidId);
 }
 
+// CANONICAL phone rule (single source of truth). LIDs have 14–16 digits and
+// must NEVER be treated as phones.
+function normalizePhoneStrict(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const digits = input.replace(/[^\d]/g, "");
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  if (digits.length === 12 || digits.length === 13) return digits;
+  return null;
+}
+
+// Returns the contact key for a JID: a strict phone (10–13 digits) or
+// "lid:<digits>" (14+ digits). LIDs are never returned as phones.
 function historyPhone(jid: string): string | null {
   if (jid.endsWith("@s.whatsapp.net")) {
     const d = jid.split("@")[0].replace(/[^\d]/g, "");
-    // Brazilian numbers are often stored without the country code.
-    if (d.length === 10 || d.length === 11) return `55${d}`;
-    return d.length >= 10 ? d : null;
+    const phone = normalizePhoneStrict(d);
+    if (phone) return phone;
+    if (d.length >= 14) return `lid:${d}`;
+    return null;
   }
   if (jid.endsWith("@lid")) {
     const d = jid.split("@")[0].replace(/[^\d]/g, "");
@@ -781,7 +794,7 @@ function historyPhone(jid: string): string | null {
 }
 
 // Resolve { phone, lid } from a message key. LID JIDs carry the real phone in
-// `remoteJidAlt` / `senderPn` (e.g. "5511999999999@s.whatsapp.net").
+// `remoteJidAlt` / `senderPn`. LIDs (14+ digits) are never accepted as phones.
 function resolveKeyIdentity(key: {
   remoteJid?: string;
   senderPn?: string;
@@ -790,20 +803,24 @@ function resolveKeyIdentity(key: {
   const jid = key?.remoteJid ?? "";
   if (jid.endsWith("@s.whatsapp.net")) {
     const d = jid.split("@")[0].replace(/[^\d]/g, "");
-    if (d.length === 10 || d.length === 11) return { phone: `55${d}`, lid: null };
-    return { phone: d.length >= 10 ? d : null, lid: null };
+    const phone = normalizePhoneStrict(d);
+    if (phone) return { phone, lid: null };
+    if (d.length >= 14) return { phone: null, lid: `lid:${d}` };
+    return { phone: null, lid: null };
   }
   if (jid.endsWith("@lid")) {
     const lid = `lid:${jid.split("@")[0].replace(/[^\d]/g, "")}`;
     let phone: string | null = null;
     for (const candidate of [key?.senderPn, key?.remoteJidAlt]) {
       if (!candidate) continue;
-      const c = candidate.endsWith("@s.whatsapp.net")
+      // A candidate that is itself a LID is never a phone.
+      if (candidate.endsWith("@lid")) continue;
+      const clean = candidate.endsWith("@s.whatsapp.net")
         ? candidate.split("@")[0]
         : candidate;
-      const d = c.replace(/[^\d]/g, "");
-      if (d.length >= 10 && d.length <= 15) {
-        phone = d.length === 10 || d.length === 11 ? `55${d}` : d;
+      const normalized = normalizePhoneStrict(clean);
+      if (normalized) {
+        phone = normalized;
         break;
       }
     }
