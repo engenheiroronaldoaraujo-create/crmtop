@@ -9,9 +9,13 @@ export function isRealPhone(phone: string | null | undefined): boolean {
   return typeof phone === "string" && /^\d{10,15}$/.test(phone)
 }
 
+// Displays phone numbers in Brazilian E.164 format. Numbers stored without the
+// country code (10/11 digits, common in the WhatsApp contact list) are assumed
+// Brazilian and shown with +55. Display-only: the stored value is untouched.
 export function formatPhone(phone: string): string {
   if (!isRealPhone(phone)) return phone
-  const d = phone.replace(/\D/g, "")
+  let d = phone.replace(/\D/g, "")
+  if (d.length === 10 || d.length === 11) d = "55" + d
   if (d.length === 13 && d.startsWith("55")) {
     return `+${d.slice(0, 2)} (${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`
   }
