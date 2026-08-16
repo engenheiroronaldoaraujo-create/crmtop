@@ -1,8 +1,19 @@
-﻿import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+﻿import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import {
+  serviceClient,
+  upsertContact,
+  upsertConversation,
+  type Supabase,
+} from "../_shared/contacts.ts";
+import {
+  historyPhone,
+  normalizePhoneStrict,
+  normalizeWhatsAppIdentity,
+  phoneLookupVariants,
+  resolveSendTarget,
+} from "../_shared/evolution-identity.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
@@ -10,6 +21,7 @@ const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 const STORAGE_BUCKET = "whatsapp-media";
 const WEBHOOK_EVENTS = [
   "MESSAGES_UPSERT",
+  "MESSAGES_UPDATE",
   "MESSAGES_SET",
   "CONTACTS_SET",
   "CONTACTS_UPSERT",
@@ -43,14 +55,6 @@ function syncSettingsPayload(): Record<string, unknown> {
     wavoipToken: "",
   };
 }
-
-function serviceClient() {
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
-type Supabase = ReturnType<typeof serviceClient>;
 
 // Validates the caller JWT (any authenticated user) and resolves the profile.
 async function requireUser(
@@ -110,107 +114,15 @@ async function callEvolution(
   return { res, data, text };
 }
 
-async function upsertContact(
-  supabase: Supabase,
-  phone: string | null,
-  lid: string | null,
-  pushName: string | null,
-  jid: string | null = null,
-): Promise<string> {
-  let existing: { id: string; phone: string | null; lid: string | null; push_name: string | null; jid: string | null } | null = null;
-
-  if (lid) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("lid", lid)
-      .maybeSingle();
-    if (data) existing = data;
-  }
-
-  if (!existing && phone) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("phone", phone)
-      .maybeSingle();
-    if (data) existing = data;
-  }
-
-  if (!existing && lid) {
-    // Legacy: pre-LID data stored the LID inside `phone` as `lid:<digits>`.
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("phone", `lid:${lid.replace(/^lid:/, "")}`)
-      .maybeSingle();
-    if (data) existing = data;
-  }
-
-  if (existing) {
-    const patch: Record<string, unknown> = {};
-    if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
-    if (jid && existing.jid !== jid) patch.jid = jid;
-    if (phone && !existing.phone) patch.phone = phone;
-    if (lid && existing.lid !== lid) patch.lid = lid;
-    if (Object.keys(patch).length > 0) {
-      await supabase.from("contacts").update(patch).eq("id", existing.id);
-    }
-    return existing.id;
-  }
-  const { data, error } = await supabase
-    .from("contacts")
-    .insert({ phone, lid, push_name: pushName ?? null, name: pushName ?? null, jid })
-    .select("id")
-    .single();
-  if (error) {
-    const filter = lid ? { field: "lid", value: lid } : phone ? { field: "phone", value: phone } : null;
-    if (filter) {
-      const { data: again } = await supabase.from("contacts").select("id").eq(filter.field, filter.value).maybeSingle();
-      if (again) return again.id;
-    }
-    throw error;
-  }
-  return data.id;
-}
-
-async function upsertConversation(
-  supabase: Supabase,
-  contactId: string,
-  instanceId: string,
-): Promise<string> {
-  const { data: existing } = await supabase
-    .from("conversations")
-    .select("id")
-    .eq("contact_id", contactId)
-    .eq("instance_id", instanceId)
-    .maybeSingle();
-  if (existing) return existing.id;
-  const { data, error } = await supabase
-    .from("conversations")
-    .insert({ contact_id: contactId, instance_id: instanceId })
-    .select("id")
-    .single();
-  if (error) {
-    const { data: again } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("contact_id", contactId)
-      .eq("instance_id", instanceId)
-      .maybeSingle();
-    if (again) return again.id;
-    throw error;
-  }
-  return data.id;
-}
-
 function sanitizePhone(phone: string): string {
   return phone.replace(/[^\d]/g, "");
 }
 
 // Records an outbound message. Uses upsert on (conversation_id,
 // evolution_message_id) so that if the webhook echo won the race first, we
-// still attach the correct sender_profile_id.
+// still attach the correct sender_profile_id. `status` is explicit: 'sent'
+// only after the Evolution API confirmed, 'failed' otherwise — never before
+// confirmation.
 async function recordOutboundMessage(
   supabase: Supabase,
   instanceId: string,
@@ -224,6 +136,7 @@ async function recordOutboundMessage(
     mediaUrl: string | null;
     sentAt: string;
   },
+  status: "sent" | "failed" = "sent",
 ): Promise<{ conversationId: string }> {
   const contactId = await upsertContact(supabase, phone, lid, null);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
@@ -238,6 +151,7 @@ async function recordOutboundMessage(
       content: msg.content,
       media_url: msg.mediaUrl,
       sent_at: msg.sentAt,
+      status,
     },
     { onConflict: "conversation_id, evolution_message_id" },
   );
@@ -357,6 +271,25 @@ async function actionGetStatus(
   return jsonResponse(200, { status, raw: state });
 }
 
+// Resolves a contact row from the operator-supplied number (phone or LID
+// digits). Considers the BR ninth-digit variants so legacy numbers find the
+// existing contact instead of creating a duplicate.
+async function findContactByNumber(
+  supabase: Supabase,
+  phoneDigits: string,
+): Promise<{ id: string; phone: string | null; lid: string | null; jid: string | null } | null> {
+  const variants = phoneLookupVariants(phoneDigits);
+  const orClauses: string[] = [];
+  for (const v of variants) orClauses.push(`phone.eq.${v}`);
+  orClauses.push(`lid.eq.lid:${phoneDigits}`);
+  const { data } = await supabase
+    .from("contacts")
+    .select("id, phone, lid, jid")
+    .or(orClauses.join(","))
+    .maybeSingle();
+  return data ?? null;
+}
+
 async function actionSendText(
   supabase: Supabase,
   user: { id: string },
@@ -368,54 +301,72 @@ async function actionSendText(
 
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
 
-  // Resolve the contact to decide the send target: real phone when available,
-  // otherwise the LID (Evolution recent versions accept `lid:<digits>`).
   const phoneDigits = sanitizePhone(body.phone ?? "");
+  const contact = await findContactByNumber(supabase, phoneDigits);
+  const contactPhone = contact?.phone ?? null;
+  const contactLid = contact?.lid ?? null;
+
+  // Destino de envio pela camada central: JID confirmado > phone > LID.
+  // Nunca inventa número quando só existe LID.
   let sendTarget: string | null = null;
-  let contactPhone: string | null = null;
-  let contactLid: string | null = null;
-
-  const { data: contact } = await supabase
-    .from("contacts")
-    .select("phone, lid")
-    .or(`phone.eq.${phoneDigits},lid.eq.lid:${phoneDigits}`)
-    .maybeSingle();
-
   if (contact) {
-    contactPhone = contact.phone ?? null;
-    contactLid = contact.lid ?? null;
+    sendTarget = resolveSendTarget({ phone: contactPhone, lid: contactLid, jid: contact.jid }).target;
   } else {
-    // No existing contact row: the provided number is a plain phone.
-    contactPhone = phoneDigits;
+    const canonical = normalizePhoneStrict(phoneDigits);
+    if (canonical) sendTarget = canonical;
+  }
+  if (!sendTarget) {
+    return jsonResponse(400, {
+      error: "sem identificador confiável para envio (telefone inválido ou contato sem phone/JID)",
+    });
   }
 
-  if (contactPhone) sendTarget = contactPhone;
-  else if (contactLid) sendTarget = `lid:${contactLid.replace(/^lid:/, "")}`;
-
-  if (!sendTarget) return jsonResponse(400, { error: "no phone or LID for this contact" });
-
-  const { res, data, text: respText } = await callEvolution(`/message/sendText/${instance_name}`, {
-    method: "POST",
-    body: { number: sendTarget, text },
-  });
-  if (!res.ok) {
-    return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
-  }
-
-  const evolutionId = data?.key?.id ?? null;
   const sentAt = new Date().toISOString();
-  const { conversationId } = await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
-    evolutionId,
-    type: "text",
-    content: text,
-    mediaUrl: null,
-    sentAt,
-  });
+  try {
+    const { res, data, text: respText } = await callEvolution(`/message/sendText/${instance_name}`, {
+      method: "POST",
+      body: { number: sendTarget, text },
+    });
+    if (!res.ok) {
+      // Não perder a mensagem: registra como falha antes de responder o erro.
+      await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+        evolutionId: null,
+        type: "text",
+        content: text,
+        mediaUrl: null,
+        sentAt,
+      }, "failed");
+      return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
+    }
 
-  return jsonResponse(200, {
-    ok: true,
-    message: { conversation_id: conversationId, evolution_message_id: evolutionId, sent_at: sentAt },
-  });
+    const evolutionId = data?.key?.id ?? null;
+    const { conversationId } = await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+      evolutionId,
+      type: "text",
+      content: text,
+      mediaUrl: null,
+      sentAt,
+    }, "sent");
+
+    return jsonResponse(200, {
+      ok: true,
+      message: { conversation_id: conversationId, evolution_message_id: evolutionId, sent_at: sentAt },
+    });
+  } catch (err) {
+    // Falha de rede/API: registra a mensagem como falha e propaga.
+    try {
+      await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+        evolutionId: null,
+        type: "text",
+        content: text,
+        mediaUrl: null,
+        sentAt,
+      }, "failed");
+    } catch (recordErr) {
+      console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
+    }
+    throw err;
+  }
 }
 
 async function actionSendMedia(
@@ -433,24 +384,22 @@ async function actionSendMedia(
   const instance_name = await getInstanceName(supabase, instance_id);
   const phoneDigits = sanitizePhone(String(formData.get("phone") ?? ""));
 
-  // Resolve contact target: real phone when available, otherwise LID.
+  const contact = await findContactByNumber(supabase, phoneDigits);
+  const contactPhone = contact?.phone ?? null;
+  const contactLid = contact?.lid ?? null;
+
   let sendTarget: string | null = null;
-  let contactPhone: string | null = null;
-  let contactLid: string | null = null;
-  const { data: contact } = await supabase
-    .from("contacts")
-    .select("phone, lid")
-    .or(`phone.eq.${phoneDigits},lid.eq.lid:${phoneDigits}`)
-    .maybeSingle();
   if (contact) {
-    contactPhone = contact.phone ?? null;
-    contactLid = contact.lid ?? null;
+    sendTarget = resolveSendTarget({ phone: contactPhone, lid: contactLid, jid: contact.jid }).target;
   } else {
-    contactPhone = phoneDigits;
+    const canonical = normalizePhoneStrict(phoneDigits);
+    if (canonical) sendTarget = canonical;
   }
-  if (contactPhone) sendTarget = contactPhone;
-  else if (contactLid) sendTarget = `lid:${contactLid.replace(/^lid:/, "")}`;
-  if (!sendTarget) return jsonResponse(400, { error: "no phone or LID for this contact" });
+  if (!sendTarget) {
+    return jsonResponse(400, {
+      error: "sem identificador confiável para envio (telefone inválido ou contato sem phone/JID)",
+    });
+  }
 
   const fileType = file.type ?? "";
   let mediatype = "document";
@@ -466,11 +415,31 @@ async function actionSendMedia(
   if (caption) form.append("caption", caption);
   if (fileName) form.append("fileName", fileName);
 
-  const res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
-    method: "POST",
-    headers: { apikey: EVOLUTION_API_KEY },
-    body: form,
-  });
+  const sentAt = new Date().toISOString();
+  const typeMap: Record<string, string> = { image: "image", video: "video", audio: "audio", document: "document" };
+  const msgType = typeMap[mediatype] ?? "document";
+
+  let res: Response;
+  try {
+    res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
+      method: "POST",
+      headers: { apikey: EVOLUTION_API_KEY },
+      body: form,
+    });
+  } catch (err) {
+    try {
+      await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+        evolutionId: null,
+        type: msgType,
+        content: caption || null,
+        mediaUrl: null,
+        sentAt,
+      }, "failed");
+    } catch (recordErr) {
+      console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
+    }
+    throw err;
+  }
   const resText = await res.text();
   let data: any = null;
   try {
@@ -479,11 +448,17 @@ async function actionSendMedia(
     data = null;
   }
   if (!res.ok) {
+    await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+      evolutionId: null,
+      type: msgType,
+      content: caption || null,
+      mediaUrl: null,
+      sentAt,
+    }, "failed");
     return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
 
   const evolutionId = data?.key?.id ?? null;
-  const sentAt = new Date().toISOString();
 
   let mediaUrl: string | null = null;
   try {
@@ -494,19 +469,18 @@ async function actionSendMedia(
       .from(STORAGE_BUCKET)
       .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
     if (!uploadError) mediaUrl = objectPath;
-    else console.error("sendMedia storage upload failed", uploadError.message);
+    else console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
   } catch (err) {
-    console.error("sendMedia storage error", err);
+    console.error("EVOLUTION_MEDIA_UPLOAD_ERROR", err);
   }
 
-  const typeMap: Record<string, string> = { image: "image", video: "video", audio: "audio", document: "document" };
   const { conversationId } = await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
     evolutionId,
-    type: typeMap[mediatype] ?? "document",
+    type: msgType,
     content: caption || null,
     mediaUrl,
     sentAt,
-  });
+  }, "sent");
 
   return jsonResponse(200, {
     ok: true,
@@ -810,82 +784,9 @@ async function mergeLidIntoPhone(
   await supabase.from("contacts").delete().eq("id", lidId);
 }
 
-// CANONICAL Brazilian phone validation — v2 (plano de numeração ANATEL).
-// v1 only checked length (10–13 digits), which let 13-digit LIDs through as
-// phones (e.g. DDDs 36/70 which don't exist, or a 13-digit number whose
-// subscriber doesn't start with 9). v2 requires semantic validity.
-//   Valid DDDs (closed list): 11-19, 21, 22, 24, 27, 28, 31-35, 37, 38,
-//     41-49, 51, 53, 54, 55, 61-69, 71, 73, 74, 75, 77, 79, 81-89, 91-99
-//   - 10/11 digits (no DDI): DDD valid; 11-digit subscriber starts with 9,
-//     10-digit subscriber starts with 2-9 -> "55"+digits.
-//   - 12 digits: ^55 + valid DDD + [2-9]\d{7}$  (landlines & legacy mobiles).
-//   - 13 digits: ^55 + valid DDD + 9\d{8}$      (mobile).
-//   - any other length, or failed check -> null.
-const VALID_BR_DDDS = new Set<number>([
-  11, 12, 13, 14, 15, 16, 17, 18, 19,
-  21, 22, 24, 27, 28,
-  31, 32, 33, 34, 35, 37, 38,
-  41, 42, 43, 44, 45, 46, 47, 48, 49,
-  51, 53, 54, 55,
-  61, 62, 63, 64, 65, 66, 67, 68, 69,
-  71, 73, 74, 75, 77, 79,
-  81, 82, 83, 84, 85, 86, 87, 88, 89,
-  91, 92, 93, 94, 95, 96, 97, 98, 99,
-]);
-
-// Returns true iff `digits` (only digits, with or without the 55 prefix) is a
-// structurally valid Brazilian phone under the v2 rule.
-function isValidBrPhone(digits: string): boolean {
-  if (digits.length === 10 || digits.length === 11) {
-    const ddd = Number(digits.slice(0, 2));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    const sub = digits.slice(2);
-    if (digits.length === 11) return sub[0] === "9"; // mobile
-    return /^[2-9]/.test(sub); // landline / legacy mobile
-  }
-  if (digits.length === 12) {
-    if (!digits.startsWith("55")) return false;
-    const ddd = Number(digits.slice(2, 4));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    return /^[2-9]\d{7}$/.test(digits.slice(4));
-  }
-  if (digits.length === 13) {
-    if (!digits.startsWith("55")) return false;
-    const ddd = Number(digits.slice(2, 4));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    return /^9\d{8}$/.test(digits.slice(4));
-  }
-  return false;
-}
-
-// Returns the canonical phone ("55" + 12/13 digits) or null. A null return
-// means the value is NOT a valid BR phone — callers treat it as a LID when the
-// digit length is >= 12, or as junk otherwise.
-function normalizePhoneStrict(input: string | null | undefined): string | null {
-  if (!input) return null;
-  const digits = input.replace(/[^\d]/g, "");
-  if (!isValidBrPhone(digits)) return null;
-  // Canonical form always carries the 55 country code.
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-  return digits; // 12/13 digits already include "55"
-}
-
-// Returns the contact key for a JID: a strict phone (10–13 digits) or
-// "lid:<digits>" (14+ digits). LIDs are never returned as phones.
-function historyPhone(jid: string): string | null {
-  if (jid.endsWith("@s.whatsapp.net")) {
-    const d = jid.split("@")[0].replace(/[^\d]/g, "");
-    const phone = normalizePhoneStrict(d);
-    if (phone) return phone;
-    if (d.length >= 12) return `lid:${d}`;
-    return null;
-  }
-  if (jid.endsWith("@lid")) {
-    const d = jid.split("@")[0].replace(/[^\d]/g, "");
-    return d.length >= 8 ? `lid:${d}` : null;
-  }
-  return null;
-}
+// A camada central de identidade (evolution-identity.ts) é a ÚNICA fonte das
+// regras de normalização de phone/JID/LID — ver normalizePhoneStrict,
+// isValidBrPhone, historyPhone e normalizeWhatsAppIdentity (importadas acima).
 
 // Resolve { phone, lid } from a message key. LID JIDs carry the real phone in
 // `remoteJidAlt` / `senderPn`. LIDs (14+ digits) are never accepted as phones.
@@ -894,33 +795,12 @@ function resolveKeyIdentity(key: {
   senderPn?: string;
   remoteJidAlt?: string;
 }): { phone: string | null; lid: string | null } {
-  const jid = key?.remoteJid ?? "";
-  if (jid.endsWith("@s.whatsapp.net")) {
-    const d = jid.split("@")[0].replace(/[^\d]/g, "");
-    const phone = normalizePhoneStrict(d);
-    if (phone) return { phone, lid: null };
-    if (d.length >= 12) return { phone: null, lid: `lid:${d}` };
-    return { phone: null, lid: null };
-  }
-  if (jid.endsWith("@lid")) {
-    const lid = `lid:${jid.split("@")[0].replace(/[^\d]/g, "")}`;
-    let phone: string | null = null;
-    for (const candidate of [key?.senderPn, key?.remoteJidAlt]) {
-      if (!candidate) continue;
-      // A candidate that is itself a LID is never a phone.
-      if (candidate.endsWith("@lid")) continue;
-      const clean = candidate.endsWith("@s.whatsapp.net")
-        ? candidate.split("@")[0]
-        : candidate;
-      const normalized = normalizePhoneStrict(clean);
-      if (normalized) {
-        phone = normalized;
-        break;
-      }
-    }
-    return { phone, lid };
-  }
-  return { phone: null, lid: null };
+  const identity = normalizeWhatsAppIdentity({
+    remoteJid: key?.remoteJid,
+    remoteJidAlt: key?.remoteJidAlt,
+    senderPn: key?.senderPn,
+  });
+  return { phone: identity.phone, lid: identity.lid };
 }
 
 // Bulk-imports message history for an instance via POST /chat/findMessages
@@ -1028,7 +908,14 @@ async function actionSyncMessages(
             .select("id, lid")
             .eq("phone", r.phone)
             .maybeSingle();
-          if (existing && existing.lid !== r.lid) {
+          if (existing) {
+            // A phone contact already owns this LID's real number. Backfill the
+            // lid onto it so the chat resolves to the phone contact (and a
+            // conversation gets created for it), instead of dropping the LID row.
+            if (existing.lid !== r.lid) {
+              await supabase.from("contacts").update({ lid: r.lid }).eq("id", existing.id);
+            }
+            // Steer any pre-existing lid-only contact's conversations to the phone.
             await mergeLidIntoPhone(supabase, String(r.lid), existing.id);
             continue;
           }
@@ -1095,6 +982,7 @@ async function actionSyncMessages(
         type,
         content: content || null,
         media_url: null,
+        status: "sent",
         sent_at: ts ? new Date(ts * 1000).toISOString() : new Date().toISOString(),
       });
     }
@@ -1318,6 +1206,52 @@ async function actionDebugChats(
   return jsonResponse(200, { total: list.length, sample });
 }
 
+async function actionDebugFindMessages(
+  supabase: Supabase,
+  body: { instance_id?: string; remoteJid?: string; page?: number; needle?: string; fromPage?: number; toPage?: number },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  if (body.needle) {
+    const from = body.fromPage ?? 1;
+    const to = body.toPage ?? from + 19;
+    const matchedPages: number[] = [];
+    let firstMatch: any = null;
+    for (let p = from; p <= to; p++) {
+      const { res, data, text } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+        method: "POST",
+        body: { page: p },
+      });
+      if (!res.ok) return jsonResponse(res.status, { error: `p${p}: ${text.slice(0, 200)}` });
+      const records: any[] = data?.messages?.records ?? [];
+      if (records.length === 0) { matchedPages.push(-p); continue; }
+      for (const r of records) {
+        const hay = JSON.stringify(r?.key ?? {});
+        if (hay.includes(body.needle)) {
+          matchedPages.push(p);
+          if (!firstMatch) firstMatch = { page: p, remoteJid: r?.key?.remoteJid, remoteJidAlt: r?.key?.remoteJidAlt, senderPn: r?.key?.senderPn, ts: r?.messageTimestamp, fromMe: r?.key?.fromMe };
+          break;
+        }
+      }
+    }
+    return jsonResponse(200, { scanned: `${from}-${to}`, matchedPages, firstMatch });
+  }
+  const { res, data, text } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+    method: "POST",
+    body: { page: body.page ?? 1, remoteJid: body.remoteJid },
+  });
+  if (!res.ok) return jsonResponse(res.status, { error: text.slice(0, 300) });
+  const records = data?.messages?.records ?? [];
+  const sample = records.slice(0, 2).map((r: any) => ({
+    remoteJid: r?.key?.remoteJid,
+    remoteJidAlt: r?.key?.remoteJidAlt,
+    senderPn: r?.key?.senderPn,
+    fromMe: r?.key?.fromMe,
+    pushName: r?.pushName,
+    ts: r?.messageTimestamp,
+  }));
+  return jsonResponse(200, { pages: data?.messages?.pages, count: records.length, sample });
+}
+
 async function actionLogoutInstance(
   supabase: Supabase,
   body: { instance_id?: string },
@@ -1452,6 +1386,10 @@ Deno.serve(async (req) => {
       case "debug-chats": {
         await requireAdmin(user);
         return await actionDebugChats(supabase, body);
+      }
+      case "debug-find-messages": {
+        await requireAdmin(user);
+        return await actionDebugFindMessages(supabase, body);
       }
       default:
         return jsonResponse(400, { error: "unknown action" });

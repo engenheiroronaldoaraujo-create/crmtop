@@ -8,7 +8,11 @@ import {
 } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
+  AlertTriangle,
+  Check,
+  CheckCheck,
   CheckCircle2,
+  Clock,
   Loader2,
   Paperclip,
   Phone,
@@ -127,6 +131,7 @@ function MediaMessage({ msg }: { msg: Message }) {
 
 function MessageBubble({ msg }: { msg: Message }) {
   const outbound = msg.direction === "outbound"
+  const showStatus = outbound
   return (
     <div className={cn("flex", outbound ? "justify-end" : "justify-start")}>
       <div
@@ -151,10 +156,46 @@ function MessageBubble({ msg }: { msg: Message }) {
           )}
         >
           {formatTime(msg.sent_at)}
+          {showStatus && <MessageStatus status={msg.status} />}
         </p>
       </div>
     </div>
   )
+}
+
+function MessageStatus({ status }: { status: Message["status"] }) {
+  switch (status) {
+    case "pending":
+      return (
+        <span className="ml-1" title="Pendente">
+          <Clock className="h-3 w-3" />
+        </span>
+      )
+    case "delivered":
+      return (
+        <span className="ml-1" title="Entregue">
+          <CheckCheck className="h-3 w-3" />
+        </span>
+      )
+    case "read":
+      return (
+        <span className="ml-1 text-sky-300" title="Lida">
+          <CheckCheck className="h-3 w-3" />
+        </span>
+      )
+    case "failed":
+      return (
+        <span className="ml-1 text-red-400" title="Falhou ao enviar">
+          <AlertTriangle className="h-3 w-3" />
+        </span>
+      )
+    default:
+      return (
+        <span className="ml-1" title="Enviada">
+          <Check className="h-3 w-3" />
+        </span>
+      )
+  }
 }
 
 function ConversationItem({
@@ -341,6 +382,21 @@ export default function ChatPage() {
             prev.some((m) => m.id === msg.id) ? prev : [...prev, msg],
           )
           if (msg.direction === "inbound") markRead(selectedId)
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages",
+          filter: `conversation_id=eq.${selectedId}`,
+        },
+        (payload) => {
+          const msg = payload.new as Message
+          setMessages((prev) =>
+            prev.map((m) => (m.id === msg.id ? msg : m)),
+          )
         },
       )
       .subscribe()

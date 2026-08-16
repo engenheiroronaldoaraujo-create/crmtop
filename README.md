@@ -28,9 +28,13 @@ UI da F1 gerencia uma só.
 
 ```
 supabase/
-  migrations/           001..005 (profiles, contacts, instances, conversations, messages)
+  migrations/           001..023 (profiles, contacts, instances, conversations, messages, status)
   functions/
-    _shared/cors.ts
+    _shared/
+      cors.ts                    CORS + jsonResponse
+      evolution-identity.ts      Camada ÚNICA de identidade (JID/LID/phone) + normalização BR
+      evolution-identity_test.ts Testes dos 13 casos obrigatórios (deno test)
+      contacts.ts                Upsert de contato/conversa (merge LID→phone, anti-duplicação)
     admin-users/         Gestão de usuários (admin, server-side)
     evolution-webhook/   Webhook público validado por token na URL
     evolution-proxy/     Proxy autenticado para a Evolution API
@@ -103,8 +107,8 @@ admin, apontando para:
 https://<project-ref>.supabase.co/functions/v1/evolution-webhook?token=<WEBHOOK_SECRET>
 ```
 
-Eventos: `MESSAGES_UPSERT`, `MESSAGES_SET` (histórico do pareamento) e
-`CONNECTION_UPDATE`.
+Eventos: `MESSAGES_UPSERT`, `MESSAGES_UPDATE` (entrega/leitura), `MESSAGES_SET`
+(histórico do pareamento), `CONTACTS_SET`/`CONTACTS_UPSERT` e `CONNECTION_UPDATE`.
 
 ---
 
@@ -113,11 +117,16 @@ Eventos: `MESSAGES_UPSERT`, `MESSAGES_SET` (histórico do pareamento) e
 ### Webhook (`evolution-webhook`)
 
 - Validado por `token` na query string (igual a `WEBHOOK_SECRET`).
-- Por mensagem: extrai `remoteJid` → **upsert em `contacts`** (captura `pushName`)
-  → **upsert em `conversations`** (`(contact_id, instance_id)` único) → **insert em
+- Por mensagem: extrai `remoteJid` → **resolução de identidade central**
+  (`_shared/evolution-identity.ts`: classifica JID, LID nunca vira telefone,
+  `remoteJidAlt`/`senderPn` recuperam o telefone real de LIDs) → **upsert em
+  `contacts`** (merge-aware por LID→phone, com variantes do nono dígito BR) →
+  **upsert em `conversations`** (`(contact_id, instance_id)` único) → **insert em
   `messages`** com `ON CONFLICT (conversation_id, evolution_message_id) DO NOTHING`.
 - **Deduplicação por design**: reenviar o mesmo payload não duplica (teste de
   aceite). Rows com `evolution_message_id` nulo seguem sem dedup (aceitável).
+- `messages.update` atualiza o `status` da mensagem outbound
+  (`pending/sent/delivered/read/failed`) via RPC `update_message_status`.
 - Mídia: baixa via `POST /chat/getBase64FromMediaMessage/{instance}` da Evolution,
   salva no bucket **privado** `whatsapp-media` e grava o caminho em `media_url`
   (o frontend gera URLs assinadas).
@@ -130,19 +139,31 @@ Eventos: `MESSAGES_UPSERT`, `MESSAGES_SET` (histórico do pareamento) e
 ### Proxy (`evolution-proxy`)
 
 - Requer JWT de usuário autenticado (validado server-side). Ações admin
-  (`create-instance`, `get-qr`, `logout-instance`) exigem `role = admin`.
-- `send-text` / `send-media`: enviam via Evolution **e** gravam a mensagem
-  outbound no banco com `sender_profile_id` do JWT. O eco do webhook não duplica
-  (mesmo `evolution_message_id`), e o proxy usa upsert para corrigir o `sender`
-  caso o webhook vença a corrida.
+  (`create-instance`, `get-qr`, `logout-instance`, sincronizações) exigem
+  `role = admin`.
+- `send-text` / `send-media`: o **destino é resolvido pela camada central**
+  (`resolveSendTarget`: JID confirmado → telefone E.164 → LID com prefixo
+  `lid:`; nunca inventa número). Enviam via Evolution **e** gravam a mensagem
+  outbound no banco com `sender_profile_id` do JWT; falhas ficam `failed` e
+  sucesso `sent` (nunca `sent` antes da confirmação da API). O eco do webhook
+  não duplica (mesmo `evolution_message_id`), e o proxy usa upsert para corrigir
+  o `sender` caso o webhook vença a corrida.
 
 ### Frontend
 
 - Chat em tempo real via Supabase Realtime (publication em `messages` e
   `conversations`). Abrir a conversa zera `unread_count` via RPC
-  `mark_conversation_read`.
+  `mark_conversation_read`. A coluna `status` da mensagem mostra
+  ✓ (enviada), ✓✓ (entregue), ✓✓ azul (lida), ⏱ (pendente) e ⚠ (falha) — as
+  transições `delivered`/`read` chegam em tempo real via `messages.update`.
 - **Nenhum request do navegador vai direto para a Evolution** — tudo passa pelas
   Edge Functions (confira na aba Network).
+
+### Testes
+
+```bash
+npm test   # deno test supabase/functions/_shared/ (19 casos de normalização)
+```
 
 ---
 

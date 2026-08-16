@@ -1,21 +1,16 @@
-﻿import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+﻿import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { serviceClient, upsertContact, upsertConversation, type Supabase } from "../_shared/contacts.ts";
+import {
+  isRelevantJid,
+  normalizePhoneStrict,
+  normalizeWhatsAppIdentity,
+} from "../_shared/evolution-identity.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
-
-function serviceClient() {
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-}
-
-type Supabase = ReturnType<typeof serviceClient>;
 
 interface EvolutionMedia {
   url?: string;
@@ -39,174 +34,30 @@ interface RawMessage {
   messageTimestamp?: number | string;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function stripNumberSuffix(jid: string): string {
-  return (jid.split("@")[0] ?? "").replace(/[^\d]/g, "");
-}
-
-// CANONICAL Brazilian phone validation — v2 (plano de numeração ANATEL).
-// v1 only checked length (10–13 digits), which let 13-digit LIDs through as
-// phones (e.g. DDDs 36/70 which don't exist, or a 13-digit number whose
-// subscriber doesn't start with 9). v2 requires semantic validity.
-//   Valid DDDs (closed list): 11-19, 21, 22, 24, 27, 28, 31-35, 37, 38,
-//     41-49, 51, 53, 54, 55, 61-69, 71, 73, 74, 75, 77, 79, 81-89, 91-99
-//   - 10/11 digits (no DDI): DDD valid; 11-digit subscriber starts with 9,
-//     10-digit subscriber starts with 2-9 -> "55"+digits.
-//   - 12 digits: ^55 + valid DDD + [2-9]\d{7}$  (landlines & legacy mobiles).
-//   - 13 digits: ^55 + valid DDD + 9\d{8}$      (mobile).
-//   - any other length, or failed check -> null.
-const VALID_BR_DDDS = new Set<number>([
-  11, 12, 13, 14, 15, 16, 17, 18, 19,
-  21, 22, 24, 27, 28,
-  31, 32, 33, 34, 35, 37, 38,
-  41, 42, 43, 44, 45, 46, 47, 48, 49,
-  51, 53, 54, 55,
-  61, 62, 63, 64, 65, 66, 67, 68, 69,
-  71, 73, 74, 75, 77, 79,
-  81, 82, 83, 84, 85, 86, 87, 88, 89,
-  91, 92, 93, 94, 95, 96, 97, 98, 99,
-]);
-
-// Returns true iff `digits` (only digits, with or without the 55 prefix) is a
-// structurally valid Brazilian phone under the v2 rule.
-function isValidBrPhone(digits: string): boolean {
-  if (digits.length === 10 || digits.length === 11) {
-    const ddd = Number(digits.slice(0, 2));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    const sub = digits.slice(2);
-    if (digits.length === 11) return sub[0] === "9"; // mobile
-    return /^[2-9]/.test(sub); // landline / legacy mobile
-  }
-  if (digits.length === 12) {
-    if (!digits.startsWith("55")) return false;
-    const ddd = Number(digits.slice(2, 4));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    return /^[2-9]\d{7}$/.test(digits.slice(4));
-  }
-  if (digits.length === 13) {
-    if (!digits.startsWith("55")) return false;
-    const ddd = Number(digits.slice(2, 4));
-    if (!VALID_BR_DDDS.has(ddd)) return false;
-    return /^9\d{8}$/.test(digits.slice(4));
-  }
-  return false;
-}
-
-// Returns the canonical phone ("55" + 12/13 digits) or null. A null return
-// means the value is NOT a valid BR phone — callers treat it as a LID when the
-// digit length is >= 12, or as junk otherwise.
-function normalizePhoneStrict(input: string | null | undefined): string | null {
-  if (!input) return null;
-  const digits = input.replace(/[^\d]/g, "");
-  if (!isValidBrPhone(digits)) return null;
-  // Canonical form always carries the 55 country code.
-  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-  return digits; // 12/13 digits already include "55"
-}
-
-// Accepts @s.whatsapp.net (phone) and @lid (WhatsApp Linked Identity).
-// Groups, broadcasts, newsletters and status are out of scope.
-function isRelevantJid(jid: string): boolean {
-  if (!jid) return false;
-  if (jid.endsWith("@g.us")) return false;
-  if (jid.endsWith("@broadcast")) return false;
-  if (jid.endsWith("@newsletter")) return false;
-  if (jid.endsWith("@s.whatsapp.net")) return stripNumberSuffix(jid).length >= 10;
-  if (jid.endsWith("@lid")) return stripNumberSuffix(jid).length >= 8;
-  return false;
-}
-
-// Resolve identity from a JID and message metadata. For LID JIDs the real phone
-// number comes in `key.senderPn` and/or `key.remoteJidAlt`. phone is E.164 BR
-// (10–13 digits after the canonical rule); lid is stored as "lid:<digits>".
-// LIDs (14+ digits) are NEVER accepted as phones.
-function resolveIdentity(
-  jid: string,
-  rawMessage?: {
+interface StatusUpdate {
+  key?: {
+    remoteJid?: string;
+    fromMe?: boolean;
+    id?: string;
     senderPn?: string;
     remoteJidAlt?: string;
-  },
-): { phone: string | null; lid: string | null } {
-  // Case 1: JID ends with @s.whatsapp.net. Normally a phone, but Evolution
-  // sometimes wraps a LID inside a @s.whatsapp.net JID (14+ digits).
-  if (jid.endsWith("@s.whatsapp.net")) {
-    const digits = stripNumberSuffix(jid);
-    const phone = normalizePhoneStrict(digits);
-    if (phone) return { phone, lid: null };
-    if (digits.length >= 12) return { phone: null, lid: `lid:${digits}` };
-    return { phone: null, lid: null };
-  }
-
-  // Case 2: LID JID — try to recover the real phone from message metadata.
-  if (jid.endsWith("@lid")) {
-    const lid = `lid:${stripNumberSuffix(jid)}`;
-    let phone: string | null = null;
-    for (const candidate of [rawMessage?.senderPn, rawMessage?.remoteJidAlt]) {
-      if (!candidate) continue;
-      // A candidate that is itself a LID is never a phone.
-      if (candidate.endsWith("@lid")) continue;
-      const clean = candidate.endsWith("@s.whatsapp.net")
-        ? candidate.split("@")[0]
-        : candidate;
-      const normalized = normalizePhoneStrict(clean);
-      if (normalized) {
-        phone = normalized;
-        break;
-      }
-    }
-    return { phone, lid };
-  }
-
-  return { phone: null, lid: null };
+  };
+  status?: number;
 }
 
-function mapMessageType(raw: RawMessage): {
-  type: string;
-  content: string;
-  mediaMessage: EvolutionMedia | null;
-} {
-  let message = (raw.message ?? {}) as Record<string, any>;
-  const unwrap = (m: Record<string, any>): Record<string, any> => {
-    if (m.ephemeralMessage?.message) return unwrap(m.ephemeralMessage.message);
-    if (m.viewOnceMessage?.message) return unwrap(m.viewOnceMessage.message);
-    if (m.viewOnceMessageV2?.message) return unwrap(m.viewOnceMessageV2.message);
-    if (m.documentWithCaptionMessage?.message) return unwrap(m.documentWithCaptionMessage.message);
-    return m;
-  };
-  message = unwrap(message);
+// Códigos de status Baileys/Evolution → status interno do CRM.
+const STATUS_MAP: Record<number, string> = {
+  0: "failed", // ERROR
+  1: "pending", // PENDING
+  2: "sent", // SERVER_ACK
+  3: "delivered", // DELIVERY_ACK
+  4: "read", // READ
+  5: "read", // PLAYED
+};
 
-  if (message.conversation !== undefined) {
-    return { type: "text", content: String(message.conversation ?? ""), mediaMessage: null };
-  }
-  if (message.extendedTextMessage) {
-    return {
-      type: "text",
-      content: String(message.extendedTextMessage.text ?? ""),
-      mediaMessage: null,
-    };
-  }
-  const mediaTypes: Record<string, string> = {
-    imageMessage: "image",
-    audioMessage: "audio",
-    videoMessage: "video",
-    documentMessage: "document",
-    stickerMessage: "sticker",
-  };
-  for (const [key, type] of Object.entries(mediaTypes)) {
-    if (message[key]) {
-      const m = message[key] as EvolutionMedia;
-      const content =
-        type === "document"
-          ? String(m.fileName ?? m.caption ?? "")
-          : String(m.caption ?? "");
-      return { type, content, mediaMessage: m };
-    }
-  }
-  return { type: "unknown", content: "", mediaMessage: null };
-}
+// ---------------------------------------------------------------------------
+// Mídia
+// ---------------------------------------------------------------------------
 
 function extFromMimetype(mimetype: string, fallback: string): string {
   const map: Record<string, string> = {
@@ -253,13 +104,13 @@ async function downloadMediaBase64(
       },
     );
     if (!res.ok) {
-      console.error("getBase64FromMediaMessage failed", res.status, await res.text());
+      console.error("EVOLUTION_MEDIA_DOWNLOAD_FAILED", res.status, await res.text());
       return null;
     }
     const data = await res.json();
     return typeof data?.base64 === "string" ? data.base64 : null;
   } catch (err) {
-    console.error("getBase64FromMediaMessage error", err);
+    console.error("EVOLUTION_MEDIA_DOWNLOAD_ERROR", err);
     return null;
   }
 }
@@ -275,122 +126,63 @@ async function uploadMedia(
     .from(STORAGE_BUCKET)
     .upload(objectPath, bytes, { contentType, upsert: true });
   if (error) {
-    console.error("storage upload failed", objectPath, error.message);
+    console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", objectPath, error.message);
     return false;
   }
   return true;
 }
 
-// Merge-aware contact upsert by phone and/or LID. Order:
-// 1. By LID (if given) → update missing phone/lid on the existing row.
-// 2. Else by phone (if given) → update missing lid.
-// 3. Else insert. Handles races by re-reading on unique violation.
-async function upsertContact(
-  supabase: Supabase,
-  phone: string | null,
-  lid: string | null,
-  pushName: string | null,
-  jid: string | null = null,
-): Promise<string> {
-  let existing: { id: string; phone: string | null; lid: string | null; push_name: string | null; jid: string | null } | null = null;
+// ---------------------------------------------------------------------------
+// Tipo/conteúdo da mensagem
+// ---------------------------------------------------------------------------
 
-  if (lid) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("lid", lid)
-      .maybeSingle();
-    if (data) existing = data;
+function mapMessageType(raw: RawMessage): {
+  type: string;
+  content: string;
+  mediaMessage: EvolutionMedia | null;
+} {
+  let message = (raw.message ?? {}) as Record<string, any>;
+  const unwrap = (m: Record<string, any>): Record<string, any> => {
+    if (m.ephemeralMessage?.message) return unwrap(m.ephemeralMessage.message);
+    if (m.viewOnceMessage?.message) return unwrap(m.viewOnceMessage.message);
+    if (m.viewOnceMessageV2?.message) return unwrap(m.viewOnceMessageV2.message);
+    if (m.documentWithCaptionMessage?.message) return unwrap(m.documentWithCaptionMessage.message);
+    return m;
+  };
+  message = unwrap(message);
+
+  if (message.conversation !== undefined) {
+    return { type: "text", content: String(message.conversation ?? ""), mediaMessage: null };
   }
-
-  if (!existing && phone) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("phone", phone)
-      .maybeSingle();
-    if (data) existing = data;
+  if (message.extendedTextMessage) {
+    return {
+      type: "text",
+      content: String(message.extendedTextMessage.text ?? ""),
+      mediaMessage: null,
+    };
   }
-
-  // Legacy fallback: pre-LID data stored the LID inside `phone` as `lid:<digits>`.
-  if (!existing && lid) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("phone", `lid:${lid.replace(/^lid:/, "")}`)
-      .maybeSingle();
-    if (data) existing = data;
-  }
-
-  if (existing) {
-    const patch: Record<string, unknown> = {};
-    if (pushName && existing.push_name !== pushName) patch.push_name = pushName;
-    if (jid && existing.jid !== jid) patch.jid = jid;
-    if (phone && !existing.phone) patch.phone = phone;
-    if (lid && existing.lid !== lid) patch.lid = lid;
-    if (Object.keys(patch).length > 0) {
-      await supabase.from("contacts").update(patch).eq("id", existing.id);
+  const mediaTypes: Record<string, string> = {
+    imageMessage: "image",
+    audioMessage: "audio",
+    videoMessage: "video",
+    documentMessage: "document",
+    stickerMessage: "sticker",
+  };
+  for (const [key, type] of Object.entries(mediaTypes)) {
+    if (message[key]) {
+      const m = message[key] as EvolutionMedia;
+      const content =
+        type === "document"
+          ? String(m.fileName ?? m.caption ?? "")
+          : String(m.caption ?? "");
+      return { type, content, mediaMessage: m };
     }
-    return existing.id;
   }
-
-  const { data, error } = await supabase
-    .from("contacts")
-    .insert({ phone, lid, push_name: pushName ?? null, name: pushName ?? null, jid })
-    .select("id")
-    .single();
-  if (error) {
-    // Race: another webhook call created it meanwhile.
-    const filter = lid
-      ? { field: "lid", value: lid }
-      : phone
-      ? { field: "phone", value: phone }
-      : null;
-    if (filter) {
-      const { data: again } = await supabase
-        .from("contacts")
-        .select("id")
-        .eq(filter.field, filter.value)
-        .maybeSingle();
-      if (again) return again.id;
-    }
-    throw error;
-  }
-  return data.id;
-}
-
-async function upsertConversation(
-  supabase: Supabase,
-  contactId: string,
-  instanceId: string,
-): Promise<string> {
-  const { data: existing } = await supabase
-    .from("conversations")
-    .select("id")
-    .eq("contact_id", contactId)
-    .eq("instance_id", instanceId)
-    .maybeSingle();
-  if (existing) return existing.id;
-  const { data, error } = await supabase
-    .from("conversations")
-    .insert({ contact_id: contactId, instance_id: instanceId })
-    .select("id")
-    .single();
-  if (error) {
-    const { data: again } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("contact_id", contactId)
-      .eq("instance_id", instanceId)
-      .maybeSingle();
-    if (again) return again.id;
-    throw error;
-  }
-  return data.id;
+  return { type: "unknown", content: "", mediaMessage: null };
 }
 
 // ---------------------------------------------------------------------------
-// Message processing
+// Processamento de mensagem
 // ---------------------------------------------------------------------------
 
 async function processMessage(
@@ -402,11 +194,18 @@ async function processMessage(
   const jid = raw.key?.remoteJid ?? "";
   if (!isRelevantJid(jid)) return;
 
-  const { phone, lid } = resolveIdentity(jid, {
-    senderPn: raw.key?.senderPn,
+  // EVOLUTION_IDENTITY_RESOLVED — a camada central decide phone/LID.
+  const identity = normalizeWhatsAppIdentity({
+    remoteJid: jid,
     remoteJidAlt: raw.key?.remoteJidAlt,
+    senderPn: raw.key?.senderPn,
   });
-  if (!phone && !lid) return;
+  const { phone, lid } = identity;
+  if (!phone && !lid) {
+    console.warn("EVOLUTION_IDENTITY_UNRESOLVED", jid);
+    return;
+  }
+  if (identity.isLid) console.info("EVOLUTION_LID_DETECTED", identity.lid, phone ? `phone=${phone}` : "sem phone");
 
   const fromMe = Boolean(raw.key?.fromMe);
   const evolutionId = raw.key?.id ?? null;
@@ -414,7 +213,7 @@ async function processMessage(
   const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
   const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
 
-  // Business rule: keep only the last 60 days of history.
+  // Regra de negócio: manter apenas os últimos 60 dias de histórico.
   const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
   if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
     return;
@@ -424,10 +223,12 @@ async function processMessage(
     ? content.slice(0, 140)
     : content.slice(0, 140) || `[${type}]`;
 
-  // Outbound echoes carry the business's own pushName ("Você") — only inbound
-  // messages carry the contact's real name.
+  // Ecos outbound carregam o pushName da própria empresa ("Você") — somente
+  // mensagens inbound carregam o nome real do contato.
   const pushName = !fromMe ? raw.pushName ?? null : null;
+
   const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
+  console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   let mediaUrl: string | null = null;
@@ -456,12 +257,15 @@ async function processMessage(
       content: content || null,
       media_url: mediaUrl,
       sent_at: sentAt,
+      status: "sent",
     },
     { onConflict: "conversation_id, evolution_message_id", ignoreDuplicates: true },
   );
 
   if (error) {
-    console.error("message insert failed", error.message, { conversationId, evolutionId });
+    console.error("EVOLUTION_MESSAGE_INSERT_FAILED", error.message, { conversationId, evolutionId });
+  } else {
+    console.info("EVOLUTION_MESSAGE_CREATED", evolutionId);
   }
 
   await supabase.rpc("bump_conversation", {
@@ -473,7 +277,86 @@ async function processMessage(
 }
 
 // ---------------------------------------------------------------------------
-// Event handlers
+// Atualização de status (messages.update) — confirmação de entrega/leitura
+// ---------------------------------------------------------------------------
+
+async function handleMessageUpdate(
+  supabase: Supabase,
+  instanceName: string,
+  data: StatusUpdate[] | StatusUpdate | null,
+): Promise<Response> {
+  const { data: instance } = await supabase
+    .from("whatsapp_instances")
+    .select("id")
+    .eq("instance_name", instanceName)
+    .maybeSingle();
+  if (!instance) {
+    return jsonResponse(200, { ok: true, skipped: "unknown instance" });
+  }
+
+  const list: StatusUpdate[] = Array.isArray(data) ? data : data ? [data] : [];
+  let updated = 0;
+  for (const upd of list) {
+    const status = STATUS_MAP[Number(upd.status)];
+    if (!status) continue;
+    const evolutionId = upd.key?.id ?? null;
+    if (!evolutionId) continue;
+
+    // Aplica apenas a mensagens que enviamos (receipts de entrega/leitura).
+    if (upd.key?.fromMe === false) continue;
+
+    const identity = normalizeWhatsAppIdentity({
+      remoteJid: upd.key?.remoteJid,
+      remoteJidAlt: upd.key?.remoteJidAlt,
+      senderPn: upd.key?.senderPn,
+    });
+    const { phone, lid } = identity;
+    if (!phone && !lid) continue;
+
+    // Localiza o contato (somente leitura — um status nunca cria contato).
+    let contactId: string | null = null;
+    if (lid) {
+      const { data: c } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq("lid", lid)
+        .maybeSingle();
+      if (c) contactId = c.id;
+    }
+    if (!contactId && phone) {
+      const { data: c } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq("phone", phone)
+        .maybeSingle();
+      if (c) contactId = c.id;
+    }
+    if (!contactId) continue;
+
+    const { data: conv } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("contact_id", contactId)
+      .eq("instance_id", instance.id)
+      .maybeSingle();
+    if (!conv) continue;
+
+    const { error } = await supabase.rpc("update_message_status", {
+      p_conversation_id: conv.id,
+      p_evolution_message_id: evolutionId,
+      p_status: status,
+    });
+    if (error) {
+      console.error("EVOLUTION_STATUS_UPDATE_FAILED", error.message);
+    } else {
+      updated += 1;
+    }
+  }
+  return jsonResponse(200, { ok: true, updated });
+}
+
+// ---------------------------------------------------------------------------
+// Conexão
 // ---------------------------------------------------------------------------
 
 async function handleConnectionUpdate(
@@ -496,10 +379,14 @@ async function handleConnectionUpdate(
       .from("whatsapp_instances")
       .update({ status })
       .eq("id", instance.id);
-    if (error) console.error("instance status update failed", error.message);
+    if (error) console.error("EVOLUTION_INSTANCE_STATUS_FAILED", error.message);
   }
   return jsonResponse(200, { ok: true, status });
 }
+
+// ---------------------------------------------------------------------------
+// Mensagens
+// ---------------------------------------------------------------------------
 
 async function handleMessages(
   supabase: Supabase,
@@ -521,7 +408,7 @@ async function handleMessages(
     ? [data]
     : [];
 
-  // Limited concurrency for large history batches.
+  // Concorrência limitada para lotes grandes de histórico.
   const BATCH = 10;
   for (let i = 0; i < list.length; i += BATCH) {
     const chunk = list.slice(i, i + BATCH);
@@ -532,14 +419,13 @@ async function handleMessages(
   return jsonResponse(200, { ok: true, processed: list.length });
 }
 
-// Ingest the contact list (`contacts.set`/`contacts.upsert`). The address book
-// is imported as CRM contacts; LID entries keep the LID and the real phone when
-// the server provides it (via `number` or a phone-based remoteJid).
-//
-// Evolution contact payloads look like { id, pushName, number, remoteJid } —
-// NOT a RawMessage — so we can't use resolveIdentity() here. We resolve phone
-// and lid directly: a phone-based remoteJid yields a phone; a LID remoteJid
-// yields a lid, and the real phone (when available) comes from `number`.
+// ---------------------------------------------------------------------------
+// Contatos (address book)
+// ---------------------------------------------------------------------------
+
+// Ingest da lista de contatos (`contacts.set`/`contacts.upsert`). A agenda é
+// importada como contatos do CRM; entradas LID mantêm o LID e o telefone real
+// quando o servidor fornece (`number` ou um remoteJid baseado em telefone).
 async function handleContacts(
   supabase: Supabase,
   data:
@@ -555,16 +441,15 @@ async function handleContacts(
     let phone: string | null = null;
     let lid: string | null = null;
 
-    if (jid.endsWith("@s.whatsapp.net")) {
-      const digits = stripNumberSuffix(jid);
-      phone = normalizePhoneStrict(digits);
-      if (!phone && digits.length >= 12) lid = `lid:${digits}`;
-    } else if (jid.endsWith("@lid")) {
-      const digits = stripNumberSuffix(jid);
-      lid = digits.length >= 8 ? `lid:${digits}` : null;
+    const identity = normalizeWhatsAppIdentity({ remoteJid: jid });
+    if (identity.phone) {
+      phone = identity.phone;
+    } else if (identity.lid) {
+      lid = identity.lid;
+      // Para LID, o telefone real (quando disponível) vem em `number`.
       phone = normalizePhoneStrict(contact.number);
     } else {
-      // No usable remoteJid — fall back to `number` for the phone.
+      // Sem remoteJid utilizável — cai no `number`.
       phone = normalizePhoneStrict(contact.number);
     }
 
@@ -573,7 +458,7 @@ async function handleContacts(
       await upsertContact(supabase, phone, lid, contact.pushName ?? null, jid || null);
       processed += 1;
     } catch (err) {
-      console.error("handleContacts upsert failed", err);
+      console.error("EVOLUTION_CONTACT_IMPORT_FAILED", err);
     }
   }
   return jsonResponse(200, { ok: true, processed });
@@ -588,8 +473,8 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // Fail-closed: if the webhook secret is missing, reject everything. Without
-  // this, a misconfigured deploy would accept unauthenticated payloads.
+  // Fail-closed: sem WEBHOOK_SECRET configurado, rejeita tudo. Sem isso um
+  // deploy mal configurado aceitaria payloads não autenticados.
   if (!WEBHOOK_SECRET) {
     return jsonResponse(500, { error: "webhook secret not configured" });
   }
@@ -611,6 +496,8 @@ Deno.serve(async (req) => {
       case "messages.upsert":
       case "messages.set":
         return await handleMessages(supabase, instanceName, payload.data);
+      case "messages.update":
+        return await handleMessageUpdate(supabase, instanceName, payload.data);
       case "contacts.set":
       case "contacts.upsert":
         return await handleContacts(supabase, payload.data);
@@ -618,7 +505,7 @@ Deno.serve(async (req) => {
         return jsonResponse(200, { ok: true, ignored: event });
     }
   } catch (err) {
-    console.error("evolution-webhook error", err);
+    console.error("EVOLUTION_WEBHOOK_ERROR", err);
     return jsonResponse(500, { error: "internal error" });
   }
 });
