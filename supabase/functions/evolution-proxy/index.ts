@@ -326,12 +326,13 @@ async function actionSendText(
   if (!text) return jsonResponse(400, { error: "text is required" });
 
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
-  const { res, data } = await callEvolution(`/message/sendText/${instance_name}`, {
+  // This Evolution server uses the v1 schema: `{ number, text }`.
+  const { res, data, text: respText } = await callEvolution(`/message/sendText/${instance_name}`, {
     method: "POST",
-    body: { number: phone, textMessage: { text } },
+    body: { number: phone, text },
   });
   if (!res.ok) {
-    return jsonResponse(res.status, { error: `evolution sendText failed: ${JSON.stringify(data?.error ?? data)}` });
+    return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
   }
 
   const evolutionId = data?.key?.id ?? null;
@@ -391,7 +392,7 @@ async function actionSendMedia(
     data = null;
   }
   if (!res.ok) {
-    return jsonResponse(res.status, { error: `evolution sendMedia failed: ${JSON.stringify(data?.error ?? data)}` });
+    return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
 
   const evolutionId = data?.key?.id ?? null;
