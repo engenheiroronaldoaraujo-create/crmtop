@@ -1134,83 +1134,6 @@ async function actionSyncNames(
   return jsonResponse(200, { ok: true, done, page, totalPages: pages, named, lastError });
 }
 
-// TEMP: dump full message key objects to check for senderPn / remoteJidAlt.
-async function actionDebugKeys(
-  supabase: Supabase,
-  body: { instance_id?: string },
-): Promise<Response> {
-  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
-  const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, { method: "POST", body: { page: 1 } });
-  if (!res.ok) return jsonResponse(500, { error: "findMessages failed" });
-  const records = data?.messages?.records ?? [];
-  const keys = records.slice(0, 8).map((r: any) => ({
-    fullKey: r.key ?? null,
-    pushName: r.pushName,
-    sender: r.sender ?? null,
-    participant: r.key?.participant ?? null,
-  }));
-  return jsonResponse(200, { keys });
-}
-
-// TEMP: find the LID behind a phone number by searching message remoteJidAlt.
-async function actionFindLidByPhone(
-  supabase: Supabase,
-  body: { instance_id?: string; phone?: string },
-): Promise<Response> {
-  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
-  const target = (body.phone ?? "").replace(/[^\d]/g, "");
-  const found: any[] = [];
-  const altJid = `${target}@s.whatsapp.net`;
-
-  // Try the `where` filter first, but VERIFY each result really matches.
-  const attempts = [
-    { where: { key: { remoteJidAlt: altJid } } },
-    { where: { remoteJidAlt: altJid } },
-  ];
-  for (const q of attempts) {
-    const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, {
-      method: "POST",
-      body: q,
-    });
-    if (res.ok) {
-      for (const rec of data?.messages?.records ?? []) {
-        if (String(rec?.key?.remoteJidAlt ?? "").replace(/[^\d]/g, "") === target) {
-          found.push({
-            remoteJid: rec?.key?.remoteJid,
-            pushName: rec?.pushName,
-            remoteJidAlt: rec?.key?.remoteJidAlt,
-            fromMe: rec?.key?.fromMe,
-          });
-        }
-      }
-      if (found.length > 0) return jsonResponse(200, { target, method: "where", found });
-    }
-  }
-
-  // Fallback: full scan of all pages.
-  for (let page = 1; page <= 453 && found.length < 3; page++) {
-    const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, {
-      method: "POST",
-      body: { page },
-    });
-    if (!res.ok) break;
-    for (const rec of data?.messages?.records ?? []) {
-      const alt = String(rec?.key?.remoteJidAlt ?? "").replace(/[^\d]/g, "");
-      if (alt === target) {
-        found.push({
-          remoteJid: rec?.key?.remoteJid,
-          pushName: rec?.pushName,
-          remoteJidAlt: rec?.key?.remoteJidAlt,
-          fromMe: rec?.key?.fromMe,
-        });
-      }
-    }
-    const pages = data?.messages?.pages ?? 0;
-    if (page >= pages) break;
-  }
-  return jsonResponse(200, { target, method: "scan", found });
-}
-
 // Links a conversation to a phone number the operator knows. If a contact with
 // that phone exists, the LID contact is merged into it (conversations, messages
 // and the LID move over). Otherwise the phone is set directly on the contact.
@@ -1247,7 +1170,6 @@ async function actionLinkConversationPhone(
     if (contact.lid) {
       await mergeLidIntoPhone(supabase, contact.lid, phoneContact.id);
     } else {
-      // Contact has no LID: re-point its conversations to the phone contact.
       const { data: phoneConvs } = await supabase
         .from("conversations")
         .select("id, instance_id")
@@ -1270,10 +1192,7 @@ async function actionLinkConversationPhone(
     return jsonResponse(200, { ok: true, merged: true, phone, contact_id: phoneContact.id });
   }
 
-  // No other phone contact: set the phone directly on this contact.
-  const patch: Record<string, unknown> = { phone };
-  if (!contact.lid && !contact.phone) patch.phone = phone;
-  await supabase.from("contacts").update(patch).eq("id", contact.id);
+  await supabase.from("contacts").update({ phone }).eq("id", contact.id);
   return jsonResponse(200, { ok: true, merged: false, phone, contact_id: contact.id });
 }
 
@@ -1404,14 +1323,6 @@ Deno.serve(async (req) => {
         await requireAdmin(user);
         return await actionSyncNames(supabase, body);
       }
-      case "debug-keys": {
-        await requireAdmin(user);
-        return await actionDebugKeys(supabase, body);
-      }
-      case "find-lid-by-phone": {
-        await requireAdmin(user);
-        return await actionFindLidByPhone(supabase, body);
-      }
       case "link-conversation-phone": {
         await requireAdmin(user);
         return await actionLinkConversationPhone(supabase, body);
@@ -1422,6 +1333,6 @@ Deno.serve(async (req) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("evolution-proxy error", err);
-    return jsonResponse(500, { error: "internal error" });
+    return jsonResponse(500, { error: err instanceof Error ? err.message : "internal error" });
   }
 });
