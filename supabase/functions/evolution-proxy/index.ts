@@ -508,10 +508,8 @@ async function actionSyncContacts(
   const rows: Array<{ phone: string; push_name?: string | null; jid?: string | null }> = [];
   let withPhone = 0;
   for (const c of contacts) {
-    const jid = c.remoteJid ?? "";
-    if (!jid.endsWith("@s.whatsapp.net")) continue;
-    const phone = jid.split("@")[0].replace(/[^\d]/g, "");
-    if (phone.length < 10) continue;
+    const phone = historyPhone(c.remoteJid ?? "");
+    if (!phone) continue;
     withPhone += 1;
     rows.push({ phone, ...(c.pushName ? { push_name: c.pushName } : {}), jid: c.remoteJid ?? null });
   }

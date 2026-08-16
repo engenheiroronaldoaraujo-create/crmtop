@@ -4,7 +4,7 @@ import { Pencil, Plus, Search, Trash2, MessageCircle } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { formatPhone, isRealPhone } from "@/lib/utils"
+import { contactDisplayName, formatPhone, isRealPhone } from "@/lib/utils"
 import type { Contact } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { Button } from "@/components/ui/button"
@@ -155,7 +155,7 @@ export default function ContactsPage() {
   }
 
   async function handleDelete(contact: Contact) {
-    if (!window.confirm(`Excluir o contato ${contact.name || contact.phone}?`)) return
+    if (!window.confirm(`Excluir o contato ${contactDisplayName(contact)}?`)) return
     setDeletingId(contact.id)
     const { error } = await supabase.from("contacts").delete().eq("id", contact.id)
     setDeletingId(null)
