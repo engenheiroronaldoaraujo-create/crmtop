@@ -74,6 +74,15 @@ export function contactDisplayName(c: {
   const n = c.name || c.push_name
   if (n) return n
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
-  // LID-only contact with no name: show a neutral label, never the raw LID.
+  // LID-only contact with no name: the only available number is the LID. Show
+  // its digits (masking the middle) so the conversation is identifiable,
+  // instead of a generic "Contato sem número".
+  if (c.lid) {
+    const digits = c.lid.replace(/^lid:/, "").replace(/[^\d]/g, "")
+    if (digits.length >= 4) {
+      return `•••• ${digits.slice(-4)}`
+    }
+    return digits || "Contato sem número"
+  }
   return "Contato sem número"
 }

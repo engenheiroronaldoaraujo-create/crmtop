@@ -643,19 +643,28 @@ async function actionSyncContacts(
   // carries both pushName and lastMessage.key.remoteJidAlt (the real phone).
   // Falls back to the chat-level pushName for LID contacts with no lastMessage
   // — so a name is captured even when we never resolved a phone.
+  //
+  // Key fix: when a LID chat also exposes the real phone (via remoteJidAlt), we
+  // upsert ON CONFLICT (lid) — attaching the phone to the SAME LID contact that
+  // owns the conversation. The old code upserted ON CONFLICT (phone), which
+  // created a separate phone contact and left the LID contact (and its
+  // conversation) unidentified.
   let named = 0;
   try {
     const { res, data } = await callEvolution(`/chat/findChats/${instance_name}`, { method: "POST", body: {} });
     if (res.ok && Array.isArray(data)) {
       const namePhoneRows: Array<{ phone: string; push_name: string; jid: string }> = [];
-      const nameLidRows: Array<{ lid: string; push_name: string }> = [];
+      const lidRows: Array<{ lid: string; push_name: string | null; phone: string | null }> = [];
       for (const chat of data) {
         if (chat.isGroup) continue;
         const jid = chat.remoteJid ?? "";
+        const isLid = jid.endsWith("@lid");
+        const lidDigits = isLid ? jid.split("@")[0].replace(/[^\d]/g, "") : "";
         const pushName = (chat.pushName ?? chat.lastMessage?.pushName ?? "").trim();
-        if (!pushName || pushName.toLowerCase() === "você") continue;
-        // Skip names that are just the contact's own identifier digits.
-        const lidDigits = jid.endsWith("@lid") ? jid.split("@")[0].replace(/[^\d]/g, "") : "";
+        const pushLower = pushName.toLowerCase();
+        if (pushLower === "você" || pushLower === "voce") continue;
+
+        // Skip names that are just the contact's own LID digits (not a real name).
         if (lidDigits && pushName === lidDigits) continue;
 
         // Extract the real phone from the last message's remoteJidAlt.
@@ -668,10 +677,15 @@ async function actionSyncContacts(
           phone = normalizePhoneStrict(clean);
         }
 
-        if (phone) {
+        if (isLid) {
+          // Always enrich the LID contact (name and/or phone) on conflict lid.
+          lidRows.push({
+            lid: `lid:${lidDigits}`,
+            push_name: pushName || null,
+            phone,
+          });
+        } else if (phone) {
           namePhoneRows.push({ phone, push_name: pushName, jid });
-        } else if (jid.endsWith("@lid")) {
-          nameLidRows.push({ lid: `lid:${lidDigits}`, push_name: pushName });
         }
         // A chat with neither phone nor LID (e.g. @g.us already filtered) is skipped.
       }
@@ -680,9 +694,12 @@ async function actionSyncContacts(
         const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "phone" });
         if (!error) named += chunk.length;
       }
-      for (let i = 0; i < nameLidRows.length; i += 200) {
-        const chunk = nameLidRows.slice(i, i + 200);
-        const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
+      for (let i = 0; i < lidRows.length; i += 200) {
+        const chunk = lidRows.slice(i, i + 200);
+        // On conflict lid: set push_name AND backfill the phone when present.
+        const { error } = await supabase
+          .from("contacts")
+          .upsert(chunk, { onConflict: "lid" });
         if (!error) named += chunk.length;
       }
     }
@@ -1104,8 +1121,9 @@ async function actionSyncNames(
 
     // Dedupe by key (phone or lid): the same contact appears multiple times per
     // page and ON CONFLICT DO UPDATE can't affect the same row twice in one
-    // statement.
-    const nameMap = new Map<string, { push_name: string; lid?: boolean }>();
+    // statement. Also capture the real phone (from remoteJidAlt/senderPn) for LID
+    // contacts so they become identifiable.
+    const nameMap = new Map<string, { push_name: string; lid?: boolean; phone?: string | null }>();
     for (const rec of records) {
       if (rec?.key?.fromMe) continue; // outbound echoes carry the business's own name
       const key = historyPhone(rec?.key?.remoteJid ?? "");
@@ -1115,13 +1133,18 @@ async function actionSyncNames(
       // Skip names that are just the contact's own identifier digits.
       if (name === key.replace(/^lid:/, "")) continue;
       if (!nameMap.has(key)) {
-        nameMap.set(key, { push_name: name, lid: key.startsWith("lid:") });
+        const { phone } = resolveKeyIdentity(rec.key ?? {});
+        nameMap.set(key, {
+          push_name: name,
+          lid: key.startsWith("lid:"),
+          phone: key.startsWith("lid:") ? phone : undefined,
+        });
       }
     }
     const namePhoneRows: Array<{ phone: string; push_name: string }> = [];
-    const nameLidRows: Array<{ lid: string; push_name: string }> = [];
+    const nameLidRows: Array<{ lid: string; push_name: string; phone: string | null }> = [];
     for (const [key, v] of nameMap) {
-      if (v.lid) nameLidRows.push({ lid: key, push_name: v.push_name });
+      if (v.lid) nameLidRows.push({ lid: key, push_name: v.push_name, phone: v.phone ?? null });
       else namePhoneRows.push({ phone: key, push_name: v.push_name });
     }
     for (let i = 0; i < namePhoneRows.length; i += 200) {
@@ -1136,6 +1159,7 @@ async function actionSyncNames(
     }
     for (let i = 0; i < nameLidRows.length; i += 200) {
       const chunk = nameLidRows.slice(i, i + 200);
+      // On conflict lid: set push_name AND backfill the phone when present.
       const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "lid" });
       if (error) {
         console.error("syncNames upsert failed", error.message);

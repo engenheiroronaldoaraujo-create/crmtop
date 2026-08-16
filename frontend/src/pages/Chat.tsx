@@ -556,7 +556,11 @@ export default function ChatPage() {
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold">{contactName}</p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {selected.contact && isRealPhone(selected.contact.phone) ? formatPhone(selected.contact.phone) : "WhatsApp"}
+                  {selected.contact && isRealPhone(selected.contact.phone)
+                    ? formatPhone(selected.contact.phone)
+                    : selected.contact?.lid
+                      ? contactDisplayName(selected.contact)
+                      : "WhatsApp"}
                   {" · "}
                   {instance
                     ? instance.status === "connected"
