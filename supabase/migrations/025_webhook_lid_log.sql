@@ -20,6 +20,8 @@ create table if not exists public.webhook_lid_log (
 -- Único (instance_name, message_id) permite múltiplos NULLs em message_id e
 -- viabiliza ON CONFLICT simples no upsert.
 alter table public.webhook_lid_log
+  drop constraint if exists webhook_lid_log_uniq;
+alter table public.webhook_lid_log
   add constraint webhook_lid_log_uniq unique (instance_name, message_id);
 
 alter table public.webhook_lid_log enable row level security;
