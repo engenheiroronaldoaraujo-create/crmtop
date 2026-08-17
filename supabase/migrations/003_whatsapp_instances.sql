@@ -1,4 +1,4 @@
-﻿-- 003_whatsapp_instances.sql
+-- 003_whatsapp_instances.sql
 -- WhatsApp instances. F1 manages a single row; the schema already supports N.
 
 create table if not exists public.whatsapp_instances (
