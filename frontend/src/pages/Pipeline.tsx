@@ -13,6 +13,10 @@ import {
   User,
   Loader2,
   DollarSign,
+  Calendar,
+  Check,
+  Clock,
+  Trash2,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
@@ -81,7 +85,11 @@ function OpportunityCard({
   onReopen,
   onChat,
   onAssign,
+  onDelete,
   tags,
+  onCreateMeeting,
+  onCreateTask,
+  onCreateFollowUp,
 }: {
   opportunity: Opportunity
   index: number
@@ -91,7 +99,11 @@ function OpportunityCard({
   onReopen: (o: Opportunity) => void
   onChat: (o: Opportunity) => void
   onAssign: (o: Opportunity) => void
+  onDelete?: (o: Opportunity) => void
   tags?: { tag_id: string; tag?: { name: string; color: string } }[]
+  onCreateMeeting?: (o: Opportunity) => void
+  onCreateTask?: (o: Opportunity) => void
+  onCreateFollowUp?: (o: Opportunity) => void
 }) {
   const contact = opportunity.contact
   const assignee = opportunity.assignee
@@ -138,6 +150,22 @@ function OpportunityCard({
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuSeparator />
+                    {onCreateMeeting && (
+                      <DropdownMenuItem onClick={() => onCreateMeeting(opportunity)}>
+                        <Calendar className="mr-2 h-3 w-3 text-blue-600" /> Agendar reunião
+                      </DropdownMenuItem>
+                    )}
+                    {onCreateTask && (
+                      <DropdownMenuItem onClick={() => onCreateTask(opportunity)}>
+                        <Check className="mr-2 h-3 w-3 text-green-600" /> Criar tarefa
+                      </DropdownMenuItem>
+                    )}
+                    {onCreateFollowUp && (
+                      <DropdownMenuItem onClick={() => onCreateFollowUp(opportunity)}>
+                        <Clock className="mr-2 h-3 w-3 text-orange-600" /> Criar follow-up
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator />
                     {opportunity.status === "open" ? (
                       <>
                         <DropdownMenuItem onClick={() => onWin(opportunity)}>
@@ -151,6 +179,14 @@ function OpportunityCard({
                       <DropdownMenuItem onClick={() => onReopen(opportunity)}>
                         <RotateCcw className="mr-2 h-3 w-3" /> Reabrir
                       </DropdownMenuItem>
+                    )}
+                    {onDelete && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => onDelete(opportunity)} className="text-destructive">
+                          <Trash2 className="mr-2 h-3 w-3" /> Excluir
+                        </DropdownMenuItem>
+                      </>
                     )}
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -219,6 +255,10 @@ function KanbanColumn({
   onReopen,
   onChat,
   onAssign,
+  onDelete,
+  onCreateMeeting,
+  onCreateTask,
+  onCreateFollowUp,
 }: {
   stage: PipelineStage
   opportunities: Opportunity[]
@@ -229,6 +269,10 @@ function KanbanColumn({
   onReopen: (o: Opportunity) => void
   onChat: (o: Opportunity) => void
   onAssign: (o: Opportunity) => void
+  onDelete?: (o: Opportunity) => void
+  onCreateMeeting?: (o: Opportunity) => void
+  onCreateTask?: (o: Opportunity) => void
+  onCreateFollowUp?: (o: Opportunity) => void
 }) {
   const totalValue = useMemo(
     () => opportunities.reduce((sum, o) => sum + (o.value ?? 0), 0),
@@ -285,6 +329,10 @@ function KanbanColumn({
                 onReopen={onReopen}
                 onChat={onChat}
                 onAssign={onAssign}
+                onDelete={onDelete}
+                onCreateMeeting={onCreateMeeting}
+                onCreateTask={onCreateTask}
+                onCreateFollowUp={onCreateFollowUp}
               />
             ))}
             {provided.placeholder}
@@ -687,6 +735,127 @@ function AssignDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Quick Activity Form (from Kanban card)
+// ---------------------------------------------------------------------------
+
+function QuickActivityForm({
+  type,
+  opportunity,
+  profiles,
+  onSave,
+}: {
+  type: "meeting" | "task" | "follow_up"
+  opportunity: Opportunity | null
+  profiles: Profile[]
+  onSave: (data: any) => Promise<void>
+}) {
+  const { user } = useAuth()
+  const [title, setTitle] = useState("")
+  const [date, setDate] = useState(new Date().toISOString().split("T")[0])
+  const [time, setTime] = useState("09:00")
+  const [endTime, setEndTime] = useState("09:30")
+  const [assignedTo, setAssignedTo] = useState(opportunity?.assigned_to ?? user?.id ?? "")
+  const [priority, setPriority] = useState("normal")
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setAssignedTo(opportunity?.assigned_to ?? user?.id ?? "")
+  }, [opportunity, user?.id])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!title.trim()) return
+    setSaving(true)
+    try {
+      if (type === "meeting") {
+        const startAt = new Date(`${date}T${time}:00`).toISOString()
+        const endAt = endTime ? new Date(`${date}T${endTime}:00`).toISOString() : null
+        await onSave({
+          title: title.trim(),
+          contact_id: opportunity?.contact_id ?? null,
+          opportunity_id: opportunity?.id ?? null,
+          assigned_to: assignedTo || null,
+          start_at: startAt,
+          end_at: endAt,
+          created_by: user?.id ?? null,
+        })
+      } else {
+        const dueAt = date && time ? new Date(`${date}T${time}:00`).toISOString() : null
+        await onSave({
+          title: title.trim(),
+          contact_id: opportunity?.contact_id ?? null,
+          opportunity_id: opportunity?.id ?? null,
+          assigned_to: assignedTo || null,
+          task_type: type,
+          due_at: dueAt,
+          priority,
+          created_by: user?.id ?? null,
+        })
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      <div className="space-y-2">
+        <Label>Título *</Label>
+        <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={
+          type === "meeting" ? "Ex: Reunião de proposta" :
+          type === "follow_up" ? "Ex: Confirmar proposta" : "Ex: Enviar documentação"
+        } required />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <Label>Data</Label>
+          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </div>
+        <div className="space-y-2">
+          <Label>Hora</Label>
+          <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+        </div>
+      </div>
+      {type === "meeting" && (
+        <div className="space-y-2">
+          <Label>Hora fim</Label>
+          <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+        </div>
+      )}
+      {type !== "meeting" && (
+        <div className="space-y-2">
+          <Label>Prioridade</Label>
+          <Select value={priority} onValueChange={setPriority}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="low">Baixa</SelectItem>
+              <SelectItem value="normal">Normal</SelectItem>
+              <SelectItem value="high">Alta</SelectItem>
+              <SelectItem value="urgent">Urgente</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      <div className="space-y-2">
+        <Label>Responsável</Label>
+        <Select value={assignedTo} onValueChange={setAssignedTo}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "—"}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      <DialogFooter>
+        <Button type="submit" disabled={saving || !title.trim()}>
+          {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {type === "meeting" ? "Agendar" : "Criar"}
+        </Button>
+      </DialogFooter>
+    </form>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline Page
 // ---------------------------------------------------------------------------
 
@@ -726,6 +895,11 @@ export default function PipelinePage() {
   const [loseTarget, setLoseTarget] = useState<Opportunity | null>(null)
   const [assignOpen, setAssignOpen] = useState(false)
   const [assignOpp, setAssignOpp] = useState<Opportunity | null>(null)
+
+  // Activity creation from Kanban
+  const [actType, setActType] = useState<"meeting" | "task" | "follow_up">("meeting")
+  const [actOpen, setActOpen] = useState(false)
+  const [actOpp, setActOpp] = useState<Opportunity | null>(null)
 
   // Load contacts and profiles
   useEffect(() => {
@@ -856,6 +1030,13 @@ export default function PipelinePage() {
     toast.success("Oportunidade reaberta")
   }
 
+  const handleDeleteOpp = async (opp: Opportunity) => {
+    if (!window.confirm(`Excluir a oportunidade "${opp.title}"? O contato será mantido.`)) return
+    await supabase.from("opportunities").delete().eq("id", opp.id)
+    await refreshOpps()
+    toast.success("Oportunidade excluída")
+  }
+
   const handleAssign = async (userId: string | null) => {
     if (!assignOpp) return
     await updateOpp(assignOpp.id, { assigned_to: userId })
@@ -966,6 +1147,10 @@ export default function PipelinePage() {
                   onReopen={handleReopen}
                   onChat={handleChat}
                   onAssign={(o) => { setAssignOpp(o); setAssignOpen(true) }}
+                  onDelete={handleDeleteOpp}
+                  onCreateMeeting={(o) => { setActOpp(o); setActType("meeting"); setActOpen(true) }}
+                  onCreateTask={(o) => { setActOpp(o); setActType("task"); setActOpen(true) }}
+                  onCreateFollowUp={(o) => { setActOpp(o); setActType("follow_up"); setActOpen(true) }}
                 />
               ))}
             </div>
@@ -1017,6 +1202,28 @@ export default function PipelinePage() {
         currentAssignee={assignOpp?.assigned_to ?? null}
         onAssign={handleAssign}
       />
+
+      {/* Quick activity creation from Kanban */}
+      <Dialog open={actOpen} onOpenChange={setActOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {actType === "meeting" ? "Agendar Reunião" : actType === "follow_up" ? "Criar Follow-up" : "Criar Tarefa"}
+            </DialogTitle>
+          </DialogHeader>
+          <QuickActivityForm
+            type={actType}
+            opportunity={actOpp}
+            profiles={profiles}
+            onSave={async (data) => {
+              const table = actType === "meeting" ? "meetings" : "opportunity_tasks"
+              await supabase.from(table).insert(data)
+              setActOpen(false)
+              toast.success(actType === "meeting" ? "Reunião agendada" : actType === "follow_up" ? "Follow-up criado" : "Tarefa criada")
+            }}
+          />
+        </DialogContent>
+      </Dialog>
     </div>
     </>
   )
