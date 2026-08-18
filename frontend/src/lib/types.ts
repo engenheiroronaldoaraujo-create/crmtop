@@ -181,3 +181,34 @@ export type ActivityLog = {
   new_data: Record<string, unknown> | null
   created_at: string
 }
+
+// ---------------------------------------------------------------------------
+// Tags
+// ---------------------------------------------------------------------------
+
+export type Tag = {
+  id: string
+  name: string
+  description: string | null
+  color: string
+  is_active: boolean
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type ContactTag = {
+  id: string
+  contact_id: string
+  tag_id: string
+  created_at: string
+  tag?: Tag
+}
+
+export type OpportunityTag = {
+  id: string
+  opportunity_id: string
+  tag_id: string
+  created_at: string
+  tag?: Tag
+}

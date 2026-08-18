@@ -17,6 +17,7 @@ import {
   Loader2,
   Paperclip,
   Phone,
+  Plus,
   Send,
   UserPlus,
   X,
@@ -45,6 +46,7 @@ import type {
   PipelineStage,
 } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
+import { useContactTags, useTags } from "@/hooks/use-tags"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -312,6 +314,12 @@ export default function ChatPage() {
   const [oppStageId, setOppStageId] = useState("")
   const [oppAllProfiles, setOppAllProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
   void oppAllProfiles // reserved for assign dialog
+
+  // --- Tags ---
+  const { tags: allTags } = useTags()
+  const { contactTags, addTag: addContactTag, removeTag: removeContactTag } = useContactTags(selected?.contact_id ?? null)
+  const [tagSearch, setTagSearch] = useState("")
+  const [tagMenuOpen, setTagMenuOpen] = useState(false)
 
   const loadContactOpps = useCallback(async (contactId: string) => {
     const { data } = await supabase
@@ -787,6 +795,63 @@ export default function ChatPage() {
                 )}
               </div>
             </header>
+
+            {/* Etiquetas do contato */}
+            {selected?.contact_id && (
+              <div className="flex items-center gap-1 border-b bg-muted/20 px-4 py-1.5">
+                {contactTags.map((ct: any) => (
+                  <Badge
+                    key={ct.tag_id}
+                    variant="outline"
+                    className="gap-1 text-xs"
+                    style={{ borderColor: ct.tag?.color, color: ct.tag?.color }}
+                  >
+                    {ct.tag?.name}
+                    <button
+                      onClick={() => removeContactTag(ct.tag_id)}
+                      className="ml-0.5 hover:text-destructive"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </Badge>
+                ))}
+                <DropdownMenu open={tagMenuOpen} onOpenChange={setTagMenuOpen}>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-6 px-1.5 text-xs">
+                      <Plus className="h-3 w-3" /> Etiqueta
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-56">
+                    <div className="p-2">
+                      <Input
+                        placeholder="Buscar etiqueta..."
+                        value={tagSearch}
+                        onChange={(e) => setTagSearch(e.target.value)}
+                        className="h-7 text-xs"
+                      />
+                    </div>
+                    {allTags
+                      .filter((t) => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase()))
+                      .map((tag) => {
+                        const hasTag = contactTags.some((ct: any) => ct.tag_id === tag.id)
+                        return (
+                          <DropdownMenuItem
+                            key={tag.id}
+                            onClick={() => hasTag ? removeContactTag(tag.id) : addContactTag(tag.id)}
+                          >
+                            <span className="mr-2 h-2.5 w-2.5 rounded-full" style={{ backgroundColor: tag.color }} />
+                            {tag.name}
+                            {hasTag && <Check className="ml-auto h-3 w-3" />}
+                          </DropdownMenuItem>
+                        )
+                      })}
+                    {allTags.filter((t) => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                      <p className="p-2 text-center text-xs text-muted-foreground">Nenhuma etiqueta</p>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            )}
 
             {/* Oportunidades do contato */}
             {contactOpps.length > 0 && (

@@ -1,4 +1,5 @@
 import { NavLink, useNavigate } from "react-router-dom"
+import { useState, useEffect } from "react"
 import {
   LogOut,
   MessageCircle,
@@ -7,12 +8,15 @@ import {
   Users,
   FlaskConical,
   CalendarDays,
+  Search,
 } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
+import { useGlobalSearch } from "@/hooks/use-tags"
 import { cn } from "@/lib/utils"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 
 const NAV_ITEMS = [
@@ -25,6 +29,15 @@ const NAV_ITEMS = [
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, profile, signOut } = useAuth()
   const navigate = useNavigate()
+  const { query, setQuery, results, loading, search } = useGlobalSearch()
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  useEffect(() => {
+    const t = setTimeout(() => { if (query) search(query) }, 300)
+    return () => clearTimeout(t)
+  }, [query, search])
+
+  const totalResults = results.contacts.length + results.opportunities.length + results.conversations.length
 
   const initials = (profile?.full_name ?? user?.email ?? "?")
     .split(" ")
@@ -70,6 +83,78 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </NavLink>
           ))}
         </nav>
+
+        {/* Global search */}
+        <div className="px-2 pb-2">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="h-8 pl-8 text-xs"
+              placeholder="Buscar..."
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setSearchOpen(true) }}
+              onFocus={() => setSearchOpen(true)}
+              onBlur={() => setTimeout(() => setSearchOpen(false), 200)}
+            />
+          </div>
+          {searchOpen && query && (
+            <div className="absolute left-0 right-0 top-16 z-50 mx-2 mt-1 max-h-80 overflow-auto rounded-lg border bg-card shadow-lg">
+              {loading ? (
+                <p className="p-3 text-center text-xs text-muted-foreground">Buscando...</p>
+              ) : totalResults === 0 ? (
+                <p className="p-3 text-center text-xs text-muted-foreground">Nenhum resultado</p>
+              ) : (
+                <div className="p-1">
+                  {results.contacts.length > 0 && (
+                    <div>
+                      <p className="px-2 py-1 text-[10px] font-semibold uppercase text-muted-foreground">Contatos</p>
+                      {results.contacts.map((c: any) => (
+                        <button
+                          key={c.id}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                          onClick={() => { navigate("/contacts"); setSearchOpen(false); setQuery("") }}
+                        >
+                          <span className="truncate font-medium">{c.name || c.push_name || "Sem nome"}</span>
+                          {c.phone && <span className="ml-auto text-muted-foreground">{c.phone}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {results.opportunities.length > 0 && (
+                    <div>
+                      <p className="px-2 py-1 text-[10px] font-semibold uppercase text-muted-foreground">Oportunidades</p>
+                      {results.opportunities.map((o: any) => (
+                        <button
+                          key={o.id}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                          onClick={() => { navigate("/pipeline"); setSearchOpen(false); setQuery("") }}
+                        >
+                          <span className="truncate font-medium">{o.title}</span>
+                          {o.contact && <span className="ml-auto text-muted-foreground">{o.contact.name}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {results.conversations.length > 0 && (
+                    <div>
+                      <p className="px-2 py-1 text-[10px] font-semibold uppercase text-muted-foreground">Conversas</p>
+                      {results.conversations.map((c: any) => (
+                        <button
+                          key={c.id}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
+                          onClick={() => { navigate("/"); setSearchOpen(false); setQuery("") }}
+                        >
+                          <span className="truncate font-medium">{c.contact?.name || c.contact?.push_name || "Sem nome"}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         <Separator />
         <div className="flex items-center gap-3 p-3">
           <Avatar className="h-9 w-9">

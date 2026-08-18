@@ -81,6 +81,7 @@ function OpportunityCard({
   onReopen,
   onChat,
   onAssign,
+  tags,
 }: {
   opportunity: Opportunity
   index: number
@@ -90,6 +91,7 @@ function OpportunityCard({
   onReopen: (o: Opportunity) => void
   onChat: (o: Opportunity) => void
   onAssign: (o: Opportunity) => void
+  tags?: { tag_id: string; tag?: { name: string; color: string } }[]
 }) {
   const contact = opportunity.contact
   const assignee = opportunity.assignee
@@ -161,6 +163,25 @@ function OpportunityCard({
                 </div>
               )}
 
+              {tags && tags.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {tags.slice(0, 3).map((t) => (
+                    <span
+                      key={t.tag_id}
+                      className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                      style={{ backgroundColor: t.tag?.color + "20", color: t.tag?.color, border: `1px solid ${t.tag?.color}40` }}
+                    >
+                      {t.tag?.name}
+                    </span>
+                  ))}
+                  {tags.length > 3 && (
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      +{tags.length - 3}
+                    </span>
+                  )}
+                </div>
+              )}
+
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center gap-1">
                   {assignee && (
@@ -191,6 +212,7 @@ function OpportunityCard({
 function KanbanColumn({
   stage,
   opportunities,
+  oppTagsMap,
   onEdit,
   onWin,
   onLose,
@@ -200,6 +222,7 @@ function KanbanColumn({
 }: {
   stage: PipelineStage
   opportunities: Opportunity[]
+  oppTagsMap: Map<string, any[]>
   onEdit: (o: Opportunity) => void
   onWin: (o: Opportunity) => void
   onLose: (o: Opportunity) => void
@@ -252,6 +275,7 @@ function KanbanColumn({
                 key={opp.id}
                 opportunity={opp}
                 index={idx}
+                tags={oppTagsMap.get(opp.id)}
                 onEdit={onEdit}
                 onWin={onWin}
                 onLose={onLose}
@@ -757,6 +781,22 @@ export default function PipelinePage() {
     return map
   }, [filteredOpps, stages])
 
+  // Load tags for visible opportunities
+  const [oppTagsMap, setOppTagsMap] = useState<Map<string, any[]>>(new Map())
+  useEffect(() => {
+    if (filteredOpps.length === 0) { setOppTagsMap(new Map()); return }
+    const ids = filteredOpps.map((o) => o.id)
+    supabase.from("opportunity_tags").select("opportunity_id, tag:tags(name, color)").in("opportunity_id", ids).then(({ data }) => {
+      const map = new Map<string, any[]>()
+      for (const row of data ?? []) {
+        const arr = map.get(row.opportunity_id) ?? []
+        arr.push(row)
+        map.set(row.opportunity_id, arr)
+      }
+      setOppTagsMap(map)
+    })
+  }, [filteredOpps])
+
   // Drag & drop
   const onDragEnd = useCallback(
     async (result: DropResult) => {
@@ -915,6 +955,7 @@ export default function PipelinePage() {
                   key={stage.id}
                   stage={stage}
                   opportunities={oppsByStage.get(stage.id) ?? []}
+                  oppTagsMap={oppTagsMap}
                   onEdit={(o) => { setEditOpp(o); setEditOpen(true) }}
                   onWin={(o) => { setWinTarget(o); setWinOpen(true) }}
                   onLose={(o) => { setLoseTarget(o); setLoseOpen(true) }}
