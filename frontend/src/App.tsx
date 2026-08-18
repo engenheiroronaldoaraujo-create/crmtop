@@ -9,6 +9,7 @@ import ChatPage from "@/pages/Chat"
 import ContactsPage from "@/pages/Contacts"
 import SettingsPage from "@/pages/Settings"
 import MyAccountPage from "@/pages/MyAccount"
+import PipelinePage from "@/pages/Pipeline"
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
@@ -37,6 +38,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <Layout>
               <ContactsPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/pipeline"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <PipelinePage />
             </Layout>
           </ProtectedRoute>
         }

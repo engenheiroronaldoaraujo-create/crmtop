@@ -13,6 +13,7 @@ import {
   CheckCheck,
   CheckCircle2,
   Clock,
+  FlaskConical,
   Loader2,
   Paperclip,
   Phone,
@@ -39,6 +40,9 @@ import type {
   Message,
   Profile,
   WhatsAppInstance,
+  Opportunity,
+  Pipeline,
+  PipelineStage,
 } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { Button } from "@/components/ui/button"
@@ -46,6 +50,23 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -277,6 +298,92 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null
+
+  // --- Funil: oportunidades do contato selecionado ---
+  const [contactOpps, setContactOpps] = useState<Opportunity[]>([])
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+  const [oppStages, setOppStages] = useState<PipelineStage[]>([])
+  const [oppDialogOpen, setOppDialogOpen] = useState(false)
+  const [oppSaving, setOppSaving] = useState(false)
+  const [oppTitle, setOppTitle] = useState("")
+  const [oppValue, setOppValue] = useState("")
+  const [oppDesc, setOppDesc] = useState("")
+  const [oppPipelineId, setOppPipelineId] = useState("")
+  const [oppStageId, setOppStageId] = useState("")
+  const [oppAllProfiles, setOppAllProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
+  void oppAllProfiles // reserved for assign dialog
+
+  const loadContactOpps = useCallback(async (contactId: string) => {
+    const { data } = await supabase
+      .from("opportunities")
+      .select("*, stage:pipeline_stages(name, color), assignee:profiles(id, full_name)")
+      .eq("contact_id", contactId)
+      .order("created_at", { ascending: false })
+    setContactOpps((data as unknown as Opportunity[]) ?? [])
+  }, [])
+
+  useEffect(() => {
+    if (selected?.contact_id) loadContactOpps(selected.contact_id)
+    else setContactOpps([])
+  }, [selected?.contact_id, loadContactOpps])
+
+  useEffect(() => {
+    supabase.from("pipelines").select("*").eq("is_active", true).then(({ data }) => {
+      const pls = (data ?? []) as Pipeline[]
+      setPipelines(pls)
+      if (pls.length > 0 && !oppPipelineId) setOppPipelineId(pls[0].id)
+    })
+    supabase.from("profiles").select("id, full_name").order("full_name").then(({ data }) => {
+      setOppAllProfiles((data as Pick<Profile, "id" | "full_name">[]) ?? [])
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!oppPipelineId) return
+    supabase.from("pipeline_stages").select("*").eq("pipeline_id", oppPipelineId).eq("is_active", true).order("position").then(({ data }) => {
+      const sts = (data ?? []) as PipelineStage[]
+      setOppStages(sts)
+      if (sts.length > 0) setOppStageId(sts[0].id)
+    })
+  }, [oppPipelineId])
+
+  const handleCreateOpp = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selected?.contact_id || !oppTitle.trim()) return
+    setOppSaving(true)
+    try {
+      const { error } = await supabase.from("opportunities").insert({
+        contact_id: selected.contact_id,
+        pipeline_id: oppPipelineId,
+        stage_id: oppStageId,
+        title: oppTitle.trim(),
+        value: oppValue ? parseFloat(oppValue) : null,
+        description: oppDesc.trim() || null,
+        assigned_to: user?.id ?? null,
+        created_by: user?.id ?? null,
+        conversation_id: selected.id,
+      })
+      if (error) throw error
+      setOppDialogOpen(false)
+      setOppTitle("")
+      setOppValue("")
+      setOppDesc("")
+      toast.success("Oportunidade criada no funil")
+      loadContactOpps(selected.contact_id)
+    } catch (err: any) {
+      toast.error(err.message ?? "Erro ao criar oportunidade")
+    } finally {
+      setOppSaving(false)
+    }
+  }
+
+  const openOppDialog = () => {
+    setOppTitle("")
+    setOppValue("")
+    setOppDesc("")
+    if (pipelines.length > 0) setOppPipelineId(pipelines[0].id)
+    setOppDialogOpen(true)
+  }
 
   const loadConversations = useCallback(async () => {
     const { data, error } = await supabase
@@ -635,6 +742,9 @@ export default function ChatPage() {
                 ) : (
                   <Badge variant="outline">Não atribuída</Badge>
                 )}
+                <Button variant="outline" size="sm" onClick={openOppDialog}>
+                  <FlaskConical className="mr-1 h-4 w-4" /> Adicionar ao Funil
+                </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm">
@@ -677,6 +787,40 @@ export default function ChatPage() {
                 )}
               </div>
             </header>
+
+            {/* Oportunidades do contato */}
+            {contactOpps.length > 0 && (
+              <div className="border-b bg-muted/30 px-4 py-2">
+                <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
+                  Oportunidades ({contactOpps.length})
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {contactOpps.map((opp) => (
+                    <div
+                      key={opp.id}
+                      className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-xs"
+                    >
+                      <span
+                        className="h-2 w-2 rounded-full"
+                        style={{ backgroundColor: (opp.stage as any)?.color ?? "#94a3b8" }}
+                      />
+                      <span className="font-medium">{opp.title}</span>
+                      <span className="text-muted-foreground">
+                        {(opp.stage as any)?.name ?? "—"}
+                      </span>
+                      {opp.status !== "open" && (
+                        <Badge
+                          variant={opp.status === "won" ? "default" : "destructive"}
+                          className="h-4 px-1 text-[10px]"
+                        >
+                          {opp.status === "won" ? "Ganho" : "Perdido"}
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
               {groupedMessages.length === 0 ? (
@@ -753,6 +897,89 @@ export default function ChatPage() {
           </>
         )}
       </section>
+
+      {/* Dialog: Criar Oportunidade no Funil */}
+      <Dialog open={oppDialogOpen} onOpenChange={setOppDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Adicionar ao Funil</DialogTitle>
+            <DialogDescription>
+              Criar uma oportunidade para {selected?.contact ? contactDisplayName(selected.contact) : ""}.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleCreateOpp} className="space-y-4">
+            <div className="space-y-2">
+              <Label>Pipeline</Label>
+              <Select value={oppPipelineId} onValueChange={setOppPipelineId}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {pipelines.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Estágio</Label>
+              <Select value={oppStageId} onValueChange={setOppStageId}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {oppStages.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="chat-opp-title">Título *</Label>
+              <Input
+                id="chat-opp-title"
+                value={oppTitle}
+                onChange={(e) => setOppTitle(e.target.value)}
+                placeholder="Ex: Serviço de rastreamento"
+                required
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="chat-opp-value">Valor (R$)</Label>
+                <Input
+                  id="chat-opp-value"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={oppValue}
+                  onChange={(e) => setOppValue(e.target.value)}
+                  placeholder="0.00"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Responsável</Label>
+                <Input value={profile?.full_name ?? ""} disabled />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="chat-opp-desc">Descrição</Label>
+              <Textarea
+                id="chat-opp-desc"
+                value={oppDesc}
+                onChange={(e) => setOppDesc(e.target.value)}
+                placeholder="Detalhes..."
+                rows={2}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setOppDialogOpen(false)}>
+                Cancelar
+              </Button>
+              <Button type="submit" disabled={oppSaving || !oppTitle.trim()}>
+                {oppSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Criar oportunidade
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

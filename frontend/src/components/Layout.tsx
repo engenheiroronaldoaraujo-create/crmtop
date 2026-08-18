@@ -5,6 +5,7 @@ import {
   Settings,
   User,
   Users,
+  FlaskConical,
 } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
@@ -15,6 +16,7 @@ import { Separator } from "@/components/ui/separator"
 
 const NAV_ITEMS = [
   { to: "/", label: "Chat", icon: MessageCircle, end: true },
+  { to: "/pipeline", label: "Funil", icon: FlaskConical, end: false },
   { to: "/contacts", label: "Contatos", icon: Users, end: false },
 ]
 
