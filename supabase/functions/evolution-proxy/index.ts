@@ -19,6 +19,8 @@ const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
 function extFromMimetype(mimetype: string, fallback: string): string {
+  // Normalize MIME type (strip codecs parameter)
+  const base = mimetype.split(";")[0].trim().toLowerCase();
   const map: Record<string, string> = {
     "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
     "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac",
@@ -26,7 +28,7 @@ function extFromMimetype(mimetype: string, fallback: string): string {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.ms-excel": "xls",
   };
-  return map[mimetype] ?? fallback;
+  return map[base] ?? fallback;
 }
 
 function base64ToBytes(base64: string): Uint8Array {
@@ -1071,7 +1073,7 @@ async function actionSyncMessages(
             );
             const objectPath = `messages/${finalRows[idx].evolution_message_id ?? crypto.randomUUID()}.${ext}`;
             const bytes = base64ToBytes(mediaData.base64);
-            const mime = mediaObj?.mimetype ?? "application/octet-stream";
+      const mime = (mediaObj?.mimetype ?? "application/octet-stream").split(";")[0].trim();
             await supabase.storage.from("whatsapp-media").upload(objectPath, bytes, { contentType: mime, upsert: true });
             finalRows[idx].media_url = objectPath;
           }
@@ -1251,20 +1253,38 @@ async function actionSyncMedia(
   if (error) return jsonResponse(500, { error: error.message });
   if (!msgs || msgs.length === 0) return jsonResponse(200, { ok: true, downloaded: 0, message: "No media to download" });
 
+  // Build a set of IDs we need to find
+  const neededIds = new Set(msgs.map((m) => m.evolution_message_id).filter(Boolean));
+
+  // Scan findMessages pages to find the records
+  const foundRecords = new Map<string, any>();
+  let page = 1;
+  const MAX_PAGES = 100;
+  while (foundRecords.size < neededIds.size && page <= MAX_PAGES) {
+    const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+      method: "POST",
+      body: { page },
+    });
+    if (!res.ok) break;
+    const records = data?.messages?.records ?? [];
+    if (records.length === 0) break;
+    for (const rec of records) {
+      const id = rec?.key?.id;
+      if (id && neededIds.has(id) && !foundRecords.has(id)) {
+        foundRecords.set(id, rec);
+      }
+    }
+    page++;
+    if (foundRecords.size >= neededIds.size) break;
+  }
+
   let downloaded = 0;
   for (const msg of msgs) {
+    if (!msg.evolution_message_id) continue;
+    const rec = foundRecords.get(msg.evolution_message_id);
+    if (!rec) continue;
+
     try {
-      // Get the full message from findMessages by searching for the evolution_message_id
-      const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, {
-        method: "POST",
-        body: { remoteJid: msg.evolution_message_id },
-      });
-      if (!res.ok) continue;
-
-      const records = data?.messages?.records ?? [];
-      const rec = records.find((r: any) => r?.key?.id === msg.evolution_message_id);
-      if (!rec) continue;
-
       const mediaRes = await fetch(
         `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${instance_name}`,
         { method: "POST", headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY }, body: JSON.stringify({ message: rec }) },
@@ -1276,7 +1296,7 @@ async function actionSyncMedia(
 
       const mediaObj = Object.values(rec.message ?? {}).find((v: any) => v?.mimetype) as any;
       const ext = extFromMimetype(mediaObj?.mimetype ?? "", msg.type);
-      const objectPath = `messages/${msg.evolution_message_id ?? msg.id}.${ext}`;
+      const objectPath = `messages/${msg.evolution_message_id}.${ext}`;
       const bytes = base64ToBytes(mediaData.base64);
       const mime = mediaObj?.mimetype ?? "application/octet-stream";
 
