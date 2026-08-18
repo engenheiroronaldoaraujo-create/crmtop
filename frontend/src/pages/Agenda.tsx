@@ -74,8 +74,8 @@ function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
 }
 
-const DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
-const MONTH_NAMES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+const DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "SÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡b", "Dom"]
+const MONTH_NAMES = ["Janeiro", "Fevereiro", "MarÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§o", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
 type ActivityItem = {
   id: string
@@ -130,15 +130,15 @@ function ActivityDetailDialog({
             {activity.title}
           </DialogTitle>
           <DialogDescription>
-            {isMeeting ? "Reunião" : activity.type === "follow_up" ? "Follow-up" : "Tarefa"}
+            {isMeeting ? "ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o" : activity.type === "follow_up" ? "Follow-up" : "Tarefa"}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Data:</span>
-            <span>{fmtDate(activity.start_at)} às {fmtTime(activity.start_at)}</span>
-            {activity.end_at && <span>— {fmtTime(activity.end_at)}</span>}
+            <span>{fmtDate(activity.start_at)} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â s {fmtTime(activity.start_at)}</span>
+            {activity.end_at && <span>ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {fmtTime(activity.end_at)}</span>}
           </div>
 
           {activity.contact && (
@@ -153,8 +153,8 @@ function ActivityDetailDialog({
 
           {activity.assignee && (
             <div className="flex items-center gap-2">
-              <span className="text-muted-foreground">Responsável:</span>
-              <span>{activity.assignee.full_name ?? "—"}</span>
+              <span className="text-muted-foreground">ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel:</span>
+              <span>{activity.assignee.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</span>
             </div>
           )}
 
@@ -170,7 +170,7 @@ function ActivityDetailDialog({
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Status:</span>
             <Badge variant={isPending ? "secondary" : activity.status === "completed" ? "default" : "destructive"}>
-              {activity.status === "completed" ? "Concluído" : activity.status === "cancelled" ? "Cancelado" : activity.status === "scheduled" ? "Agendado" : "Pendente"}
+              {activity.status === "completed" ? "ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do" : activity.status === "cancelled" ? "Cancelado" : activity.status === "scheduled" ? "Agendado" : "Pendente"}
             </Badge>
           </div>
         </div>
@@ -210,7 +210,6 @@ function CreateMeetingDialog({
   open,
   onOpenChange,
   onSave,
-  contacts,
   profiles,
   opportunities,
   defaultContactId,
@@ -220,7 +219,6 @@ function CreateMeetingDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
   onSave: (data: any) => Promise<void>
-  contacts: Contact[]
   profiles: Profile[]
   opportunities: Opportunity[]
   defaultContactId?: string
@@ -229,7 +227,6 @@ function CreateMeetingDialog({
 }) {
   const { user } = useAuth()
   const [title, setTitle] = useState("")
-  const [contactId, setContactId] = useState(defaultContactId ?? "")
   const [opportunityId, setOpportunityId] = useState(defaultOpportunityId ?? "")
   const [assignedTo, setAssignedTo] = useState(defaultAssignee ?? user?.id ?? "")
   const [date, setDate] = useState("")
@@ -240,10 +237,13 @@ function CreateMeetingDialog({
   const [description, setDescription] = useState("")
   const [saving, setSaving] = useState(false)
 
+  // Auto-derive contact from selected opportunity
+  const selectedOpp = opportunities.find((o) => o.id === opportunityId)
+  const contactId = selectedOpp?.contact_id ?? defaultContactId ?? ""
+
   useEffect(() => {
     if (open) {
       setTitle("")
-      setContactId(defaultContactId ?? "")
       setOpportunityId(defaultOpportunityId ?? "")
       setAssignedTo(defaultAssignee ?? user?.id ?? "")
       setDate(new Date().toISOString().split("T")[0])
@@ -253,7 +253,7 @@ function CreateMeetingDialog({
       setMeetingUrl("")
       setDescription("")
     }
-  }, [open, defaultContactId, defaultOpportunityId, defaultAssignee, user?.id])
+  }, [open, defaultOpportunityId, defaultAssignee, user?.id])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -275,7 +275,7 @@ function CreateMeetingDialog({
         created_by: user?.id ?? null,
       })
       onOpenChange(false)
-      toast.success("Reunião agendada")
+      toast.success("ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o agendada")
     } catch (err: any) {
       toast.error(err.message ?? "Erro ao agendar")
     } finally {
@@ -287,12 +287,12 @@ function CreateMeetingDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Agendar Reunião</DialogTitle>
+          <DialogTitle>Agendar ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>Título *</Label>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Reunião de proposta" required />
+            <Label>TÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­tulo *</Label>
+            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o de proposta" required />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -300,33 +300,24 @@ function CreateMeetingDialog({
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </div>
             <div className="space-y-2">
-              <Label>Responsável</Label>
+              <Label>ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel</Label>
               <Select value={assignedTo} onValueChange={setAssignedTo}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "—"}</SelectItem>)}
+                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Hora início *</Label>
+              <Label>Hora inÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­cio *</Label>
               <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} required />
             </div>
             <div className="space-y-2">
               <Label>Hora fim</Label>
               <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label>Contato</Label>
-            <Select value={contactId} onValueChange={setContactId}>
-              <SelectTrigger><SelectValue placeholder="Selecionar..." /></SelectTrigger>
-              <SelectContent>
-                {contacts.slice(0, 50).map((c) => <SelectItem key={c.id} value={c.id}>{contactDisplayName(c)}</SelectItem>)}
-              </SelectContent>
-            </Select>
           </div>
           <div className="space-y-2">
             <Label>Oportunidade</Label>
@@ -338,16 +329,22 @@ function CreateMeetingDialog({
               </SelectContent>
             </Select>
           </div>
+          {selectedOpp?.contact && (
+            <div className="rounded-md bg-muted px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Contato: </span>
+              <span className="font-medium">{contactDisplayName(selectedOpp.contact)}</span>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>Local</Label>
-            <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Escritório, Google Meet..." />
+            <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="EscritÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â³rio, Google Meet..." />
           </div>
           <div className="space-y-2">
-            <Label>Link da reunião</Label>
+            <Label>Link da reuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
             <Input value={meetingUrl} onChange={(e) => setMeetingUrl(e.target.value)} placeholder="https://..." />
           </div>
           <div className="space-y-2">
-            <Label>Descrição</Label>
+            <Label>DescriÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
           <DialogFooter>
@@ -371,7 +368,6 @@ function CreateTaskDialog({
   open,
   onOpenChange,
   onSave,
-  contacts,
   profiles,
   opportunities,
   defaultContactId,
@@ -382,7 +378,6 @@ function CreateTaskDialog({
   open: boolean
   onOpenChange: (v: boolean) => void
   onSave: (data: any) => Promise<void>
-  contacts: Contact[]
   profiles: Profile[]
   opportunities: Opportunity[]
   defaultContactId?: string
@@ -392,7 +387,6 @@ function CreateTaskDialog({
 }) {
   const { user } = useAuth()
   const [title, setTitle] = useState("")
-  const [contactId, setContactId] = useState(defaultContactId ?? "")
   const [opportunityId, setOpportunityId] = useState(defaultOpportunityId ?? "")
   const [assignedTo, setAssignedTo] = useState(defaultAssignee ?? user?.id ?? "")
   const [date, setDate] = useState("")
@@ -401,10 +395,12 @@ function CreateTaskDialog({
   const [description, setDescription] = useState("")
   const [saving, setSaving] = useState(false)
 
+  const selectedOpp = opportunities.find((o) => o.id === opportunityId)
+  const contactId = selectedOpp?.contact_id ?? defaultContactId ?? ""
+
   useEffect(() => {
     if (open) {
       setTitle("")
-      setContactId(defaultContactId ?? "")
       setOpportunityId(defaultOpportunityId ?? "")
       setAssignedTo(defaultAssignee ?? user?.id ?? "")
       setDate(new Date().toISOString().split("T")[0])
@@ -412,7 +408,7 @@ function CreateTaskDialog({
       setPriority("normal")
       setDescription("")
     }
-  }, [open, defaultContactId, defaultOpportunityId, defaultAssignee, user?.id])
+  }, [open, defaultOpportunityId, defaultAssignee, user?.id])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -450,11 +446,11 @@ function CreateTaskDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>Título *</Label>
+            <Label>TÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­tulo *</Label>
             <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder={taskType === "follow_up" ? "Ex: Confirmar proposta" : "Ex: Enviar documentação"}
+              placeholder={taskType === "follow_up" ? "Ex: Confirmar proposta" : "Ex: Enviar documentaÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o"}
               required
             />
           </div>
@@ -470,11 +466,11 @@ function CreateTaskDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Responsável</Label>
+              <Label>ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel</Label>
               <Select value={assignedTo} onValueChange={setAssignedTo}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "—"}</SelectItem>)}
+                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -492,15 +488,6 @@ function CreateTaskDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Contato</Label>
-            <Select value={contactId} onValueChange={setContactId}>
-              <SelectTrigger><SelectValue placeholder="Selecionar..." /></SelectTrigger>
-              <SelectContent>
-                {contacts.slice(0, 50).map((c) => <SelectItem key={c.id} value={c.id}>{contactDisplayName(c)}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
             <Label>Oportunidade</Label>
             <Select value={opportunityId} onValueChange={setOpportunityId}>
               <SelectTrigger><SelectValue placeholder="Nenhuma" /></SelectTrigger>
@@ -511,7 +498,7 @@ function CreateTaskDialog({
             </Select>
           </div>
           <div className="space-y-2">
-            <Label>Descrição</Label>
+            <Label>DescriÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
           <DialogFooter>
@@ -561,7 +548,8 @@ export default function AgendaPage() {
     const to = addDays(weekStart, 7).toISOString()
 
     let mtgQ = supabase.from("meetings").select("*, contact:contacts(*), assignee:profiles(id, full_name), opportunity:opportunities(id, title)").gte("start_at", from).lt("start_at", to).order("start_at")
-    let taskQ = supabase.from("opportunity_tasks").select("*, contact:contacts(*), assignee:profiles(id, full_name), opportunity:opportunities(id, title)").gte("due_at", from).lt("due_at", to).order("due_at")
+    // Tasks: include those with due_at in range OR those without due_at (show in today)
+    let taskQ = supabase.from("opportunity_tasks").select("*, contact:contacts(*), assignee:profiles(id, full_name), opportunity:opportunities(id, title)").or(`and(due_at.gte.${from},due_at.lt.${to}),due_at.is.null`).order("due_at", { nullsFirst: true })
 
     if (filterAssignee === "mine") {
       mtgQ = mtgQ.eq("assigned_to", user?.id)
@@ -652,7 +640,7 @@ export default function AgendaPage() {
     } else {
       await supabase.rpc("complete_task", { p_task_id: id })
     }
-    toast.success("Concluído")
+    toast.success("ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do")
     setDetailOpen(false)
     loadData()
   }
@@ -675,7 +663,7 @@ export default function AgendaPage() {
     } else {
       await supabase.from("opportunity_tasks").delete().eq("id", id)
     }
-    toast.success("Excluído")
+    toast.success("ExcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do")
     setDetailOpen(false)
     loadData()
   }
@@ -721,7 +709,7 @@ export default function AgendaPage() {
             <SelectContent>
               <SelectItem value="mine">Minhas</SelectItem>
               <SelectItem value="all">Todos</SelectItem>
-              {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "—"}</SelectItem>)}
+              {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
             </SelectContent>
           </Select>
 
@@ -729,7 +717,7 @@ export default function AgendaPage() {
             <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todos</SelectItem>
-              <SelectItem value="meeting">Reuniões</SelectItem>
+              <SelectItem value="meeting">ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Âµes</SelectItem>
               <SelectItem value="task">Tarefas</SelectItem>
               <SelectItem value="follow_up">Follow-ups</SelectItem>
             </SelectContent>
@@ -739,7 +727,7 @@ export default function AgendaPage() {
             <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="pending">Pendentes</SelectItem>
-              <SelectItem value="completed">Concluídos</SelectItem>
+              <SelectItem value="completed">ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­dos</SelectItem>
               <SelectItem value="all">Todos</SelectItem>
             </SelectContent>
           </Select>
@@ -757,7 +745,7 @@ export default function AgendaPage() {
                 <Clock className="mr-2 h-4 w-4" /> Follow-up
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setMeetingOpen(true)}>
-                <Calendar className="mr-2 h-4 w-4" /> Reunião
+                <Calendar className="mr-2 h-4 w-4" /> ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -774,7 +762,7 @@ export default function AgendaPage() {
             {MONTH_NAMES[weekStart.getMonth()]} {weekStart.getFullYear()}
           </span>
           <span className="text-xs text-muted-foreground">
-            {fmtDate(weekStart.toISOString())} — {fmtDate(weekEnd.toISOString())}
+            {fmtDate(weekStart.toISOString())} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {fmtDate(weekEnd.toISOString())}
           </span>
           <Badge variant="secondary">{todayCount} hoje</Badge>
         </div>
@@ -847,7 +835,6 @@ export default function AgendaPage() {
         open={meetingOpen}
         onOpenChange={setMeetingOpen}
         onSave={async (data) => { await supabase.from("meetings").insert(data); loadData() }}
-        contacts={contacts}
         profiles={profiles}
         opportunities={opportunities}
       />
@@ -856,7 +843,6 @@ export default function AgendaPage() {
         open={taskOpen}
         onOpenChange={setTaskOpen}
         onSave={async (data) => { await supabase.from("opportunity_tasks").insert(data); loadData() }}
-        contacts={contacts}
         profiles={profiles}
         opportunities={opportunities}
         taskType={taskType}
