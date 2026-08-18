@@ -18,6 +18,25 @@ const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
+function extFromMimetype(mimetype: string, fallback: string): string {
+  const map: Record<string, string> = {
+    "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+    "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac",
+    "video/mp4": "mp4", "video/3gpp": "3gp", "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+  };
+  return map[mimetype] ?? fallback;
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const clean = base64.includes(",") ? base64.split(",")[1] : base64;
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
 const STORAGE_BUCKET = "whatsapp-media";
 const WEBHOOK_EVENTS = [
   "MESSAGES_UPSERT",
@@ -1006,15 +1025,18 @@ async function actionSyncMessages(
     }
 
     // Messages: build rows with conversation ids and bulk insert (dedup).
+    // Also download media for messages that have it.
     const finalRows: any[] = [];
-    for (const rec of pageRecords) {
+    const mediaBatch: Array<{ idx: number; rec: any }> = [];
+    for (let idx = 0; idx < pageRecords.length; idx++) {
+      const rec = pageRecords[idx];
       const { phone, lid } = resolveKeyIdentity(rec.key ?? {}, rec ?? {});
       const key = lid ?? phone;
       const convId = key ? convByKey.get(key) : undefined;
       if (!convId) continue;
       const ts = rec.messageTimestamp ? Number(rec.messageTimestamp) : null;
       const { type, content } = mapMessageRecord(rec);
-      finalRows.push({
+      const row: any = {
         conversation_id: convId,
         evolution_message_id: rec?.key?.id ?? null,
         direction: rec?.key?.fromMe ? "outbound" : "inbound",
@@ -1023,7 +1045,40 @@ async function actionSyncMessages(
         media_url: null,
         status: "sent",
         sent_at: ts ? new Date(ts * 1000).toISOString() : new Date().toISOString(),
-      });
+      };
+      // Mark media messages for download
+      if (["image", "audio", "video", "document", "sticker"].includes(type)) {
+        mediaBatch.push({ idx: finalRows.length, rec });
+      }
+      finalRows.push(row);
+    }
+
+    // Download media for media messages (limit to avoid timeout)
+    const MEDIA_LIMIT = 20;
+    for (const { idx, rec } of mediaBatch.slice(0, MEDIA_LIMIT)) {
+      try {
+        const msgObj = rec.message ?? {};
+        const mediaRes = await fetch(
+          `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${instance_name}`,
+          { method: "POST", headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY }, body: JSON.stringify({ message: msgObj }) },
+        );
+        if (mediaRes.ok) {
+          const mediaData = await mediaRes.json();
+          if (typeof mediaData?.base64 === "string") {
+            const ext = extFromMimetype(
+              Object.values(msgObj).find((v: any) => v?.mimetype)?.mimetype ?? "",
+              finalRows[idx].type,
+            );
+            const objectPath = `messages/${finalRows[idx].evolution_message_id ?? crypto.randomUUID()}.${ext}`;
+            const bytes = base64ToBytes(mediaData.base64);
+            const mime = Object.values(msgObj).find((v: any) => v?.mimetype)?.mimetype ?? "application/octet-stream";
+            await supabase.storage.from("whatsapp-media").upload(objectPath, bytes, { contentType: mime, upsert: true });
+            finalRows[idx].media_url = objectPath;
+          }
+        }
+      } catch (e) {
+        console.error("SYNC_MEDIA_DOWNLOAD_ERROR", e);
+      }
     }
     for (let i = 0; i < finalRows.length; i += 200) {
       const chunk = finalRows.slice(i, i + 200);
