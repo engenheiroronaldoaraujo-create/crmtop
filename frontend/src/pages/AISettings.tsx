@@ -8,13 +8,6 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 
 export default function AISettings() {
   const [apiKey, setApiKey] = useState("")
@@ -186,20 +179,14 @@ export default function AISettings() {
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label>Modelo</Label>
-            <Select value={model} onValueChange={setModel}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="openrouter/free">openrouter/free (Gratuito)</SelectItem>
-                <SelectItem value="openai/gpt-3.5-turbo">GPT-3.5 Turbo</SelectItem>
-                <SelectItem value="openai/gpt-4">GPT-4</SelectItem>
-                <SelectItem value="anthropic/claude-3-haiku">Claude 3 Haiku</SelectItem>
-                <SelectItem value="anthropic/claude-3-sonnet">Claude 3 Sonnet</SelectItem>
-                <SelectItem value="meta-llama/llama-3-8b-instruct">Llama 3 8B</SelectItem>
-                <SelectItem value="meta-llama/llama-3-70b-instruct">Llama 3 70B</SelectItem>
-              </SelectContent>
-            </Select>
+            <Input
+              placeholder="Ex: openrouter/free, openai/gpt-4, anthropic/claude-3-haiku"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Nome do modelo conforme OpenRouter (ex: openrouter/free, openai/gpt-4, anthropic/claude-3-haiku)
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
