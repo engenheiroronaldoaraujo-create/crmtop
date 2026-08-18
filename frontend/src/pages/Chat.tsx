@@ -103,6 +103,10 @@ function MediaMessage({ msg }: { msg: Message }) {
   }, [msg.media_url])
 
   if (!msg.media_url) {
+    if (msg.type === "audio") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Clock className="h-4 w-4" /> Áudio</div>
+    if (msg.type === "image") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> Imagem</div>
+    if (msg.type === "video") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> Vídeo</div>
+    if (msg.type === "document") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> {msg.content || "Documento"}</div>
     return <span className="italic">Mídia indisponível</span>
   }
   if (!url) {
