@@ -8,16 +8,20 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 async function getApiKey(supabase: Supabase): Promise<string> {
   // Try env var first
   if (OPENROUTER_API_KEY) return OPENROUTER_API_KEY;
-  // Fallback: read from activity_log (stored by settings page)
-  const { data } = await supabase
-    .from("activity_log")
-    .select("new_data")
-    .eq("entity_type", "ai_config")
-    .eq("action", "API_KEY_STORED")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-  return (data?.new_data as any)?.key ?? "";
+  // Fallback: read from activity_log
+  try {
+    const { data, error } = await supabase
+      .from("activity_log")
+      .select("new_data")
+      .eq("entity_type", "ai_key")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return "";
+    return (data.new_data as any)?.key ?? "";
+  } catch {
+    return "";
+  }
 }
 
 async function getModel(supabase: Supabase): Promise<string> {
@@ -41,8 +45,23 @@ async function callOpenRouter(
   options: { temperature?: number; max_tokens?: number; response_format?: any } = {},
   supabase?: Supabase,
 ): Promise<{ content: string; usage?: any }> {
-  const apiKey = supabase ? await getApiKey(supabase) : OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY not configured");
+  // Get API key from env or database
+  let apiKey = OPENROUTER_API_KEY;
+  if (!apiKey && supabase) {
+    try {
+      const { data } = await supabase
+        .from("activity_log")
+        .select("new_data")
+        .eq("entity_type", "ai_key")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      apiKey = (data?.new_data as any)?.key ?? "";
+    } catch {
+      // ignore
+    }
+  }
+  if (!apiKey) throw new Error("API Key não configurada. Configure em Configurações → IA.");
 
   const model = supabase ? await getModel(supabase) : OPENROUTER_MODEL;
 
@@ -428,10 +447,10 @@ Deno.serve(async (req) => {
         }
         case "test_connection":
           try {
-            await callOpenRouter([{ role: "user", content: "Hello" }], { max_tokens: 5 })
+            await callOpenRouter([{ role: "user", content: "Hello" }], { max_tokens: 5 }, supabase)
             result = { ok: true }
-          } catch (e) {
-            throw e
+          } catch (e: any) {
+            return jsonResponse(200, { ok: false, error: e.message ?? String(e) })
           }
           break
         case "summarize_conversation":
