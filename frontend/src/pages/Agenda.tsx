@@ -14,14 +14,13 @@ import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
 import { useAuth } from "@/hooks/use-auth"
-import { contactDisplayName, cn, formatPhone, isRealPhone } from "@/lib/utils"
-import type { Meeting, OpportunityTask, Contact, Opportunity, Profile } from "@/lib/types"
+import { contactDisplayName, cn } from "@/lib/utils"
+import type { Contact, Opportunity, Profile } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Separator } from "@/components/ui/separator"
 import {
   Dialog,
   DialogContent,
@@ -51,7 +50,7 @@ import {
 
 function startOfWeek(d: Date): Date {
   const r = new Date(d)
-  r.setDate(r.getDate() - r.getDay() + 1) // Monday
+  r.setDate(r.getDate() - r.getDay() + 1)
   r.setHours(0, 0, 0, 0)
   return r
 }
@@ -74,8 +73,8 @@ function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
 }
 
-const DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "SÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡b", "Dom"]
-const MONTH_NAMES = ["Janeiro", "Fevereiro", "MarÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§o", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+const DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
+const MONTH_NAMES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
 type ActivityItem = {
   id: string
@@ -85,9 +84,9 @@ type ActivityItem = {
   end_at?: string | null
   status: string
   priority?: string
-  contact?: Contact | null
-  opportunity?: Opportunity | null
-  assignee?: Pick<Profile, "id" | "full_name"> | null
+  contact?: any
+  opportunity?: any
+  assignee?: any
 }
 
 // ---------------------------------------------------------------------------
@@ -130,31 +129,28 @@ function ActivityDetailDialog({
             {activity.title}
           </DialogTitle>
           <DialogDescription>
-            {isMeeting ? "ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o" : activity.type === "follow_up" ? "Follow-up" : "Tarefa"}
+            {isMeeting ? "Reuniao" : activity.type === "follow_up" ? "Follow-up" : "Tarefa"}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Data:</span>
-            <span>{fmtDate(activity.start_at)} ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â s {fmtTime(activity.start_at)}</span>
-            {activity.end_at && <span>ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {fmtTime(activity.end_at)}</span>}
+            <span>{fmtDate(activity.start_at)} as {fmtTime(activity.start_at)}</span>
+            {activity.end_at && <span> - {fmtTime(activity.end_at)}</span>}
           </div>
 
           {activity.contact && (
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Contato:</span>
               <span>{contactDisplayName(activity.contact)}</span>
-              {activity.contact.phone && isRealPhone(activity.contact.phone) && (
-                <span className="text-muted-foreground">({formatPhone(activity.contact.phone)})</span>
-              )}
             </div>
           )}
 
           {activity.assignee && (
             <div className="flex items-center gap-2">
-              <span className="text-muted-foreground">ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel:</span>
-              <span>{activity.assignee.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</span>
+              <span className="text-muted-foreground">Responsavel:</span>
+              <span>{activity.assignee.full_name ?? "-"}</span>
             </div>
           )}
 
@@ -170,12 +166,10 @@ function ActivityDetailDialog({
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Status:</span>
             <Badge variant={isPending ? "secondary" : activity.status === "completed" ? "default" : "destructive"}>
-              {activity.status === "completed" ? "ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do" : activity.status === "cancelled" ? "Cancelado" : activity.status === "scheduled" ? "Agendado" : "Pendente"}
+              {activity.status === "completed" ? "Concluido" : activity.status === "cancelled" ? "Cancelado" : activity.status === "scheduled" ? "Agendado" : "Pendente"}
             </Badge>
           </div>
         </div>
-
-        <Separator />
 
         <DialogFooter className="flex-row gap-2 sm:flex-row">
           {isPending && (
@@ -189,7 +183,7 @@ function ActivityDetailDialog({
             </>
           )}
           {activity.contact && (
-            <Button size="sm" variant="outline" onClick={() => onChat(activity.contact!.id)}>
+            <Button size="sm" variant="outline" onClick={() => onChat(activity.contact.id)}>
               <MessageCircle className="mr-1 h-3 w-3" /> Chat
             </Button>
           )}
@@ -237,7 +231,6 @@ function CreateMeetingDialog({
   const [description, setDescription] = useState("")
   const [saving, setSaving] = useState(false)
 
-  // Auto-derive contact from selected opportunity
   const selectedOpp = opportunities.find((o) => o.id === opportunityId)
   const contactId = selectedOpp?.contact_id ?? defaultContactId ?? ""
 
@@ -275,7 +268,7 @@ function CreateMeetingDialog({
         created_by: user?.id ?? null,
       })
       onOpenChange(false)
-      toast.success("ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o agendada")
+      toast.success("Reuniao agendada")
     } catch (err: any) {
       toast.error(err.message ?? "Erro ao agendar")
     } finally {
@@ -287,12 +280,12 @@ function CreateMeetingDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Agendar ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</DialogTitle>
+          <DialogTitle>Agendar Reuniao</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>TÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­tulo *</Label>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o de proposta" required />
+            <Label>Titulo *</Label>
+            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex: Reuniao de proposta" required />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -300,18 +293,18 @@ function CreateMeetingDialog({
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </div>
             <div className="space-y-2">
-              <Label>ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel</Label>
+              <Label>Responsavel</Label>
               <Select value={assignedTo} onValueChange={setAssignedTo}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
+                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "-"}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Hora inÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­cio *</Label>
+              <Label>Hora inicio *</Label>
               <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} required />
             </div>
             <div className="space-y-2">
@@ -337,14 +330,14 @@ function CreateMeetingDialog({
           )}
           <div className="space-y-2">
             <Label>Local</Label>
-            <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="EscritÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â³rio, Google Meet..." />
+            <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Escritorio, Google Meet..." />
           </div>
           <div className="space-y-2">
-            <Label>Link da reuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
+            <Label>Link da reuniao</Label>
             <Input value={meetingUrl} onChange={(e) => setMeetingUrl(e.target.value)} placeholder="https://..." />
           </div>
           <div className="space-y-2">
-            <Label>DescriÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
+            <Label>Descricao</Label>
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
           <DialogFooter>
@@ -446,11 +439,11 @@ function CreateTaskDialog({
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>TÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­tulo *</Label>
+            <Label>Titulo *</Label>
             <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder={taskType === "follow_up" ? "Ex: Confirmar proposta" : "Ex: Enviar documentaÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o"}
+              placeholder={taskType === "follow_up" ? "Ex: Confirmar proposta" : "Ex: Enviar documentacao"}
               required
             />
           </div>
@@ -466,11 +459,11 @@ function CreateTaskDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>ResponsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¡vel</Label>
+              <Label>Responsavel</Label>
               <Select value={assignedTo} onValueChange={setAssignedTo}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
+                  {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "-"}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -497,8 +490,14 @@ function CreateTaskDialog({
               </SelectContent>
             </Select>
           </div>
+          {selectedOpp?.contact && (
+            <div className="rounded-md bg-muted px-3 py-2 text-sm">
+              <span className="text-muted-foreground">Contato: </span>
+              <span className="font-medium">{contactDisplayName(selectedOpp.contact)}</span>
+            </div>
+          )}
           <div className="space-y-2">
-            <Label>DescriÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o</Label>
+            <Label>Descricao</Label>
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
           <DialogFooter>
@@ -528,12 +527,10 @@ export default function AgendaPage() {
   const [filterType, setFilterType] = useState<string>("all")
   const [filterStatus, setFilterStatus] = useState<string>("pending")
 
-  // Reference data
   const [contacts, setContacts] = useState<Contact[]>([])
   const [profiles, setProfiles] = useState<any[]>([])
   const [opportunities, setOpportunities] = useState<Opportunity[]>([])
 
-  // Dialogs
   const [meetingOpen, setMeetingOpen] = useState(false)
   const [taskOpen, setTaskOpen] = useState(false)
   const [taskType, setTaskType] = useState<"task" | "follow_up">("task")
@@ -548,7 +545,6 @@ export default function AgendaPage() {
     const to = addDays(weekStart, 7).toISOString()
 
     let mtgQ = supabase.from("meetings").select("*, contact:contacts(*), assignee:profiles!meetings_assigned_to_fkey(id, full_name), opportunity:opportunities(id, title)").gte("start_at", from).lt("start_at", to).order("start_at")
-    // Tasks: include those with due_at in range OR those without due_at (show in today)
     let taskQ = supabase.from("opportunity_tasks").select("*, contact:contacts(*), assignee:profiles!opportunity_tasks_assigned_to_fkey(id, full_name), opportunity:opportunities(id, title)").or(`and(due_at.gte.${from},due_at.lt.${to}),due_at.is.null`).order("due_at", { nullsFirst: true })
 
     if (filterAssignee === "mine") {
@@ -570,28 +566,25 @@ export default function AgendaPage() {
     }
 
     const [mtgRes, taskRes] = await Promise.all([mtgQ, taskQ])
-    setMeetings((mtgRes.data as Meeting[]) ?? [])
-    setTasks((taskRes.data as OpportunityTask[]) ?? [])
+    setMeetings((mtgRes.data as any[]) ?? [])
+    setTasks((taskRes.data as any[]) ?? [])
     setLoading(false)
   }, [weekStart, filterAssignee, filterStatus, user?.id])
 
   useEffect(() => { loadData() }, [loadData])
 
-  // Load reference data
   useEffect(() => {
     supabase.from("contacts").select("id, name, push_name, phone, lid, jid").order("name").limit(200).then(({ data }) => setContacts((data as Contact[]) ?? []))
-    supabase.from("profiles").select("id, full_name, role").order("full_name").then(({ data }) => setProfiles((data as Profile[]) ?? []))
-    supabase.from("opportunities").select("id, title, status").eq("status", "open").order("title").then(({ data }) => setOpportunities((data as Opportunity[]) ?? []))
+    supabase.from("profiles").select("id, full_name, role").order("full_name").then(({ data }) => setProfiles((data as any[]) ?? []))
+    supabase.from("opportunities").select("id, title, status, contact_id").eq("status", "open").order("title").then(({ data }) => setOpportunities((data as Opportunity[]) ?? []))
   }, [])
 
-  // Realtime
   useEffect(() => {
     const ch1 = supabase.channel("agenda-meetings").on("postgres_changes", { event: "*", schema: "public", table: "meetings" }, () => loadData()).subscribe()
     const ch2 = supabase.channel("agenda-tasks").on("postgres_changes", { event: "*", schema: "public", table: "opportunity_tasks" }, () => loadData()).subscribe()
     return () => { supabase.removeChannel(ch1); supabase.removeChannel(ch2) }
   }, [loadData])
 
-  // Combine into activity items
   const activities = useMemo(() => {
     const items: ActivityItem[] = []
     for (const m of meetings) {
@@ -606,7 +599,6 @@ export default function AgendaPage() {
     return items
   }, [meetings, tasks, filterType])
 
-  // Group by day
   const byDay = useMemo(() => {
     const map = new Map<string, ActivityItem[]>()
     for (let i = 0; i < 7; i++) {
@@ -622,13 +614,11 @@ export default function AgendaPage() {
     return map
   }, [activities, weekStart])
 
-  // Overdue count
   const overdueCount = useMemo(() => {
     const now = new Date()
     return tasks.filter((t) => t.status === "pending" && t.due_at && new Date(t.due_at) < now).length
   }, [tasks])
 
-  // Stats
   const todayCount = useMemo(() => {
     const today = new Date().toISOString().split("T")[0]
     return activities.filter((a) => new Date(a.start_at).toISOString().split("T")[0] === today).length
@@ -640,7 +630,7 @@ export default function AgendaPage() {
     } else {
       await supabase.rpc("complete_task", { p_task_id: id })
     }
-    toast.success("ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do")
+    toast.success("Concluido")
     setDetailOpen(false)
     loadData()
   }
@@ -663,7 +653,7 @@ export default function AgendaPage() {
     } else {
       await supabase.from("opportunity_tasks").delete().eq("id", id)
     }
-    toast.success("ExcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­do")
+    toast.success("Excluido")
     setDetailOpen(false)
     loadData()
   }
@@ -691,48 +681,39 @@ export default function AgendaPage() {
   return (
     <>
     <div className="flex h-full flex-col">
-      {/* Header */}
       <header className="flex h-16 shrink-0 items-center gap-4 border-b px-6">
         <h1 className="text-xl font-semibold">Agenda</h1>
-
         <div className="ml-auto flex items-center gap-2">
-          {/* Overdue warning */}
           {overdueCount > 0 && (
             <Badge variant="destructive" className="gap-1">
               <AlertTriangle className="h-3 w-3" /> {overdueCount} atrasada{overdueCount > 1 ? "s" : ""}
             </Badge>
           )}
-
-          {/* Filters */}
           <Select value={filterAssignee} onValueChange={setFilterAssignee}>
             <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="mine">Minhas</SelectItem>
               <SelectItem value="all">Todos</SelectItem>
-              {profiles.map((p) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</SelectItem>)}
+              {profiles.map((p: any) => <SelectItem key={p.id} value={p.id}>{p.full_name ?? "-"}</SelectItem>)}
             </SelectContent>
           </Select>
-
           <Select value={filterType} onValueChange={setFilterType}>
             <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todos</SelectItem>
-              <SelectItem value="meeting">ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Âµes</SelectItem>
+              <SelectItem value="meeting">Reunioes</SelectItem>
               <SelectItem value="task">Tarefas</SelectItem>
               <SelectItem value="follow_up">Follow-ups</SelectItem>
             </SelectContent>
           </Select>
-
           <Select value={filterStatus} onValueChange={setFilterStatus}>
             <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="pending">Pendentes</SelectItem>
-              <SelectItem value="completed">ConcluÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â­dos</SelectItem>
+              <SelectItem value="completed">Concluidos</SelectItem>
               <SelectItem value="all">Todos</SelectItem>
             </SelectContent>
           </Select>
-
-          {/* Create buttons */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button><Plus className="mr-2 h-4 w-4" /> Atividade</Button>
@@ -745,14 +726,13 @@ export default function AgendaPage() {
                 <Clock className="mr-2 h-4 w-4" /> Follow-up
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setMeetingOpen(true)}>
-                <Calendar className="mr-2 h-4 w-4" /> ReuniÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o
+                <Calendar className="mr-2 h-4 w-4" /> Reuniao
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </header>
 
-      {/* Week navigation */}
       <div className="flex items-center justify-between border-b px-6 py-2">
         <Button variant="ghost" size="sm" onClick={() => setWeekStart(addDays(weekStart, -7))}>
           <ChevronLeft className="h-4 w-4" />
@@ -762,7 +742,7 @@ export default function AgendaPage() {
             {MONTH_NAMES[weekStart.getMonth()]} {weekStart.getFullYear()}
           </span>
           <span className="text-xs text-muted-foreground">
-            {fmtDate(weekStart.toISOString())} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â {fmtDate(weekEnd.toISOString())}
+            {fmtDate(weekStart.toISOString())} - {fmtDate(weekEnd.toISOString())}
           </span>
           <Badge variant="secondary">{todayCount} hoje</Badge>
         </div>
@@ -771,7 +751,6 @@ export default function AgendaPage() {
         </Button>
       </div>
 
-      {/* Week grid */}
       <div className="flex-1 overflow-auto p-4">
         {loading ? (
           <div className="grid grid-cols-7 gap-2">
@@ -830,7 +809,6 @@ export default function AgendaPage() {
         )}
       </div>
 
-      {/* Dialogs */}
       <CreateMeetingDialog
         open={meetingOpen}
         onOpenChange={setMeetingOpen}
