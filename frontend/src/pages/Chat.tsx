@@ -47,6 +47,7 @@ import type {
 } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { useContactTags, useTags } from "@/hooks/use-tags"
+import { useAI } from "@/hooks/use-ai"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -304,6 +305,11 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null
+
+  // AI
+  const ai = useAI()
+  const [aiResult, setAiResult] = useState<string | null>(null)
+  const [aiTitle, setAiTitle] = useState("")
 
   // --- Funil: oportunidades do contato selecionado ---
   const [contactOpps, setContactOpps] = useState<Opportunity[]>([])
@@ -573,6 +579,65 @@ export default function ChatPage() {
     if (error) toast.error(error.message)
   }
 
+  // AI handlers
+  async function handleAISummary() {
+    if (!selected) return
+    setAiTitle("Resumo da Conversa")
+    setAiResult(null)
+    const result = await ai.summarizeConversation(selected.id)
+    if (result) {
+      setAiResult(
+        `**Resumo:** ${result.summary}\n\n` +
+        `**Cliente deseja:** ${result.client_want}\n\n` +
+        `**Necessidade:** ${result.needs}\n\n` +
+        `**Objeções:** ${result.objections}\n\n` +
+        `**Valor mencionado:** ${result.mentioned_value}\n\n` +
+        `**Próximo passo:** ${result.next_step}`
+      )
+    }
+  }
+
+  async function handleAISuggestReply() {
+    if (!selected) return
+    setAiTitle("Sugestão de Resposta")
+    setAiResult(null)
+    const result = await ai.suggestReply(selected.id)
+    if (result) {
+      setAiResult(
+        `**Resposta sugerida:**\n${result.reply}\n\n` +
+        `**Tom:** ${result.tone}\n` +
+        `**Confiança:** ${Math.round(result.confidence * 100)}%`
+      )
+    }
+  }
+
+  async function handleAIAnalyzeLead() {
+    if (!selected) return
+    setAiTitle("Análise do Lead")
+    setAiResult(null)
+    const result = await ai.analyzeLead(selected.id)
+    if (result) {
+      const tempIcon = result.temperature === "hot" ? "🔥" : result.temperature === "warm" ? "🟡" : "❄"
+      setAiResult(
+        `**Intenção:** ${result.intent}\n` +
+        `**Temperatura:** ${tempIcon} ${result.temperature}\n` +
+        `**Motivo:** ${result.temperature_reason}\n` +
+        `**Confiança:** ${Math.round(result.confidence * 100)}%\n\n` +
+        `**Estágio sugerido:** ${result.suggested_stage}\n` +
+        `**Tags sugeridas:** ${result.suggested_tags.join(", ")}\n\n` +
+        `**Próxima ação:** ${result.next_action}`
+      )
+    }
+  }
+
+  async function handleAISummaryClient() {
+    if (!selected?.contact_id) return
+    setAiTitle("Resumo do Cliente")
+    setAiResult(null)
+    const result = await ai.summarizeClient(selected.contact_id)
+    if (result) setAiResult(result)
+  }
+
   async function handleToggleStatus(conv: Conversation) {
     const next = conv.status === "open" ? "closed" : "open"
     const { error } = await supabase
@@ -775,6 +840,29 @@ export default function ChatPage() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm">
+                      ✨ IA
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuItem onClick={() => handleAISummary()}>
+                      Resumir conversa
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleAISuggestReply()}>
+                      Sugerir resposta
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleAIAnalyzeLead()}>
+                      Analisar lead
+                    </DropdownMenuItem>
+                    {selected?.contact_id && (
+                      <DropdownMenuItem onClick={() => handleAISummaryClient()}>
+                        Resumo do cliente
+                      </DropdownMenuItem>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm">
                       <UserPlus className="mr-1 h-4 w-4" /> Atribuir
                     </Button>
                   </DropdownMenuTrigger>
@@ -902,6 +990,38 @@ export default function ChatPage() {
                       )}
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* AI Result Panel */}
+            {aiResult && (
+              <div className="border-b bg-purple-50 px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    <p className="mb-1 text-xs font-semibold text-purple-700">✨ {aiTitle}</p>
+                    <div className="whitespace-pre-wrap text-sm text-foreground">
+                      {aiResult.split("\n").map((line, i) => {
+                        if (line.startsWith("**") && line.endsWith("**")) {
+                          return <p key={i} className="mt-1 font-semibold">{line.replace(/\*\*/g, "")}</p>
+                        }
+                        return <p key={i}>{line}</p>
+                      })}
+                    </div>
+                  </div>
+                  <button onClick={() => setAiResult(null)} className="text-purple-400 hover:text-purple-600">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Loading indicator for AI */}
+            {ai.loading && (
+              <div className="border-b bg-purple-50 px-4 py-2">
+                <div className="flex items-center gap-2 text-sm text-purple-700">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  ✨ IA analisando...
                 </div>
               </div>
             )}

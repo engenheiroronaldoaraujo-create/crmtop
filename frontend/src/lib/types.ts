@@ -268,3 +268,32 @@ export type BusinessHours = {
   created_at: string
   updated_at: string
 }
+
+// ---------------------------------------------------------------------------
+// AI
+// ---------------------------------------------------------------------------
+
+export type AIConversationSummary = {
+  summary: string
+  client_want: string
+  needs: string
+  objections: string
+  mentioned_value: string
+  next_step: string
+}
+
+export type AILeadAnalysis = {
+  intent: string
+  temperature: "cold" | "warm" | "hot"
+  temperature_reason: string
+  confidence: number
+  suggested_stage: string
+  suggested_tags: string[]
+  next_action: string
+}
+
+export type AISuggestedReply = {
+  reply: string
+  tone: string
+  confidence: number
+}

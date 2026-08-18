@@ -143,3 +143,27 @@ export function proxyLinkConversationPhone(conversation_id: string, phone: strin
     phone,
   })
 }
+
+// ---------------------------------------------------------------------------
+// AI Service
+// ---------------------------------------------------------------------------
+
+export function aiSummarizeConversation(conversation_id: string) {
+  return postJson("ai-service", { action: "summarize_conversation", data: { conversation_id } })
+}
+
+export function aiAnalyzeLead(conversation_id: string) {
+  return postJson("ai-service", { action: "analyze_lead", data: { conversation_id } })
+}
+
+export function aiSuggestReply(conversation_id: string, tone?: string) {
+  return postJson("ai-service", { action: "suggest_reply", data: { conversation_id, tone } })
+}
+
+export function aiSummarizeClient(contact_id: string) {
+  return postJson("ai-service", { action: "summarize_client", data: { contact_id } })
+}
+
+export function aiAnalyzeOpportunity(opportunity_id: string) {
+  return postJson("ai-service", { action: "analyze_opportunity", data: { opportunity_id } })
+}
