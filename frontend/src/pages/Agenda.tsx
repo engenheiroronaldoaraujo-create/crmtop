@@ -701,6 +701,7 @@ export default function AgendaPage() {
   }
 
   return (
+    <>
     <div className="flex h-full flex-col">
       {/* Header */}
       <header className="flex h-16 shrink-0 items-center gap-4 border-b px-6">
@@ -871,5 +872,6 @@ export default function AgendaPage() {
         onChat={handleChat}
       />
     </div>
+    </>
   )
 }

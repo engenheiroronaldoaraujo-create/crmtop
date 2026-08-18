@@ -871,6 +871,7 @@ export default function PipelinePage() {
   const loading = loadingPipelines || loadingStages || loadingOpps
 
   return (
+    <>
     <div className="flex h-full flex-col">
       {/* Header */}
       <header className="flex h-16 shrink-0 items-center gap-4 border-b px-6">
@@ -1017,5 +1018,6 @@ export default function PipelinePage() {
         onAssign={handleAssign}
       />
     </div>
+    </>
   )
 }

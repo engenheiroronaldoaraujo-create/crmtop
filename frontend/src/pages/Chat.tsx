@@ -643,6 +643,7 @@ export default function ChatPage() {
     : ""
 
   return (
+    <>
     <div className="flex h-full min-h-0">
       {/* Left: conversation list */}
       <aside className="flex w-80 shrink-0 flex-col border-r">
@@ -1046,5 +1047,6 @@ export default function ChatPage() {
         </DialogContent>
       </Dialog>
     </div>
+    </>
   )
 }
