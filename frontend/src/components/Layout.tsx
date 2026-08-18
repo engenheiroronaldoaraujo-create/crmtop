@@ -8,6 +8,7 @@ import {
   Users,
   FlaskConical,
   CalendarDays,
+  Zap,
   Search,
 } from "lucide-react"
 
@@ -52,6 +53,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const items = [...NAV_ITEMS]
   if (profile?.role === "admin") {
+    items.push({ to: "/automations", label: "Automações", icon: Zap, end: false })
     items.push({ to: "/settings", label: "Configurações", icon: Settings, end: false })
   }
 

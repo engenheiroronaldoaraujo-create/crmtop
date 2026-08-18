@@ -11,6 +11,7 @@ import SettingsPage from "@/pages/Settings"
 import MyAccountPage from "@/pages/MyAccount"
 import PipelinePage from "@/pages/Pipeline"
 import AgendaPage from "@/pages/Agenda"
+import AutomationsPage from "@/pages/Automations"
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
@@ -60,6 +61,18 @@ function AppRoutes() {
             <Layout>
               <AgendaPage />
             </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/automations"
+        element={
+          <ProtectedRoute>
+            <RequireAdmin>
+              <Layout>
+                <AutomationsPage />
+              </Layout>
+            </RequireAdmin>
           </ProtectedRoute>
         }
       />

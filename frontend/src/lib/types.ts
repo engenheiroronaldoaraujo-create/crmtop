@@ -212,3 +212,59 @@ export type OpportunityTag = {
   created_at: string
   tag?: Tag
 }
+
+// ---------------------------------------------------------------------------
+// Automations
+// ---------------------------------------------------------------------------
+
+export type AutomationRule = {
+  id: string
+  name: string
+  description: string | null
+  is_active: boolean
+  trigger_type: string
+  conditions: AutomationCondition[]
+  condition_logic: "all" | "any"
+  actions: AutomationAction[]
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type AutomationCondition = {
+  field: string
+  operator: string
+  value: unknown
+}
+
+export type AutomationAction = {
+  type: string
+  params: Record<string, unknown>
+}
+
+export type AutomationExecution = {
+  id: string
+  automation_id: string
+  trigger_event: string
+  entity_type: string | null
+  entity_id: string | null
+  entity_data: Record<string, unknown> | null
+  status: "pending" | "running" | "completed" | "failed" | "skipped"
+  actions_log: Array<{ type: string; status: string; error?: string }>
+  error: string | null
+  started_at: string
+  finished_at: string | null
+  created_at: string
+  automation?: AutomationRule
+}
+
+export type BusinessHours = {
+  id: string
+  day_of_week: number
+  is_active: boolean
+  start_time: string
+  end_time: string
+  timezone: string
+  created_at: string
+  updated_at: string
+}
