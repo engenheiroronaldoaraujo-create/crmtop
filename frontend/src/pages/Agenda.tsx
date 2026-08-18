@@ -547,9 +547,9 @@ export default function AgendaPage() {
     const from = weekStart.toISOString()
     const to = addDays(weekStart, 7).toISOString()
 
-    let mtgQ = supabase.from("meetings").select("*, contact:contacts(*), assignee:profiles(id, full_name), opportunity:opportunities(id, title)").gte("start_at", from).lt("start_at", to).order("start_at")
+    let mtgQ = supabase.from("meetings").select("*, contact:contacts(*), assignee:profiles!meetings_assigned_to_fkey(id, full_name), opportunity:opportunities(id, title)").gte("start_at", from).lt("start_at", to).order("start_at")
     // Tasks: include those with due_at in range OR those without due_at (show in today)
-    let taskQ = supabase.from("opportunity_tasks").select("*, contact:contacts(*), assignee:profiles(id, full_name), opportunity:opportunities(id, title)").or(`and(due_at.gte.${from},due_at.lt.${to}),due_at.is.null`).order("due_at", { nullsFirst: true })
+    let taskQ = supabase.from("opportunity_tasks").select("*, contact:contacts(*), assignee:profiles!opportunity_tasks_assigned_to_fkey(id, full_name), opportunity:opportunities(id, title)").or(`and(due_at.gte.${from},due_at.lt.${to}),due_at.is.null`).order("due_at", { nullsFirst: true })
 
     if (filterAssignee === "mine") {
       mtgQ = mtgQ.eq("assigned_to", user?.id)
