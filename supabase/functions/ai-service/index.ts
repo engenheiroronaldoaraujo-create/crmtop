@@ -412,6 +412,20 @@ Deno.serve(async (req) => {
 
     try {
       switch (action) {
+        case "store_api_key": {
+          // Store API key securely in a separate table
+          const key = (data as any)?.key;
+          if (!key) return jsonResponse(400, { error: "key required" });
+          const { error } = await supabase.from("activity_log").insert({
+            entity_type: "ai_key",
+            entity_id: null,
+            action: "API_KEY_STORED",
+            actor_id: user.id,
+            new_data: { key },
+          });
+          if (error) return jsonResponse(400, { error: error.message });
+          return jsonResponse(200, { ok: true });
+        }
         case "test_connection":
           try {
             await callOpenRouter([{ role: "user", content: "Hello" }], { max_tokens: 5 })

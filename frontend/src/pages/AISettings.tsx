@@ -82,17 +82,17 @@ export default function AISettings() {
     if (!apiKey.trim()) return
     setSaving(true)
     try {
+      // Store API key via Edge Function
       const token = (await supabase.auth.getSession()).data.session?.access_token
-      const res = await fetch(`${getSupabaseUrl()}/functions/v1/admin-users`, {
+      const res = await fetch(`${getSupabaseUrl()}/functions/v1/ai-service`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          action: "set-ai-config",
-          config_type: "API_KEY_STORED",
-          key: apiKey.trim(),
+          action: "store_api_key",
+          data: { key: apiKey.trim() },
         }),
       })
       if (res.ok) {

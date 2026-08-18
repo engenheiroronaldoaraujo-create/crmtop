@@ -171,14 +171,19 @@ Deno.serve(async (req) => {
 
       case "set-ai-config": {
         const configType = body.config_type ?? "MODEL_UPDATED";
-        const configData = { model: body.model, temperature: body.temperature, max_tokens: body.max_tokens, key: body.key };
-        await supabase.from("activity_log").insert({
+        // Store config without sensitive data
+        const configData: Record<string, unknown> = {};
+        if (body.model) configData.model = body.model;
+        if (body.temperature !== undefined) configData.temperature = body.temperature;
+        if (body.max_tokens !== undefined) configData.max_tokens = body.max_tokens;
+        const { error } = await supabase.from("activity_log").insert({
           entity_type: "ai_config",
           entity_id: null,
           action: configType,
           actor_id: profile.id,
           new_data: configData,
-        }).then(() => {}, () => {});
+        });
+        if (error) return jsonResponse(400, { error: error.message });
         return jsonResponse(200, { ok: true });
       }
 
