@@ -670,11 +670,33 @@ async function actionSyncContacts(
       }
       for (let i = 0; i < lidRows.length; i += 200) {
         const chunk = lidRows.slice(i, i + 200);
-        // On conflict lid: set push_name AND backfill the phone when present.
-        const { error } = await supabase
-          .from("contacts")
-          .upsert(chunk, { onConflict: "lid" });
-        if (!error) named += chunk.length;
+        // If a LID row's phone already belongs to a DIFFERENT contact (same
+        // person as a phone-based address book entry), MERGE the LID contact
+        // into the phone contact instead of creating a duplicate.
+        const safeChunk: Array<Record<string, unknown>> = [];
+        for (const r of chunk) {
+          if (r.phone) {
+            const { data: existing } = await supabase
+              .from("contacts")
+              .select("id, lid")
+              .eq("phone", r.phone)
+              .maybeSingle();
+            if (existing) {
+              if (existing.lid !== r.lid) {
+                await supabase.from("contacts").update({ lid: r.lid }).eq("id", existing.id);
+              }
+              await mergeLidIntoPhone(supabase, String(r.lid), existing.id);
+              continue;
+            }
+          }
+          safeChunk.push(r);
+        }
+        if (safeChunk.length > 0) {
+          const { error } = await supabase
+            .from("contacts")
+            .upsert(safeChunk, { onConflict: "lid" });
+          if (!error) named += safeChunk.length;
+        }
       }
     }
   } catch (err) {

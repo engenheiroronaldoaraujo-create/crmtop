@@ -142,8 +142,9 @@ export function contactDisplayName(c: {
   phone?: string | null
   jid?: string | null
 }): string {
+  // Names that are just digits are LID identifiers, not real names.
   const n = c.name || c.push_name
-  if (n) return n
+  if (n && !/^\d{8,}$/.test(n)) return n
   if (isRealPhone(c.phone)) return formatPhone(c.phone)
   // JID @s.whatsapp.net carrega o número (BR ou internacional) embutido.
   const jidPhone = phoneFromJid(c.jid)

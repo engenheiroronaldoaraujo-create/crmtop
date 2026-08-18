@@ -248,7 +248,9 @@ async function processMessage(
 
   // Ecos outbound carregam o pushName da própria empresa ("Você") — somente
   // mensagens inbound carregam o nome real do contato.
-  const pushName = !fromMe ? raw.pushName ?? null : null;
+  // Names that are just digits are LID identifiers, not real names.
+  const rawPushName = !fromMe ? raw.pushName ?? null : null;
+  const pushName = rawPushName && !/^\d{8,}$/.test(rawPushName) ? rawPushName : null;
 
   const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
   console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
