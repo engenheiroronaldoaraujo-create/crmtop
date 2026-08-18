@@ -20,18 +20,13 @@ export default function AISettings() {
   const [testResult, setTestResult] = useState<"success" | "error" | null>(null)
 
   useEffect(() => {
-    // Load current settings from database
-    supabase.from("profiles").select("id").limit(1).then(() => {
-      // Settings are stored in Edge Function secrets, not in DB
-      // We'll show the model config from the env
-      setModel("openrouter/free")
-    })
+    // Settings are stored in Edge Function secrets, not in DB
+    setModel("openrouter/free")
   }, [])
 
   const handleSave = async () => {
     setSaving(true)
     try {
-      // Save model config via Edge Function
       const token = (await supabase.auth.getSession()).data.session?.access_token
       const res = await fetch(`${getSupabaseUrl()}/functions/v1/admin-users`, {
         method: "POST",
@@ -41,6 +36,7 @@ export default function AISettings() {
         },
         body: JSON.stringify({
           action: "set-ai-config",
+          config_type: "MODEL_UPDATED",
           model,
           temperature: parseFloat(temperature),
           max_tokens: parseInt(maxTokens),
@@ -94,9 +90,9 @@ export default function AISettings() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          action: "set-secret",
-          name: "OPENROUTER_API_KEY",
-          value: apiKey.trim(),
+          action: "set-ai-config",
+          config_type: "API_KEY_STORED",
+          key: apiKey.trim(),
         }),
       })
       if (res.ok) {

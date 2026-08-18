@@ -169,6 +169,37 @@ Deno.serve(async (req) => {
         return jsonResponse(200, { ok: true });
       }
 
+      case "set-ai-config": {
+        const configType = body.config_type ?? "MODEL_UPDATED";
+        const configData = { model: body.model, temperature: body.temperature, max_tokens: body.max_tokens, key: body.key };
+        await supabase.from("activity_log").insert({
+          entity_type: "ai_config",
+          entity_id: null,
+          action: configType,
+          actor_id: profile.id,
+          new_data: configData,
+        }).then(() => {}, () => {});
+        return jsonResponse(200, { ok: true });
+      }
+
+      case "set-secret": {
+        // Note: Supabase Edge Function secrets cannot be updated via API.
+        // This action stores the intent; actual secret update requires CLI or Dashboard.
+        // For now, store in activity_log as a record.
+        const secretName = body.name;
+        if (!secretName || !body.value) {
+          return jsonResponse(400, { error: "name and value required" });
+        }
+        await supabase.from("activity_log").insert({
+          entity_type: "secret_update",
+          entity_id: null,
+          action: `SECRET_REQUESTED: ${secretName}`,
+          actor_id: profile.id,
+          new_data: { name: secretName, value_length: (body.value as string).length },
+        }).then(() => {}, () => {});
+        return jsonResponse(200, { ok: true, message: "Secret update requested. Use Supabase Dashboard to update secrets." });
+      }
+
       default:
         return jsonResponse(400, { error: "unknown action" });
     }

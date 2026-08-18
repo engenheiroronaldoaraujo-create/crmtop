@@ -5,6 +5,33 @@ const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/free";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+async function getApiKey(supabase: Supabase): Promise<string> {
+  // Try env var first
+  if (OPENROUTER_API_KEY) return OPENROUTER_API_KEY;
+  // Fallback: read from activity_log (stored by settings page)
+  const { data } = await supabase
+    .from("activity_log")
+    .select("new_data")
+    .eq("entity_type", "ai_config")
+    .eq("action", "API_KEY_STORED")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+  return (data?.new_data as any)?.key ?? "";
+}
+
+async function getModel(supabase: Supabase): Promise<string> {
+  const { data } = await supabase
+    .from("activity_log")
+    .select("new_data")
+    .eq("entity_type", "ai_config")
+    .eq("action", "MODEL_UPDATED")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+  return (data?.new_data as any)?.model ?? OPENROUTER_MODEL;
+}
+
 // ---------------------------------------------------------------------------
 // OpenRouter call
 // ---------------------------------------------------------------------------
@@ -12,11 +39,15 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 async function callOpenRouter(
   messages: Array<{ role: string; content: string }>,
   options: { temperature?: number; max_tokens?: number; response_format?: any } = {},
+  supabase?: Supabase,
 ): Promise<{ content: string; usage?: any }> {
-  if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not configured");
+  const apiKey = supabase ? await getApiKey(supabase) : OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY not configured");
+
+  const model = supabase ? await getModel(supabase) : OPENROUTER_MODEL;
 
   const body = {
-    model: OPENROUTER_MODEL,
+    model,
     messages,
     temperature: options.temperature ?? 0.7,
     max_tokens: options.max_tokens ?? 1024,
