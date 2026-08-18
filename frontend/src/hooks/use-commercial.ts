@@ -75,7 +75,7 @@ export function useOpportunities(filters?: {
     setLoading(true)
     let q = supabase
       .from("opportunities")
-      .select("*, contact:contacts(*), pipeline:pipelines(*), stage:pipeline_stages(*), assignee:profiles(id, full_name)")
+      .select("*, contact:contacts(*), pipeline:pipelines(*), stage:pipeline_stages(*), assignee:profiles!opportunities_assigned_to_fkey(id, full_name)")
       .order("created_at", { ascending: false })
 
     if (filters?.assigned_to) q = q.eq("assigned_to", filters.assigned_to)
