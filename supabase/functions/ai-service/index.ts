@@ -381,6 +381,14 @@ Deno.serve(async (req) => {
 
     try {
       switch (action) {
+        case "test_connection":
+          try {
+            await callOpenRouter([{ role: "user", content: "Hello" }], { max_tokens: 5 })
+            result = { ok: true }
+          } catch (e) {
+            throw e
+          }
+          break
         case "summarize_conversation":
           result = await summarizeConversation(supabase, data.conversation_id as string)
           break
