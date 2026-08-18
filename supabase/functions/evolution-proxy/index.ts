@@ -1057,21 +1057,21 @@ async function actionSyncMessages(
     const MEDIA_LIMIT = 20;
     for (const { idx, rec } of mediaBatch.slice(0, MEDIA_LIMIT)) {
       try {
-        const msgObj = rec.message ?? {};
         const mediaRes = await fetch(
           `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${instance_name}`,
-          { method: "POST", headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY }, body: JSON.stringify({ message: msgObj }) },
+          { method: "POST", headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY }, body: JSON.stringify({ message: rec }) },
         );
         if (mediaRes.ok) {
           const mediaData = await mediaRes.json();
           if (typeof mediaData?.base64 === "string") {
+            const mediaObj = Object.values(rec.message ?? {}).find((v: any) => v?.mimetype) as any;
             const ext = extFromMimetype(
-              Object.values(msgObj).find((v: any) => v?.mimetype)?.mimetype ?? "",
+              mediaObj?.mimetype ?? "",
               finalRows[idx].type,
             );
             const objectPath = `messages/${finalRows[idx].evolution_message_id ?? crypto.randomUUID()}.${ext}`;
             const bytes = base64ToBytes(mediaData.base64);
-            const mime = Object.values(msgObj).find((v: any) => v?.mimetype)?.mimetype ?? "application/octet-stream";
+            const mime = mediaObj?.mimetype ?? "application/octet-stream";
             await supabase.storage.from("whatsapp-media").upload(objectPath, bytes, { contentType: mime, upsert: true });
             finalRows[idx].media_url = objectPath;
           }
@@ -1229,6 +1229,66 @@ async function actionSyncNames(
   }
 
   return jsonResponse(200, { ok: true, done, page, totalPages: pages, named, lastError });
+}
+
+// Downloads media for existing messages that don't have media_url.
+async function actionSyncMedia(
+  supabase: Supabase,
+  body: { instance_id?: string; limit?: number },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const limit = Math.min(body.limit ?? 50, 100);
+
+  // Find messages without media_url that have media types
+  const { data: msgs, error } = await supabase
+    .from("messages")
+    .select("id, evolution_message_id, type, conversation_id")
+    .in("type", ["image", "audio", "video", "document", "sticker"])
+    .is("media_url", null)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) return jsonResponse(500, { error: error.message });
+  if (!msgs || msgs.length === 0) return jsonResponse(200, { ok: true, downloaded: 0, message: "No media to download" });
+
+  let downloaded = 0;
+  for (const msg of msgs) {
+    try {
+      // Get the full message from findMessages by searching for the evolution_message_id
+      const { res, data } = await callEvolution(`/chat/findMessages/${instance_name}`, {
+        method: "POST",
+        body: { remoteJid: msg.evolution_message_id },
+      });
+      if (!res.ok) continue;
+
+      const records = data?.messages?.records ?? [];
+      const rec = records.find((r: any) => r?.key?.id === msg.evolution_message_id);
+      if (!rec) continue;
+
+      const mediaRes = await fetch(
+        `${EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/${instance_name}`,
+        { method: "POST", headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY }, body: JSON.stringify({ message: rec }) },
+      );
+      if (!mediaRes.ok) continue;
+
+      const mediaData = await mediaRes.json();
+      if (typeof mediaData?.base64 !== "string") continue;
+
+      const mediaObj = Object.values(rec.message ?? {}).find((v: any) => v?.mimetype) as any;
+      const ext = extFromMimetype(mediaObj?.mimetype ?? "", msg.type);
+      const objectPath = `messages/${msg.evolution_message_id ?? msg.id}.${ext}`;
+      const bytes = base64ToBytes(mediaData.base64);
+      const mime = mediaObj?.mimetype ?? "application/octet-stream";
+
+      await supabase.storage.from("whatsapp-media").upload(objectPath, bytes, { contentType: mime, upsert: true });
+      await supabase.from("messages").update({ media_url: objectPath }).eq("id", msg.id);
+      downloaded++;
+    } catch (e) {
+      console.error("SYNC_MEDIA_ERROR", msg.id, e);
+    }
+  }
+
+  return jsonResponse(200, { ok: true, downloaded, remaining: msgs.length - downloaded });
 }
 
 // Links a conversation to a phone number the operator knows. If a contact with
@@ -1484,6 +1544,10 @@ Deno.serve(async (req) => {
       case "sync-names": {
         await requireAdmin(user);
         return await actionSyncNames(supabase, body);
+      }
+      case "sync-media": {
+        await requireAdmin(user);
+        return await actionSyncMedia(supabase, body);
       }
       case "link-conversation-phone": {
         await requireAdmin(user);

@@ -258,7 +258,7 @@ async function processMessage(
 
   let mediaUrl: string | null = null;
   if (mediaMessage) {
-    const base64 = await downloadMediaBase64(instanceName, raw.message ?? {});
+    const base64 = await downloadMediaBase64(instanceName, raw);
     if (base64) {
       const ext = extFromMimetype(mediaMessage.mimetype ?? "", type);
       const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
