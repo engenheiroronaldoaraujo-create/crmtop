@@ -42,7 +42,7 @@ Deno.serve(async (req) => {
 
   try {
     const supabase = serviceClient();
-    await requireAdmin(req, supabase);
+    const profile = await requireAdmin(req, supabase);
     const body = await req.json();
     const { action } = body as {
       action: string;
