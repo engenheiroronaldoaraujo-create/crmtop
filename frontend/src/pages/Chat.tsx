@@ -159,10 +159,10 @@ function MessageBubble({ msg }: { msg: Message }) {
     <div className={cn("flex", outbound ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[75%] space-y-1 rounded-lg px-3 py-2 text-sm shadow-sm",
+          "max-w-[75%] space-y-1 rounded-2xl px-3 py-2 text-sm shadow-sm",
           outbound
-            ? "bg-primary text-primary-foreground"
-            : "border bg-card text-card-foreground",
+            ? "bg-blue-600 text-white"
+            : "border border-border bg-white text-foreground",
         )}
       >
         {msg.media_url && <MediaMessage msg={msg} />}
