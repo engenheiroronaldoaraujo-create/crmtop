@@ -428,15 +428,29 @@ export default function ChatPage() {
     loadConversations()
   }, [loadConversations])
 
-  // Select conversation from URL (opened from Contacts page).
+  // Select conversation from URL (opened from Contacts, Pipeline, Agenda, etc.)
   useEffect(() => {
     const contactPhone = searchParams.get("contact")
-    if (contactPhone && conversations.length > 0 && !selectedId) {
-      const match = conversations.find(
-        (c) => c.contact && c.contact.phone === contactPhone,
-      )
-      if (match) setSelectedId(match.id)
-      if (match || contactPhone) {
+    const conversationId = searchParams.get("conversation")
+    const contactIdParam = searchParams.get("contactId")
+
+    if (conversations.length > 0 && !selectedId) {
+      if (conversationId) {
+        // Open by conversation ID
+        const match = conversations.find((c) => c.id === conversationId)
+        if (match) setSelectedId(match.id)
+        setSearchParams({}, { replace: true })
+      } else if (contactIdParam) {
+        // Open by contact ID
+        const match = conversations.find((c) => c.contact_id === contactIdParam)
+        if (match) setSelectedId(match.id)
+        setSearchParams({}, { replace: true })
+      } else if (contactPhone) {
+        // Open by contact phone (legacy)
+        const match = conversations.find(
+          (c) => c.contact && c.contact.phone === contactPhone,
+        )
+        if (match) setSelectedId(match.id)
         setSearchParams({}, { replace: true })
       }
     }

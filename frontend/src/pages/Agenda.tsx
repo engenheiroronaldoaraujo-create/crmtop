@@ -15,7 +15,7 @@ import { toast } from "sonner"
 import { supabase } from "@/lib/supabase"
 import { useAuth } from "@/hooks/use-auth"
 import { contactDisplayName, cn } from "@/lib/utils"
-import type { Contact, Opportunity, Profile } from "@/lib/types"
+import type { Opportunity, Profile } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -527,7 +527,6 @@ export default function AgendaPage() {
   const [filterType, setFilterType] = useState<string>("all")
   const [filterStatus, setFilterStatus] = useState<string>("pending")
 
-  const [contacts, setContacts] = useState<Contact[]>([])
   const [profiles, setProfiles] = useState<any[]>([])
   const [opportunities, setOpportunities] = useState<Opportunity[]>([])
 
@@ -574,7 +573,6 @@ export default function AgendaPage() {
   useEffect(() => { loadData() }, [loadData])
 
   useEffect(() => {
-    supabase.from("contacts").select("id, name, push_name, phone, lid, jid").order("name").limit(200).then(({ data }) => setContacts((data as Contact[]) ?? []))
     supabase.from("profiles").select("id, full_name, role").order("full_name").then(({ data }) => setProfiles((data as any[]) ?? []))
     supabase.from("opportunities").select("id, title, status, contact_id").eq("status", "open").order("title").then(({ data }) => setOpportunities((data as Opportunity[]) ?? []))
   }, [])
@@ -659,12 +657,7 @@ export default function AgendaPage() {
   }
 
   const handleChat = (contactId: string) => {
-    const c = contacts.find((ct) => ct.id === contactId)
-    if (c?.phone) {
-      window.location.href = `/?contact=${c.phone}`
-    } else {
-      window.location.href = "/"
-    }
+    window.location.href = `/?contactId=${contactId}`
   }
 
   const typeIcon = (type: string) => {
