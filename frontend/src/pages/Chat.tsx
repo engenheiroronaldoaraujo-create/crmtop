@@ -357,14 +357,14 @@ export default function ChatPage() {
 
   const handleCreateOpp = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selected?.contact_id || !oppTitle.trim()) return
+    if (!selected?.contact_id) return
     setOppSaving(true)
     try {
       const { error } = await supabase.from("opportunities").insert({
         contact_id: selected.contact_id,
         pipeline_id: oppPipelineId,
         stage_id: oppStageId,
-        title: oppTitle.trim(),
+        title: oppTitle.trim() || `Oportunidade - ${contactDisplayName(selected.contact ?? {})}`,
         value: oppValue ? parseFloat(oppValue) : null,
         description: oppDesc.trim() || null,
         assigned_to: user?.id ?? null,
@@ -1011,13 +1011,12 @@ export default function ChatPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="chat-opp-title">Título *</Label>
+              <Label htmlFor="chat-opp-title">Título</Label>
               <Input
                 id="chat-opp-title"
                 value={oppTitle}
                 onChange={(e) => setOppTitle(e.target.value)}
                 placeholder="Ex: Serviço de rastreamento"
-                required
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -1052,7 +1051,7 @@ export default function ChatPage() {
               <Button type="button" variant="outline" onClick={() => setOppDialogOpen(false)}>
                 Cancelar
               </Button>
-              <Button type="submit" disabled={oppSaving || !oppTitle.trim()}>
+              <Button type="submit" disabled={oppSaving}>
                 {oppSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Criar oportunidade
               </Button>
