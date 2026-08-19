@@ -8,8 +8,12 @@ import {
   MessageSquare,
   Bot,
   Play,
+  Calendar,
+  Plus,
+  Trash2,
 } from "lucide-react"
 import { sdrGetSettings, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR } from "@/lib/api"
+import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -25,8 +29,137 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 
-const DAY_NAMES = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"]
+const DAY_NAMES = ["Domingo", "Segunda", "TerÃ§a", "Quarta", "Quinta", "Sexta", "SÃ¡bado"]
 const DAY_KEYS = ["schedule_sunday", "schedule_monday", "schedule_tuesday", "schedule_wednesday", "schedule_thursday", "schedule_friday", "schedule_saturday"]
+
+// ---------------------------------------------------------------------------
+// Presentation Availability Component
+// ---------------------------------------------------------------------------
+
+const PRES_DAYS = ["Domingo", "Segunda", "TerÃ§a", "Quarta", "Quinta", "Sexta", "SÃ¡bado"]
+
+function PresentationAvailability() {
+  const [slots, setSlots] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const loadSlots = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data } = await supabase.from("presentation_slots").select("*").order("day_of_week")
+      setSlots(data ?? [])
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { loadSlots() }, [loadSlots])
+
+  const handleAddSlot = async (dayOfWeek: number) => {
+    try {
+      await supabase.from("presentation_slots").insert({
+        day_of_week: dayOfWeek,
+        start_time: "09:00",
+        end_time: "12:00",
+      })
+      toast.success("HorÃ¡rio adicionado")
+      loadSlots()
+    } catch (e: any) {
+      toast.error(e.message)
+    }
+  }
+
+  const handleUpdateSlot = async (id: string, field: string, value: string) => {
+    try {
+      await supabase.from("presentation_slots").update({ [field]: value }).eq("id", id)
+      loadSlots()
+    } catch (e: any) {
+      toast.error(e.message)
+    }
+  }
+
+  const handleToggleSlot = async (id: string, current: boolean) => {
+    try {
+      await supabase.from("presentation_slots").update({ is_active: !current }).eq("id", id)
+      loadSlots()
+    } catch (e: any) {
+      toast.error(e.message)
+    }
+  }
+
+  const handleDeleteSlot = async (id: string) => {
+    try {
+      await supabase.from("presentation_slots").delete().eq("id", id)
+      toast.success("HorÃ¡rio removido")
+      loadSlots()
+    } catch (e: any) {
+      toast.error(e.message)
+    }
+  }
+
+  if (loading) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base"><Calendar className="h-4 w-4" /> Disponibilidade para ApresentaÃ§Ã£o</CardTitle>
+        <CardDescription>
+          Configure os horÃ¡rios em que a Sofia pode agendar demonstraÃ§Ãµes do AtendaTop.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {[1, 2, 3, 4, 5, 6, 0].map((dayIdx) => {
+          const daySlots = slots.filter((s) => s.day_of_week === dayIdx)
+          return (
+            <div key={dayIdx} className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{PRES_DAYS[dayIdx]}</span>
+                <Button variant="ghost" size="sm" onClick={() => handleAddSlot(dayIdx)}>
+                  <Plus className="h-3 w-3 mr-1" /> Adicionar
+                </Button>
+              </div>
+              {daySlots.length === 0 ? (
+                <p className="text-xs text-muted-foreground pl-2">Sem horÃ¡rios</p>
+              ) : (
+                <div className="space-y-1 pl-2">
+                  {daySlots.map((slot) => (
+                    <div key={slot.id} className="flex items-center gap-2">
+                      <Input
+                        type="time"
+                        value={slot.start_time}
+                        onChange={(e) => handleUpdateSlot(slot.id, "start_time", e.target.value)}
+                        className="h-7 w-24 text-xs"
+                      />
+                      <span className="text-xs text-muted-foreground">atÃ©</span>
+                      <Input
+                        type="time"
+                        value={slot.end_time}
+                        onChange={(e) => handleUpdateSlot(slot.id, "end_time", e.target.value)}
+                        className="h-7 w-24 text-xs"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => handleToggleSlot(slot.id, slot.is_active)}
+                      >
+                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300" />}
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDeleteSlot(slot.id)}>
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
 
 export default function SDRSettings() {
   const [settings, setSettings] = useState<any>(null)
@@ -61,7 +194,7 @@ export default function SDRSettings() {
     try {
       await sdrUpdateSettings(patch)
       setSettings({ ...settings, ...patch })
-      toast.success("Configurações salvas")
+      toast.success("ConfiguraÃ§Ãµes salvas")
     } catch (e: any) {
       toast.error(e.message)
     }
@@ -118,7 +251,7 @@ export default function SDRSettings() {
         <div className="grid grid-cols-5 gap-3">
           <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">Leads hoje</p><p className="text-lg font-bold">{metrics.leads_today}</p></CardContent></Card>
           <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">Qualificados</p><p className="text-lg font-bold">{metrics.qualified}</p></CardContent></Card>
-          <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">Demonstrações</p><p className="text-lg font-bold">{metrics.demos_scheduled}</p></CardContent></Card>
+          <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">DemonstraÃ§Ãµes</p><p className="text-lg font-bold">{metrics.demos_scheduled}</p></CardContent></Card>
           <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">Retornos</p><p className="text-lg font-bold">{metrics.callbacks_scheduled}</p></CardContent></Card>
           <Card><CardContent className="p-3"><p className="text-xs text-muted-foreground">Transferidos</p><p className="text-lg font-bold">{metrics.transfers}</p></CardContent></Card>
         </div>
@@ -128,12 +261,12 @@ export default function SDRSettings() {
         {/* Schedule */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><Clock className="h-4 w-4" /> Horário de Atendimento</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base"><Clock className="h-4 w-4" /> HorÃ¡rio de Atendimento</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
             <div className="grid grid-cols-3 gap-2 text-sm">
               <div />
-              <div className="text-center text-muted-foreground">Início</div>
+              <div className="text-center text-muted-foreground">InÃ­cio</div>
               <div className="text-center text-muted-foreground">Fim</div>
             </div>
             {daySchedule.map((d) => (
@@ -183,7 +316,7 @@ export default function SDRSettings() {
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="flex items-center justify-between">
-              <Label className="text-sm">Fora do horário</Label>
+              <Label className="text-sm">Fora do horÃ¡rio</Label>
               <input type="checkbox" checked={settings.after_hours_enabled} onChange={(e) => handleSave({ after_hours_enabled: e.target.checked })} className="rounded" />
             </div>
             <div className="flex items-center justify-between">
@@ -199,7 +332,7 @@ export default function SDRSettings() {
               <Input type="number" className="w-20 h-8" value={settings.cooldown_seconds} onChange={(e) => handleSave({ cooldown_seconds: parseInt(e.target.value) || 30 })} />
             </div>
             <div className="flex items-center justify-between">
-              <Label className="text-sm">Duração reunião (min)</Label>
+              <Label className="text-sm">DuraÃ§Ã£o reuniÃ£o (min)</Label>
               <Input type="number" className="w-20 h-8" value={settings.meeting_duration_minutes} onChange={(e) => handleSave({ meeting_duration_minutes: parseInt(e.target.value) || 30 })} />
             </div>
           </CardContent>
@@ -208,7 +341,7 @@ export default function SDRSettings() {
         {/* AI Config */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><MessageSquare className="h-4 w-4" /> Configuração IA</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base"><MessageSquare className="h-4 w-4" /> ConfiguraÃ§Ã£o IA</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="flex items-center justify-between">
@@ -233,10 +366,13 @@ export default function SDRSettings() {
             </div>
             <div className="space-y-2">
               <Label className="text-sm">Prompt adicional</Label>
-              <Textarea className="min-h-[80px]" value={settings.system_prompt ?? ""} onChange={(e) => handleSave({ system_prompt: e.target.value })} placeholder="Instruções adicionais para o SDR..." />
+              <Textarea className="min-h-[80px]" value={settings.system_prompt ?? ""} onChange={(e) => handleSave({ system_prompt: e.target.value })} placeholder="InstruÃ§Ãµes adicionais para o SDR..." />
             </div>
           </CardContent>
         </Card>
+
+        {/* Presentation Availability */}
+        <PresentationAvailability />
 
         {/* Test SDR */}
         <Card>
@@ -248,7 +384,7 @@ export default function SDRSettings() {
             <Textarea
               value={testMessage}
               onChange={(e) => setTestMessage(e.target.value)}
-              placeholder="Ex: Tenho uma empresa de climatização com 5 técnicos."
+              placeholder="Ex: Tenho uma empresa de climatizaÃ§Ã£o com 5 tÃ©cnicos."
               rows={3}
             />
             <Button onClick={handleTest} disabled={testing || !testMessage.trim()}>
@@ -258,7 +394,7 @@ export default function SDRSettings() {
             {testResult && (
               <div className="rounded-lg border p-3 text-sm">
                 <p className="font-medium">{testResult.response ?? "Sem resposta"}</p>
-                {testResult.action && <p className="mt-1 text-muted-foreground">Ação: {testResult.action}</p>}
+                {testResult.action && <p className="mt-1 text-muted-foreground">AÃ§Ã£o: {testResult.action}</p>}
                 {testResult.temperature && <p className="text-muted-foreground">Temperatura: {testResult.temperature}</p>}
               </div>
             )}
