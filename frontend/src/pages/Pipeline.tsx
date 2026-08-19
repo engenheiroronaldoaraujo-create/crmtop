@@ -17,6 +17,7 @@ import {
   Check,
   Clock,
   Trash2,
+  Settings,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
@@ -32,6 +33,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
 import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -856,6 +858,146 @@ function QuickActivityForm({
 }
 
 // ---------------------------------------------------------------------------
+// Stage Manager Dialog
+// ---------------------------------------------------------------------------
+
+function StageManagerDialog({
+  open,
+  onOpenChange,
+  pipelineId,
+  stages,
+  onRefresh,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  pipelineId: string
+  stages: any[]
+  onRefresh: () => void
+}) {
+  const [editingStage, setEditingStage] = useState<any>(null)
+  const [name, setName] = useState("")
+  const [color, setColor] = useState("#6b7280")
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (editingStage) {
+      setName(editingStage.name)
+      setColor(editingStage.color ?? "#6b7280")
+    } else {
+      setName("")
+      setColor("#6b7280")
+    }
+  }, [editingStage])
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!name.trim()) return
+    setSaving(true)
+    try {
+      if (editingStage) {
+        const { error } = await supabase
+          .from("pipeline_stages")
+          .update({ name: name.trim(), color })
+          .eq("id", editingStage.id)
+        if (error) throw error
+        toast.success("Estágio atualizado")
+      } else {
+        const maxPos = Math.max(...stages.map((s) => s.position), 0)
+        const { error } = await supabase
+          .from("pipeline_stages")
+          .insert({ pipeline_id: pipelineId, name: name.trim(), color, position: maxPos + 1 })
+        if (error) throw error
+        toast.success("Estágio criado")
+      }
+      setEditingStage(null)
+      setName("")
+      setColor("#6b7280")
+      onRefresh()
+    } catch (err: any) {
+      toast.error(err.message ?? "Erro ao salvar")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async (stage: any) => {
+    // Check if stage has opportunities
+    const { count } = await supabase
+      .from("opportunities")
+      .select("id", { count: "exact", head: true })
+      .eq("stage_id", stage.id)
+    if (count && count > 0) {
+      toast.error(`Não é possível excluir: ${count} oportunidade(s) neste estágio`)
+      return
+    }
+    if (!window.confirm(`Excluir o estágio "${stage.name}"?`)) return
+    const { error } = await supabase.from("pipeline_stages").delete().eq("id", stage.id)
+    if (error) { toast.error(error.message); return }
+    toast.success("Estágio excluído")
+    onRefresh()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{editingStage ? "Editar Estágio" : "Gerenciar Etapas"}</DialogTitle>
+        </DialogHeader>
+
+        {/* List of stages */}
+        <div className="space-y-2 max-h-60 overflow-auto">
+          {stages.map((stage) => (
+            <div key={stage.id} className="flex items-center gap-2 rounded border p-2">
+              <div className="h-4 w-4 rounded" style={{ backgroundColor: stage.color ?? "#6b7280" }} />
+              <span className="flex-1 text-sm">{stage.name}</span>
+              <span className="text-xs text-muted-foreground">{stage.position}</span>
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setEditingStage(stage)}>
+                <Pencil className="h-3 w-3" />
+              </Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDelete(stage)}>
+                <Trash2 className="h-3 w-3" />
+              </Button>
+            </div>
+          ))}
+        </div>
+
+        <Separator />
+
+        {/* Add/Edit form */}
+        <form onSubmit={handleSave} className="space-y-3">
+          <p className="text-sm font-medium">{editingStage ? "Editar estágio" : "Novo estágio"}</p>
+          <div className="grid grid-cols-[1fr_80px] gap-2">
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Nome do estágio"
+              required
+            />
+            <Input
+              type="color"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              className="h-10 cursor-pointer p-1"
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={saving || !name.trim()}>
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {editingStage ? "Salvar" : "Adicionar"}
+            </Button>
+            {editingStage && (
+              <Button type="button" variant="outline" onClick={() => setEditingStage(null)}>
+                Cancelar
+              </Button>
+            )}
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline Page
 // ---------------------------------------------------------------------------
 
@@ -863,7 +1005,7 @@ export default function PipelinePage() {
   const { profile } = useAuth()
   const { pipelines, loading: loadingPipelines } = usePipelines()
   const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null)
-  const { stages, loading: loadingStages } = usePipelineStages(selectedPipelineId)
+  const { stages, loading: loadingStages, refresh: refreshStages } = usePipelineStages(selectedPipelineId)
   const {
     opportunities,
     loading: loadingOpps,
@@ -900,6 +1042,9 @@ export default function PipelinePage() {
   const [actType, setActType] = useState<"meeting" | "task" | "follow_up">("meeting")
   const [actOpen, setActOpen] = useState(false)
   const [actOpp, setActOpp] = useState<Opportunity | null>(null)
+
+  // Stage management
+  const [stageDialogOpen, setStageDialogOpen] = useState(false)
 
   // Load contacts and profiles
   useEffect(() => {
@@ -1110,6 +1255,9 @@ export default function PipelinePage() {
             </SelectContent>
           </Select>
 
+          <Button variant="outline" onClick={() => setStageDialogOpen(true)}>
+            <Settings className="mr-2 h-4 w-4" /> Etapas
+          </Button>
           <Button onClick={() => setCreateOpen(true)}>
             <Plus className="mr-2 h-4 w-4" /> Oportunidade
           </Button>
@@ -1224,6 +1372,14 @@ export default function PipelinePage() {
           />
         </DialogContent>
       </Dialog>
+
+      <StageManagerDialog
+        open={stageDialogOpen}
+        onOpenChange={setStageDialogOpen}
+        pipelineId={selectedPipelineId ?? ""}
+        stages={stages}
+        onRefresh={refreshStages}
+      />
     </div>
     </>
   )
