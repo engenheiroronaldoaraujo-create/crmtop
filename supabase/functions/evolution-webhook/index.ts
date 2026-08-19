@@ -357,14 +357,13 @@ async function callSDREngine(
   instanceName: string,
   messageId: string | null,
 ): Promise<void> {
-  // Mark that we're processing this conversation to prevent re-entry
+  // Ensure conversation exists in sdr_conversations
   await supabase
     .from("sdr_conversations")
     .upsert({
       conversation_id: conversationId,
       contact_id: contactId,
       status: "active",
-      last_auto_reply_at: new Date().toISOString(),
     }, { onConflict: "conversation_id" })
     .then(() => {}, () => {})
 
@@ -400,6 +399,15 @@ async function callSDREngine(
             headers: { "Content-Type": "application/json", "apikey": apiKey },
             body: JSON.stringify({ number: phone, text: result.response }),
           })
+          // Update last_auto_reply_at AFTER sending
+          await supabase
+            .from("sdr_conversations")
+            .update({
+              last_auto_reply_at: new Date().toISOString(),
+              auto_messages_count: (await supabase.from("sdr_conversations").select("auto_messages_count").eq("conversation_id", conversationId).single())?.data?.auto_messages_count ?? 0 + 1,
+            })
+            .eq("conversation_id", conversationId)
+            .then(() => {}, () => {})
         }
       }
     }
