@@ -342,16 +342,6 @@ async function callSDREngine(
   instanceName: string,
   messageId: string | null,
 ): Promise<void> {
-  // Ensure conversation exists in sdr_conversations
-  await supabase
-    .from("sdr_conversations")
-    .upsert({
-      conversation_id: conversationId,
-      contact_id: contactId,
-      status: "active",
-    }, { onConflict: "conversation_id" })
-    .then(() => {}, () => {})
-
   try {
     const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/sdr-engine`, {
       method: "POST",
@@ -374,7 +364,17 @@ async function callSDREngine(
     if (res.ok) {
       const result = await res.json()
       if (result.response && result.action !== "skip" && result.action !== "error") {
-        // Send response via Evolution API
+        // Save SDR response to messages table FIRST (so context is available)
+        await supabase.from("messages").insert({
+          conversation_id: conversationId,
+          direction: "outbound",
+          type: "text",
+          content: result.response,
+          sent_at: new Date().toISOString(),
+          status: "sent",
+        }).then(() => {}, () => {})
+
+        // Send via Evolution API
         const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
         const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
         const phone = await getContactPhone(supabase, contactId)
@@ -384,16 +384,21 @@ async function callSDREngine(
             headers: { "Content-Type": "application/json", "apikey": apiKey },
             body: JSON.stringify({ number: phone, text: result.response }),
           })
-          // Update last_auto_reply_at AFTER sending
-          await supabase
-            .from("sdr_conversations")
-            .update({
-              last_auto_reply_at: new Date().toISOString(),
-              auto_messages_count: (await supabase.from("sdr_conversations").select("auto_messages_count").eq("conversation_id", conversationId).single())?.data?.auto_messages_count ?? 0 + 1,
-            })
-            .eq("conversation_id", conversationId)
-            .then(() => {}, () => {})
         }
+
+        // Update SDR conversation state
+        await supabase
+          .from("sdr_conversations")
+          .upsert({
+            conversation_id: conversationId,
+            contact_id: contactId,
+            status: "active",
+            last_auto_reply_at: new Date().toISOString(),
+          }, { onConflict: "conversation_id" })
+          .then(() => {}, () => {})
+
+        // Increment message count
+        await supabase.rpc("increment_sdr_count", { p_conv_id: conversationId }).then(() => {}, () => {})
       }
     }
   } catch (e) {
