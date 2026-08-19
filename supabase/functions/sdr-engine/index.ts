@@ -7,10 +7,14 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // System prompt (protected - never modified by user)
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `Você é o SDR IA do ATENDATOP, uma plataforma para prestadores de serviço.
+const SYSTEM_PROMPT = `Você é a Sofia, do ATENDATOP.
+
+SOBRE VOCÊ:
+- Seu nome é Sofia
+- Você trabalha no ATENDATOP
+- Você é a primeira pessoa que o lead fala ao entrar em contato
 
 SEU PAPEL:
-- Primeiro atendimento inteligente
 - Entender o negócio do lead
 - Identificar necessidades relevantes
 - Apresentar funcionalidades do AtendaTop
@@ -24,7 +28,8 @@ REGRAS ABSOLUTAS:
 - NUNCA enviar mensagem se estiver desligado
 - NUNCA responder depois que humano assumir
 - Uma pergunta por vez
-- Ser conciso e profissional
+- Ser concisa e profissional
+- Falar em primeira pessoa: "eu", "minha equipe", "nós"
 
 CONTEXTO IMPORTANTE:
 - Você está em uma CONVERSA CONTÍNUA com o lead
@@ -118,7 +123,7 @@ async function callAI(
     model,
     messages,
     temperature: options.temperature ?? 0.7,
-    max_tokens: options.max_tokens ?? 500,
+    max_tokens: options.max_tokens ?? 1024,
   };
 
   const res = await fetch(OPENROUTER_URL, {
@@ -153,7 +158,11 @@ function parseResponse<T>(text: string): T | null {
     // Try to find JSON in the response (may have thinking text before it)
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]) as T
+      const parsed = JSON.parse(jsonMatch[0]) as T
+      // Validate required fields
+      if (parsed && typeof parsed === "object" && "response" in parsed) {
+        return parsed
+      }
     }
     return null
   } catch {
@@ -527,14 +536,84 @@ Deno.serve(async (req) => {
         const wasTestMode = settings?.test_mode
         await supabase.from("sdr_settings").update({ enabled: true, test_mode: false }).eq("id", settings?.id)
 
+        // Use provided conversation_id or create/reuse a test conversation
+        let testConvId = conversation_id
+        if (!testConvId) {
+          // Check if test conversation exists
+          const { data: existing } = await supabase
+            .from("sdr_conversations")
+            .select("conversation_id")
+            .eq("metadata->>'type'", "test")
+            .limit(1)
+            .single()
+          
+          if (existing) {
+            testConvId = existing.conversation_id
+          } else {
+            // Create a test contact and conversation
+            const { data: testContact } = await supabase
+              .from("contacts")
+              .insert({ phone: "5500000000000", name: "Teste SDR IA", source: "manual" })
+              .select()
+              .single()
+            
+            const { data: testConv } = await supabase
+              .from("conversations")
+              .insert({
+                contact_id: testContact?.id,
+                instance_id: "00000000-0000-0000-0000-000000000000",
+                status: "open",
+              })
+              .select()
+              .single()
+            
+            testConvId = testConv?.id
+            
+            // Mark as test conversation
+            await supabase
+              .from("sdr_conversations")
+              .insert({
+                conversation_id: testConvId,
+                contact_id: testContact?.id,
+                status: "active",
+                metadata: { type: "test" },
+              })
+              .then(() => {}, () => {})
+          }
+        }
+
+        // Store the test message as inbound
+        if (testConvId) {
+          await supabase.from("messages").insert({
+            conversation_id: testConvId,
+            direction: "inbound",
+            type: "text",
+            content: message,
+            sent_at: new Date().toISOString(),
+            status: "sent",
+          }).then(() => {}, () => {})
+        }
+
         const result = await processMessage(
           supabase,
-          conversation_id ?? "00000000-0000-0000-0000-000000000000",
+          testConvId ?? "00000000-0000-0000-0000-000000000000",
           "00000000-0000-0000-0000-000000000000",
           message,
           "test",
           "test-" + Date.now(),
         )
+
+        // Store the SDR response as outbound
+        if (testConvId && result.response) {
+          await supabase.from("messages").insert({
+            conversation_id: testConvId,
+            direction: "outbound",
+            type: "text",
+            content: result.response,
+            sent_at: new Date().toISOString(),
+            status: "sent",
+          }).then(() => {}, () => {})
+        }
 
         // Restore original state
         await supabase.from("sdr_settings").update({ enabled: wasEnabled, test_mode: wasTestMode }).eq("id", settings?.id)
