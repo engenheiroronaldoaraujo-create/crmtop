@@ -20,6 +20,14 @@ Regras:
 Fluxo natural:
 1. Entender o serviço → 2. Entender a equipe → 3. Entender o controle atual → 4. Mostrar solução → 5. Agendar demo
 
+Sobre agendamento:
+- Quando o lead demonstrar interesse, ofereça horários disponíveis
+- Os horários disponíveis estão no contexto (HORÁRIOS_DISPONIVEIS)
+- Se não houver horário disponível, informe e ofereça retorno humano
+- Se o lead escolher um horário que NÃO está disponível, informe e ofereça alternativas
+- NUNCA confirme um horário que não esteja na lista de disponíveis
+- Formato do horário: "segunda às 14h", "terça às 9h", etc.
+
 Se perguntarem preço: "Posso te mostrar na demonstração. Qual o melhor horário?"
 Se pedirem humano: concorde e agende retorno.
 
@@ -212,7 +220,20 @@ async function processMessage(
     .eq("id", contactId)
     .single()
 
-  // 9. Get RECENT messages for context (last 15 messages)
+  // 9. Get available presentation slots
+  const now = new Date()
+  const tz = settings.timezone ?? "America/Sao_Paulo"
+  const dayOfWeek = now.getDay()
+  const { data: slots } = await supabase
+    .from("presentation_slots")
+    .select("day_of_week, start_time, end_time")
+    .eq("is_active", true)
+    .order("day_of_week")
+
+  const DAY_MAP = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"]
+  const availableSlots = (slots ?? []).map((s: any) => `${DAY_MAP[s.day_of_week]} ${s.start_time}-${s.end_time}`).join(", ")
+
+  // 10. Get RECENT messages for context (last 15 messages)
   const { data: recentMsgs } = await supabase
     .from("messages")
     .select("direction, content, type")
@@ -227,7 +248,7 @@ async function processMessage(
     .map((m: any) => `${m.direction === "inbound" ? "CLIENTE" : "SOFIA"}: ${m.content}`)
     .join("\n")
 
-  // 10. Build prompt - use chat messages for better context
+  // 11. Build prompt - use chat messages for better context
   const systemMsg = SYSTEM_PROMPT + (settings.system_prompt ? `\n\nInstruções adicionais: ${settings.system_prompt}` : "")
 
   // Use the conversation as the user message (includes the new message naturally)
@@ -235,6 +256,8 @@ async function processMessage(
 ${conversationContext || "(primeiro contato)"}
 
 Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}
+
+HORÁRIOS_DISPONIVEIS: ${availableSlots || "Nenhum horário configurado"}
 
 Responda a última mensagem do CLIENTE.`
 
