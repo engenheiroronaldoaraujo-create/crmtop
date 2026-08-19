@@ -375,7 +375,7 @@ async function actionSendText(
 
     return jsonResponse(200, {
       ok: true,
-      message: { conversation_id: conversationId, evolution_message_id: evolutionId, sent_at: sentAt },
+      message: { evolution_message_id: evolutionId, sent_at: sentAt },
     });
   } catch (err) {
     // Falha de rede/API: registra a mensagem como falha e propaga.
