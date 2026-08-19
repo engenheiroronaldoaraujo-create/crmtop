@@ -361,13 +361,15 @@ async function actionSendText(
     }
 
     const evolutionId = data?.key?.id ?? null;
-    const { conversationId } = await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+
+    // Fire-and-forget: record message in background (don't block response)
+    recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
       evolutionId,
       type: "text",
       content: text,
       mediaUrl: null,
       sentAt,
-    }, "sent");
+    }, "sent").catch((e) => console.error("BG_RECORD_FAILED", e));
 
     return jsonResponse(200, {
       ok: true,
@@ -481,31 +483,33 @@ async function actionSendMedia(
 
   const evolutionId = data?.key?.id ?? null;
 
-  let mediaUrl: string | null = null;
-  try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
-    const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
-    const { error: uploadError } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
-    if (!uploadError) mediaUrl = objectPath;
-    else console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
-  } catch (err) {
-    console.error("EVOLUTION_MEDIA_UPLOAD_ERROR", err);
-  }
-
-  const { conversationId } = await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
-    evolutionId,
-    type: msgType,
-    content: caption || null,
-    mediaUrl,
-    sentAt,
-  }, "sent");
+  // Fire-and-forget: upload media and record message in background
+  (async () => {
+    let mediaUrl: string | null = null;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
+      const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
+      if (!uploadError) mediaUrl = objectPath;
+      else console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
+    } catch (err) {
+      console.error("EVOLUTION_MEDIA_UPLOAD_ERROR", err);
+    }
+    await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+      evolutionId,
+      type: msgType,
+      content: caption || null,
+      mediaUrl,
+      sentAt,
+    }, "sent").catch((e) => console.error("BG_RECORD_FAILED", e));
+  })();
 
   return jsonResponse(200, {
     ok: true,
-    message: { conversation_id: conversationId, evolution_message_id: evolutionId, media_url: mediaUrl, sent_at: sentAt },
+    message: { evolution_message_id: evolutionId, sent_at: sentAt },
   });
 }
 
