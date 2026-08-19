@@ -410,20 +410,7 @@ Deno.serve(async (req) => {
       case "process_message": {
         const { conversation_id, contact_id, message_content, instance_name, message_id } = data as any
         const result = await processMessage(supabase, conversation_id, contact_id, message_content, instance_name, message_id)
-
-        // Send response via WhatsApp if not in test mode and action is not skip/error
-        if (result.action !== "skip" && result.action !== "error" && result.response) {
-          const { data: conv } = await supabase
-            .from("conversations")
-            .select("contact:contacts(phone)")
-            .eq("id", conversation_id)
-            .single()
-          const phone = (conv?.contact as any)?.phone
-          if (phone) {
-            await sendWhatsAppMessage(instance_name, phone, result.response)
-          }
-        }
-
+        // NOTE: message sending is handled by the webhook (callSDREngine)
         return jsonResponse(200, { ok: true, ...result })
       }
 
