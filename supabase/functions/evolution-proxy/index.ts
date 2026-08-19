@@ -320,10 +320,12 @@ async function actionSendText(
   if (!text) return jsonResponse(400, { error: "text is required" });
   if (!body.phone) return jsonResponse(400, { error: "phone is required" });
 
-  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
-
+  // Parallel DB queries
   const phoneDigits = sanitizePhone(body.phone ?? "");
-  const contact = await findContactByNumber(supabase, phoneDigits);
+  const [instance_name, contact] = await Promise.all([
+    getInstanceName(supabase, body.instance_id ?? ""),
+    findContactByNumber(supabase, phoneDigits),
+  ]);
   const contactPhone = contact?.phone ?? null;
   const contactLid = contact?.lid ?? null;
 
