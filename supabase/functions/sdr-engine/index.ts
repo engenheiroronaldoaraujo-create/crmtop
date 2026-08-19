@@ -212,15 +212,17 @@ async function processMessage(
     .eq("id", contactId)
     .single()
 
-  // 9. Get recent messages for context (limit to last 10 for speed)
+  // 9. Get RECENT messages for context (last 15 messages)
   const { data: recentMsgs } = await supabase
     .from("messages")
     .select("direction, content, type")
     .eq("conversation_id", conversationId)
-    .order("sent_at", { ascending: true })
-    .limit(10)
+    .order("sent_at", { ascending: false })
+    .limit(15)
 
+  // Reverse to chronological order
   const conversationContext = (recentMsgs ?? [])
+    .reverse()
     .filter((m: any) => m.content)
     .map((m: any) => `${m.direction === "inbound" ? "CLIENTE" : "SOFIA"}: ${m.content}`)
     .join("\n")
