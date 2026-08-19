@@ -299,6 +299,65 @@ async function processMessage(
     p_preview: preview,
     p_inbound: !fromMe,
   });
+
+  // SDR IA: process inbound messages if enabled
+  if (!fromMe && phone) {
+    try {
+      // Check SDR settings
+      const { data: sdrSettings } = await supabase
+        .from("sdr_settings")
+        .select("enabled, test_mode")
+        .limit(1)
+        .single()
+
+      if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
+        // Check conversation SDR state
+        const { data: sdrConv } = await supabase
+          .from("sdr_conversations")
+          .select("status")
+          .eq("conversation_id", conversationId)
+          .maybeSingle()
+
+        // Only process if SDR is active or doesn't exist yet
+        if (!sdrConv || sdrConv.status === "active") {
+          // Call SDR engine in background (fire-and-forget)
+          fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/sdr-engine`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+            },
+            body: JSON.stringify({
+              action: "process_message",
+              data: {
+                conversation_id: conversationId,
+                contact_id: contactId ?? null,
+                message_content: content ?? "",
+                instance_name: instanceName,
+                message_id: evolutionId ?? null,
+              },
+            }),
+          }).then(async (res) => {
+            if (res.ok) {
+              const result = await res.json()
+              if (result.response && result.action !== "skip") {
+                // Send response via Evolution API
+                const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
+                const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
+                await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "apikey": apiKey },
+                  body: JSON.stringify({ number: phone, text: result.response }),
+                })
+              }
+            }
+          }).catch((e) => console.error("SDR_ENGINE_ERROR", e))
+        }
+      }
+    } catch (e) {
+      console.error("SDR_INTEGRATION_ERROR", e)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
