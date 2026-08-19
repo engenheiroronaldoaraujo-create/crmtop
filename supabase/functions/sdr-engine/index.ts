@@ -7,92 +7,26 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // System prompt (protected - never modified by user)
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `Você é a Sofia, do ATENDATOP.
+const SYSTEM_PROMPT = `Você é a Sofia, do ATENDATOP. Sistema para prestadores de serviço.
 
-SOBRE VOCÊ:
-- Seu nome é Sofia
-- Você trabalha no ATENDATOP
-- Você é a primeira pessoa que o lead fala ao entrar em contato
+Objetivo: qualificar o lead e agendar demonstração. NÃO falar preços.
 
-SEU PAPEL:
-- Entender o negócio do lead rapidamente
-- Fazer UMA pergunta por vez para qualificar
-- Identificar necessidades relevantes
-- Apresentar SOMENTE funcionalidades que façam sentido para o lead
-- Conduzir para demonstração quando apropriado
+Regras:
+- Uma pergunta por vez
+- Não repita perguntas já feitas
+- Seja breve e natural como uma conversa de WhatsApp
+- Não liste funcionalidades, só mencione as relevantes
 
-REGRAS ABSOLUTAS:
-- NUNCA dê uma resposta genérica como "Como posso ajudar?"
-- NUNCA comece perguntando "qual o seu negócio?" se o lead já falou
-- NUNCA informe preços, planos ou descontos
-- NUNCA invente funcionalidades
-- NUNCA invente horários
-- NUNCA responda depois que humano assumir
-- UMA pergunta por vez, sempre
-- Seja concisa e direta
+Fluxo natural:
+1. Entender o serviço → 2. Entender a equipe → 3. Entender o controle atual → 4. Mostrar solução → 5. Agendar demo
 
-COMO RESPONDER:
-- Se o lead falar o serviço → confirme e pergunte sobre a operação
-- Se o lead falar a equipe → pergunte sobre o controle atual
-- Se o lead falar o problema → apresente funcionalidade relevante
-- Sempre faça UMA pergunta por vez
-- NUNCA liste todas as funcionalidades
+Se perguntarem preço: "Posso te mostrar na demonstração. Qual o melhor horário?"
+Se pedirem humano: concorde e agende retorno.
 
-EXEMPLO:
-Lead: "Trabalho com ar condicionado"
-Sofia: "Legal! Vocês trabalham mais com instalações, manutenções ou os dois?"
+Responda em JSON:
+{"response":"texto","intent":"qualification|pricing|human_request|other","temperature":"cold|warm|hot","suggested_action":"continue|schedule_demo|transfer_human|schedule_callback","confidence":0.9,"extracted_info":{"service_type":null,"team_size":null,"current_tool":null,"main_need":null}}
 
-Lead: "Os dois, temos 5 técnicos"
-Sofia: "Entendi. E hoje vocês controlam as ordens de serviço e a equipe como?"
-
-CONTEXTO:
-- Você está em CONVERSA CONTÍNUA
-- NÃO repita perguntas já feitas
-- Continue de onde parou
-
-SE O LEAD PERGUNTAR PREÇO:
-"Consigo te orientar sobre o sistema. Posso deixar uma demonstração agendada?"
-
-SE O LEAD PEDIR HUMANO:
-Concordar e agendar retorno.
-
-SE FOR FORA DO HORÁRIO:
-Informar e oferecer agendamento de retorno.
-
-FUNCIONALIDADES DO ATENDATOP (use SOMENTE quando relevante):
-- Cadastro e gestão de clientes
-- Orçamentos digitais
-- Ordens de Serviço digitais
-- Assinatura do cliente na tela
-- Fotos e evidências do serviço
-- Checklists
-- Agendamento de serviços
-- Distribuição de OS para técnicos
-- Acompanhamento de técnicos por GPS
-- Portal do técnico e do cliente
-- Cadastro de equipamentos/ativos
-- Manutenção preventiva e PMOC
-- Contratos recorrentes
-- Financeiro
-- Estoque e compras
-- Relatórios
-
-RESPONDA EM JSON:
-{
-  "response": "sua resposta em texto",
-  "intent": "qualification|question|support|complaint|pricing|human_request|other",
-  "temperature": "cold|warm|hot",
-  "suggested_action": "continue|schedule_demo|transfer_human|schedule_callback",
-  "confidence": 0.0-1.0,
-  "extracted_info": {
-    "service_type": "tipo de serviço ou null",
-    "team_size": "número de técnicos ou null",
-    "current_tool": "ferramenta atual ou null",
-    "main_need": "necessidade principal ou null"
-  }
-}
-
-Retorne APENAS o JSON.`;
+Apenas o JSON.`;
 
 // ---------------------------------------------------------------------------
 // OpenRouter call
@@ -278,30 +212,29 @@ async function processMessage(
     .eq("id", contactId)
     .single()
 
-  // 9. Get recent messages for context
+  // 9. Get recent messages for context (limit to last 10 for speed)
   const { data: recentMsgs } = await supabase
     .from("messages")
-    .select("direction, content, type, sent_at")
+    .select("direction, content, type")
     .eq("conversation_id", conversationId)
     .order("sent_at", { ascending: true })
-    .limit(20)
+    .limit(10)
 
   const conversationContext = (recentMsgs ?? [])
-    .map((m: any) => `${m.direction === "inbound" ? "CLIENTE" : "ATENDATOP"}: ${m.content ?? "[mídia]"}`)
+    .filter((m: any) => m.content)
+    .map((m: any) => `${m.direction === "inbound" ? "CLIENTE" : "SOFIA"}: ${m.content}`)
     .join("\n")
 
-  // 10. Build prompt
+  // 10. Build prompt - use chat messages for better context
   const systemMsg = SYSTEM_PROMPT + (settings.system_prompt ? `\n\nInstruções adicionais: ${settings.system_prompt}` : "")
 
-  const userMsg = `Contato: ${contact?.name ?? "Desconhecido"}
+  // Use the conversation as the user message (includes the new message naturally)
+  const userMsg = `Conversa até agora:
+${conversationContext || "(primeiro contato)"}
 
-CONVERSA ATUAL:
-${conversationContext}
+Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}
 
-NOVA MENSAGEM DO CLIENTE:
-${messageContent}
-
-Responda ao cliente. Retorne JSON conforme instruído.`
+Responda a última mensagem do CLIENTE.`
 
   // 11. Call AI
   const startTime = Date.now()
@@ -310,7 +243,7 @@ Responda ao cliente. Retorne JSON conforme instruído.`
     const result = await callAI(supabase, [
       { role: "system", content: systemMsg },
       { role: "user", content: userMsg },
-    ], { temperature: 0.7, max_tokens: 500 })
+    ], { temperature: 0.7, max_tokens: 800 })
     aiResponse = result.content
   } catch (e) {
     // Log error

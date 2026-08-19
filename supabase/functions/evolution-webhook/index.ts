@@ -303,40 +303,25 @@ async function processMessage(
   // SDR IA: process inbound messages if enabled
   if (!fromMe && phone) {
     try {
-      // Check SDR settings
       const { data: sdrSettings } = await supabase
         .from("sdr_settings")
-        .select("enabled, test_mode")
+        .select("enabled, test_mode, cooldown_seconds")
         .limit(1)
         .single()
 
       if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
-        // Check conversation SDR state
         const { data: sdrConv } = await supabase
           .from("sdr_conversations")
           .select("status, last_auto_reply_at")
           .eq("conversation_id", conversationId)
           .maybeSingle()
 
-        // Skip if SDR is not active or was recently paused
-        if (sdrConv && (sdrConv.status === "paused_human" || sdrConv.status === "completed" || sdrConv.status === "transferred")) {
-          // Don't process
-        } else if (!sdrConv || sdrConv.status === "active" || !sdrConv.status) {
-          // Check cooldown - skip if last reply was too recent
-          if (sdrConv?.last_auto_reply_at) {
-            const lastReply = new Date(sdrConv.last_auto_reply_at).getTime()
-            const now = Date.now()
-            const { data: settings } = await supabase.from("sdr_settings").select("cooldown_seconds").limit(1).single()
-            if (now - lastReply < (settings?.cooldown_seconds ?? 30) * 1000) {
-              // Cooldown active, skip
-            } else {
-              // Call SDR engine
-              await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
-            }
-          } else {
-            // No previous reply, call SDR engine
-            await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
-          }
+        const isPaused = sdrConv && ["paused_human", "completed", "transferred"].includes(sdrConv.status)
+        const inCooldown = sdrConv?.last_auto_reply_at && 
+          (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
+
+        if (!isPaused && !inCooldown) {
+          await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
         }
       }
     } catch (e) {
