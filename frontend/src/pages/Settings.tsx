@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import UsersAdmin from "@/pages/UsersAdmin"
 import WhatsAppSettings from "@/pages/WhatsAppSettings"
 import AISettings from "@/pages/AISettings"
+import SDRSettings from "@/pages/SDRSettings"
 
 export default function SettingsPage() {
   return (
@@ -15,6 +16,7 @@ export default function SettingsPage() {
             <TabsTrigger value="users">Usuários</TabsTrigger>
             <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>
             <TabsTrigger value="ai">Inteligência Artificial</TabsTrigger>
+            <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
           <TabsContent value="users">
             <UsersAdmin />
@@ -24,6 +26,9 @@ export default function SettingsPage() {
           </TabsContent>
           <TabsContent value="ai">
             <AISettings />
+          </TabsContent>
+          <TabsContent value="sdr">
+            <SDRSettings />
           </TabsContent>
         </Tabs>
       </div>

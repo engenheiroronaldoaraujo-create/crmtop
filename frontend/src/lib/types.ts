@@ -297,3 +297,77 @@ export type AISuggestedReply = {
   tone: string
   confidence: number
 }
+
+// ---------------------------------------------------------------------------
+// SDR IA
+// ---------------------------------------------------------------------------
+
+export type SDRSettings = {
+  id: string
+  enabled: boolean
+  test_mode: boolean
+  timezone: string
+  instance_id: string | null
+  schedule_monday: boolean
+  schedule_tuesday: boolean
+  schedule_wednesday: boolean
+  schedule_thursday: boolean
+  schedule_friday: boolean
+  schedule_saturday: boolean
+  schedule_sunday: boolean
+  schedule_start_time: string
+  schedule_end_time: string
+  after_hours_enabled: boolean
+  callback_enabled: boolean
+  silence_start: string | null
+  silence_end: string | null
+  meeting_duration_minutes: number
+  meeting_minimum_notice_min: number
+  meeting_interval_min: number
+  max_messages_per_conversation: number
+  cooldown_seconds: number
+  tone: string
+  system_prompt: string | null
+  primary_model: string | null
+  fallback_model: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type SDRConversation = {
+  id: string
+  conversation_id: string
+  contact_id: string | null
+  opportunity_id: string | null
+  status: "active" | "paused_human" | "paused_limit" | "paused_schedule" | "completed" | "transferred" | "error"
+  auto_messages_count: number
+  last_auto_reply_at: string | null
+  handoff_reason: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export type SDRLog = {
+  id: string
+  conversation_id: string | null
+  contact_id: string | null
+  opportunity_id: string | null
+  message_id: string | null
+  model: string | null
+  status: "pending" | "completed" | "failed" | "skipped"
+  action: string | null
+  latency_ms: number | null
+  tokens_used: number | null
+  error: string | null
+  metadata: Record<string, unknown> | null
+  created_at: string
+}
+
+export type SDRMetrics = {
+  leads_today: number
+  qualified: number
+  demos_scheduled: number
+  callbacks_scheduled: number
+  transfers: number
+}

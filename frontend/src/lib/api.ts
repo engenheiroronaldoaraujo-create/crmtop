@@ -167,3 +167,23 @@ export function aiSummarizeClient(contact_id: string) {
 export function aiAnalyzeOpportunity(opportunity_id: string) {
   return postJson("ai-service", { action: "analyze_opportunity", data: { opportunity_id } })
 }
+
+// ---------------------------------------------------------------------------
+// SDR Engine
+// ---------------------------------------------------------------------------
+
+export function sdrGetSettings() {
+  return postJson("sdr-engine", { action: "get_settings", data: {} })
+}
+
+export function sdrUpdateSettings(settings: Record<string, unknown>) {
+  return postJson("sdr-engine", { action: "update_settings", data: settings })
+}
+
+export function sdrGetMetrics() {
+  return postJson("sdr-engine", { action: "get_metrics", data: {} })
+}
+
+export function sdrTestSDR(message: string) {
+  return postJson("sdr-engine", { action: "test_sdr", data: { message } })
+}
