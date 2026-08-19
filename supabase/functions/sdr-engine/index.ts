@@ -26,6 +26,14 @@ REGRAS ABSOLUTAS:
 - Uma pergunta por vez
 - Ser conciso e profissional
 
+CONTEXTO IMPORTANTE:
+- Você está em uma CONVERSA CONTÍNUA com o lead
+- NÃO repita perguntas que já foram feitas
+- NÃO recomece a conversa do zero
+- LEMBRE o que o lead já compartilhou
+- Se o lead já respondeu sobre sua equipe, NÃO pergunte novamente
+- Continue a conversa de onde parou
+
 SE O LEAD PERGUNTAR PREÇO:
 "Consigo te orientar sobre o sistema e te mostrar como ele funciona. Posso deixar uma demonstração agendada?"
 
@@ -142,11 +150,14 @@ async function callAI(
 
 function parseResponse<T>(text: string): T | null {
   try {
-    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const jsonStr = jsonMatch ? jsonMatch[1].trim() : text.trim();
-    return JSON.parse(jsonStr) as T;
+    // Try to find JSON in the response (may have thinking text before it)
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]) as T
+    }
+    return null
   } catch {
-    return null;
+    return null
   }
 }
 
