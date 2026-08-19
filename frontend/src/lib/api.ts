@@ -87,8 +87,8 @@ export function proxyGetStatus(instance_id: string) {
   return postJson("evolution-proxy", { action: "get-status", instance_id })
 }
 
-export function proxySendText(instance_id: string, phone: string, text: string) {
-  return postJson("evolution-proxy", { action: "send-text", instance_id, phone, text })
+export function proxySendText(instance_id: string, phone: string, text: string, instance_name?: string) {
+  return postJson("evolution-proxy", { action: "send-text", instance_id, instance_name, phone, text })
 }
 
 export function proxySendMedia(

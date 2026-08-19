@@ -314,18 +314,21 @@ async function findContactByNumber(
 async function actionSendText(
   supabase: Supabase,
   user: { id: string },
-  body: { instance_id?: string; phone?: string; text?: string },
+  body: { instance_id?: string; instance_name?: string; phone?: string; text?: string },
 ): Promise<Response> {
   const text = (body.text ?? "").trim();
   if (!text) return jsonResponse(400, { error: "text is required" });
   if (!body.phone) return jsonResponse(400, { error: "phone is required" });
 
+  // Use instance_name directly if provided (avoids DB query)
+  let instance_name = body.instance_name ?? "";
+  if (!instance_name) {
+    instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  }
+
   // Parallel DB queries
   const phoneDigits = sanitizePhone(body.phone ?? "");
-  const [instance_name, contact] = await Promise.all([
-    getInstanceName(supabase, body.instance_id ?? ""),
-    findContactByNumber(supabase, phoneDigits),
-  ]);
+  const contact = await findContactByNumber(supabase, phoneDigits);
   const contactPhone = contact?.phone ?? null;
   const contactLid = contact?.lid ?? null;
 
