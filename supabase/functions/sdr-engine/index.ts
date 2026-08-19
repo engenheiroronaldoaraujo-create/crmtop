@@ -509,6 +509,13 @@ Deno.serve(async (req) => {
 
       case "test_sdr": {
         const { message, conversation_id } = data as any
+
+        // Temporarily enable SDR and disable test_mode for testing
+        const { data: settings } = await supabase.from("sdr_settings").select("*").limit(1).single()
+        const wasEnabled = settings?.enabled
+        const wasTestMode = settings?.test_mode
+        await supabase.from("sdr_settings").update({ enabled: true, test_mode: false }).eq("id", settings?.id)
+
         const result = await processMessage(
           supabase,
           conversation_id ?? "00000000-0000-0000-0000-000000000000",
@@ -517,6 +524,10 @@ Deno.serve(async (req) => {
           "test",
           "test-" + Date.now(),
         )
+
+        // Restore original state
+        await supabase.from("sdr_settings").update({ enabled: wasEnabled, test_mode: wasTestMode }).eq("id", settings?.id)
+
         return jsonResponse(200, { ok: true, ...result })
       }
 
