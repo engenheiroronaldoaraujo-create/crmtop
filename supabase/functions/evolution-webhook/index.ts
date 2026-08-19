@@ -314,50 +314,108 @@ async function processMessage(
         // Check conversation SDR state
         const { data: sdrConv } = await supabase
           .from("sdr_conversations")
-          .select("status")
+          .select("status, last_auto_reply_at")
           .eq("conversation_id", conversationId)
           .maybeSingle()
 
-        // Only process if SDR is active or doesn't exist yet
-        if (!sdrConv || sdrConv.status === "active") {
-          // Call SDR engine in background (fire-and-forget)
-          fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/sdr-engine`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-            },
-            body: JSON.stringify({
-              action: "process_message",
-              data: {
-                conversation_id: conversationId,
-                contact_id: contactId ?? null,
-                message_content: content ?? "",
-                instance_name: instanceName,
-                message_id: evolutionId ?? null,
-              },
-            }),
-          }).then(async (res) => {
-            if (res.ok) {
-              const result = await res.json()
-              if (result.response && result.action !== "skip") {
-                // Send response via Evolution API
-                const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
-                const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
-                await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", "apikey": apiKey },
-                  body: JSON.stringify({ number: phone, text: result.response }),
-                })
-              }
+        // Skip if SDR is not active or was recently paused
+        if (sdrConv && (sdrConv.status === "paused_human" || sdrConv.status === "completed" || sdrConv.status === "transferred")) {
+          // Don't process
+        } else if (!sdrConv || sdrConv.status === "active" || !sdrConv.status) {
+          // Check cooldown - skip if last reply was too recent
+          if (sdrConv?.last_auto_reply_at) {
+            const lastReply = new Date(sdrConv.last_auto_reply_at).getTime()
+            const now = Date.now()
+            const { data: settings } = await supabase.from("sdr_settings").select("cooldown_seconds").limit(1).single()
+            if (now - lastReply < (settings?.cooldown_seconds ?? 30) * 1000) {
+              // Cooldown active, skip
+            } else {
+              // Call SDR engine
+              await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
             }
-          }).catch((e) => console.error("SDR_ENGINE_ERROR", e))
+          } else {
+            // No previous reply, call SDR engine
+            await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
+          }
         }
       }
     } catch (e) {
       console.error("SDR_INTEGRATION_ERROR", e)
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// SDR Engine helper
+// ---------------------------------------------------------------------------
+
+async function callSDREngine(
+  supabase: Supabase,
+  conversationId: string,
+  contactId: string | null,
+  messageContent: string,
+  instanceName: string,
+  messageId: string | null,
+): Promise<void> {
+  // Mark that we're processing this conversation to prevent re-entry
+  await supabase
+    .from("sdr_conversations")
+    .upsert({
+      conversation_id: conversationId,
+      contact_id: contactId,
+      status: "active",
+      last_auto_reply_at: new Date().toISOString(),
+    }, { onConflict: "conversation_id" })
+    .then(() => {}, () => {})
+
+  try {
+    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/sdr-engine`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+      },
+      body: JSON.stringify({
+        action: "process_message",
+        data: {
+          conversation_id: conversationId,
+          contact_id: contactId,
+          message_content: messageContent,
+          instance_name: instanceName,
+          message_id: messageId,
+        },
+      }),
+    })
+
+    if (res.ok) {
+      const result = await res.json()
+      if (result.response && result.action !== "skip" && result.action !== "error") {
+        // Send response via Evolution API
+        const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
+        const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
+        const phone = await getContactPhone(supabase, contactId)
+        if (phone) {
+          await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "apikey": apiKey },
+            body: JSON.stringify({ number: phone, text: result.response }),
+          })
+        }
+      }
+    }
+  } catch (e) {
+    console.error("SDR_ENGINE_ERROR", e)
+  }
+}
+
+async function getContactPhone(supabase: Supabase, contactId: string | null): Promise<string | null> {
+  if (!contactId) return null
+  const { data } = await supabase
+    .from("contacts")
+    .select("phone")
+    .eq("id", contactId)
+    .single()
+  return data?.phone ?? null
 }
 
 // ---------------------------------------------------------------------------
