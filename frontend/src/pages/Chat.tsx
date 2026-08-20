@@ -237,46 +237,53 @@ function ConversationItem({
 }) {
   const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
   const closed = conv.status === "closed"
+  const hasUnread = conv.unread_count > 0
 
   return (
     <button
       onClick={() => onSelect(conv.id)}
       className={cn(
-        "flex w-full items-start gap-3 rounded-lg p-3 text-left transition-colors hover:bg-accent",
-        selected && "bg-accent",
-        closed && "opacity-60",
+        "flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-all",
+        selected
+          ? "border-blue-500 bg-blue-50 shadow-sm"
+          : "border-border bg-white hover:border-blue-200 hover:bg-blue-50/50",
+        closed && "opacity-50",
+        hasUnread && !selected && "border-l-4 border-l-blue-500 bg-blue-50/30",
       )}
     >
-      <Avatar className="mt-0.5 h-10 w-10 shrink-0">
-        <AvatarFallback>{name.slice(0, 2).toUpperCase()}</AvatarFallback>
+      <Avatar className={cn("mt-0.5 h-10 w-10 shrink-0", selected && "ring-2 ring-blue-500")}>
+        <AvatarFallback className={cn(
+          "text-sm font-semibold",
+          selected ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"
+        )}>{name.slice(0, 2).toUpperCase()}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-sm font-medium">{name}</p>
+          <p className={cn("truncate text-sm", selected ? "font-bold text-blue-900" : "font-medium text-slate-800")}>{name}</p>
           {conv.last_message_at && (
-            <span className="shrink-0 text-xs text-muted-foreground">
+            <span className="shrink-0 text-xs text-slate-400">
               {formatListTime(conv.last_message_at)}
             </span>
           )}
         </div>
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs text-muted-foreground">
+          <p className="truncate text-xs text-slate-500">
             {conv.contact && isRealPhone(conv.contact.phone) && formatPhone(conv.contact.phone)}
             {conv.assignee && (
-              <span className="ml-1 inline-flex items-center gap-1">
+              <span className="ml-1 inline-flex items-center gap-1 text-blue-600">
                 <CheckCircle2 className="h-3 w-3" />
                 {conv.assignee.full_name ?? "?"}
               </span>
             )}
           </p>
           {conv.unread_count > 0 && (
-            <Badge className="h-5 min-w-5 shrink-0 justify-center rounded-full px-1.5">
+            <Badge className="h-5 min-w-5 shrink-0 justify-center rounded-full px-1.5 bg-blue-600 text-white">
               {conv.unread_count}
             </Badge>
           )}
         </div>
         {conv.last_message_preview && (
-          <p className="truncate text-xs text-muted-foreground">
+          <p className="truncate text-xs text-slate-400">
             {conv.last_message_preview}
           </p>
         )}
@@ -729,8 +736,8 @@ export default function ChatPage() {
     <>
     <div className="flex h-full min-h-0">
       {/* Left: conversation list */}
-      <aside className="flex w-80 shrink-0 flex-col border-r">
-        <div className="border-b p-3">
+      <aside className="flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white">
+        <div className="border-b border-slate-200 bg-slate-50 p-3">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex gap-1">
               {(
@@ -807,9 +814,9 @@ export default function ChatPage() {
           </div>
         ) : (
           <>
-            <header className="flex h-16 shrink-0 items-center justify-between border-b px-4">
+            <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold">{contactName}</p>
+                <p className="truncate text-sm font-bold text-slate-900">{contactName}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {selected.contact && isRealPhone(selected.contact.phone)
                     ? formatPhone(selected.contact.phone)
