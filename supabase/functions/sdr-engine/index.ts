@@ -142,7 +142,14 @@ async function isBusinessHours(supabase: Supabase, settings: any): Promise<boole
   if (!dayMap[dayOfWeek]) return false
 
   const localTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: tz })
-  return localTime >= settings.schedule_start_time && localTime <= settings.schedule_end_time
+  const start = settings.schedule_start_time
+  const end = settings.schedule_end_time
+
+  // Handle overnight schedules (e.g., 18:00 -> 08:30)
+  if (start > end) {
+    return localTime >= start || localTime <= end
+  }
+  return localTime >= start && localTime <= end
 }
 
 // ---------------------------------------------------------------------------
