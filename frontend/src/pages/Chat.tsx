@@ -21,6 +21,8 @@ import {
   Send,
   UserPlus,
   X,
+  Zap,
+  ZapOff,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -308,6 +310,10 @@ export default function ChatPage() {
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null)
   const [sending, setSending] = useState(false)
 
+  // SDR state for current conversation
+  const [sdrStatus, setSdrStatus] = useState<string | null>(null)
+  const [sdrToggling, setSdrToggling] = useState(false)
+
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -493,6 +499,45 @@ export default function ChatPage() {
       active = false
     }
   }, [selectedId, markRead])
+
+  // Load SDR status for selected conversation
+  useEffect(() => {
+    if (!selectedId) { setSdrStatus(null); return }
+    supabase
+      .from("sdr_conversations")
+      .select("status")
+      .eq("conversation_id", selectedId)
+      .maybeSingle()
+      .then(({ data }) => setSdrStatus(data?.status ?? null))
+  }, [selectedId])
+
+  const toggleSDR = async () => {
+    if (!selectedId) return
+    setSdrToggling(true)
+    try {
+      if (sdrStatus === "active") {
+        // Pause SDR
+        await supabase
+          .from("sdr_conversations")
+          .update({ status: "paused_human" })
+          .eq("conversation_id", selectedId)
+        setSdrStatus("paused_human")
+        toast.success("SDR pausado nesta conversa")
+      } else {
+        // Resume SDR
+        await supabase
+          .from("sdr_conversations")
+          .update({ status: "active" })
+          .eq("conversation_id", selectedId)
+        setSdrStatus("active")
+        toast.success("SDR reativado nesta conversa")
+      }
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setSdrToggling(false)
+    }
+  }
 
   // Realtime: conversation list updates (new/updated conversations).
   useEffect(() => {
@@ -844,6 +889,24 @@ export default function ChatPage() {
                 <Button variant="outline" size="sm" onClick={openOppDialog}>
                   <FlaskConical className="mr-1 h-4 w-4" /> Adicionar ao Funil
                 </Button>
+                {sdrStatus && (
+                  <Button
+                    variant={sdrStatus === "active" ? "default" : "outline"}
+                    size="sm"
+                    onClick={toggleSDR}
+                    disabled={sdrToggling}
+                    className={sdrStatus === "active" ? "bg-green-600 hover:bg-green-700 text-white" : ""}
+                  >
+                    {sdrToggling ? (
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    ) : sdrStatus === "active" ? (
+                      <Zap className="mr-1 h-3 w-3" />
+                    ) : (
+                      <ZapOff className="mr-1 h-3 w-3" />
+                    )}
+                    {sdrStatus === "active" ? "SDR Ativo" : "SDR Pausado"}
+                  </Button>
+                )}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm">
