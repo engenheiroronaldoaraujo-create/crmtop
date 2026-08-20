@@ -4,7 +4,6 @@ import {
   Zap,
   ZapOff,
   Loader2,
-  Clock,
   MessageSquare,
   Bot,
   Play,
@@ -124,6 +123,95 @@ function PresentationAvailability() {
 }
 
 // ---------------------------------------------------------------------------
+// SDR Schedule Component (flexible time windows)
+// ---------------------------------------------------------------------------
+
+const SDR_DAYS = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"]
+
+function SDRSchedule() {
+  const [slots, setSlots] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const loadSlots = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data } = await supabase.from("sdr_schedule").select("*").order("day_of_week")
+      setSlots(data ?? [])
+    } catch (e: any) { toast.error(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { loadSlots() }, [loadSlots])
+
+  const handleAddSlot = async (dayOfWeek: number) => {
+    await supabase.from("sdr_schedule").insert({ day_of_week: dayOfWeek, start_time: "09:00", end_time: "18:00" })
+    toast.success("Janela adicionada")
+    loadSlots()
+  }
+
+  const handleUpdate = async (id: string, field: string, value: string) => {
+    await supabase.from("sdr_schedule").update({ [field]: value }).eq("id", id)
+    loadSlots()
+  }
+
+  const handleToggle = async (id: string, active: boolean) => {
+    await supabase.from("sdr_schedule").update({ is_active: !active }).eq("id", id)
+    loadSlots()
+  }
+
+  const handleDelete = async (id: string) => {
+    await supabase.from("sdr_schedule").delete().eq("id", id)
+    toast.success("Janela removida")
+    loadSlots()
+  }
+
+  if (loading) return null
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base"><Calendar className="h-4 w-4" /> Horario de Atendimento</CardTitle>
+        <CardDescription>Configure janelas de horario para o SDR. Cada dia pode ter multiplos periodos.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {[1, 2, 3, 4, 5, 6, 0].map((dayIdx) => {
+          const daySlots = slots.filter((s) => s.day_of_week === dayIdx)
+          return (
+            <div key={dayIdx} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">{SDR_DAYS[dayIdx]}</span>
+                <Button variant="ghost" size="sm" onClick={() => handleAddSlot(dayIdx)}>
+                  <Plus className="h-3 w-3 mr-1" /> Adicionar
+                </Button>
+              </div>
+              {daySlots.length === 0 ? (
+                <p className="text-xs text-muted-foreground pl-2">Sem janelas</p>
+              ) : (
+                <div className="space-y-1 pl-2">
+                  {daySlots.map((slot) => (
+                    <div key={slot.id} className="flex items-center gap-2">
+                      <Input type="time" value={slot.start_time.slice(0, 5)} onChange={(e) => handleUpdate(slot.id, "start_time", e.target.value)} className="h-7 w-24 text-xs" />
+                      <span className="text-xs text-muted-foreground">ate</span>
+                      <Input type="time" value={slot.end_time.slice(0, 5)} onChange={(e) => handleUpdate(slot.id, "end_time", e.target.value)} className="h-7 w-24 text-xs" />
+                      <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => handleToggle(slot.id, slot.is_active)}>
+                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300" />}
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDelete(slot.id)}>
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // SDR Settings
 // ---------------------------------------------------------------------------
 
@@ -206,39 +294,7 @@ export default function SDRSettings() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><Clock className="h-4 w-4" /> Horario de Atendimento</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <div className="grid grid-cols-3 gap-2 text-sm">
-              <div /><div className="text-center text-muted-foreground">Inicio</div><div className="text-center text-muted-foreground">Fim</div>
-            </div>
-            {["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"].map((day, i) => {
-              const key = ["schedule_sunday", "schedule_monday", "schedule_tuesday", "schedule_wednesday", "schedule_thursday", "schedule_friday", "schedule_saturday"][i]
-              return (
-                <div key={key} className="grid grid-cols-3 items-center gap-2 text-sm">
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={settings[key]} onChange={(e) => handleSave({ [key]: e.target.checked })} className="rounded" />
-                    {day}
-                  </label>
-                  <Input type="time" value={settings.schedule_start_time} disabled={!settings[key]} onChange={(e) => handleSave({ schedule_start_time: e.target.value })} className="h-8 text-xs" />
-                  <Input type="time" value={settings.schedule_end_time} disabled={!settings[key]} onChange={(e) => handleSave({ schedule_end_time: e.target.value })} className="h-8 text-xs" />
-                </div>
-              )
-            })}
-            <div className="flex items-center gap-2 pt-2">
-              <Label className="text-sm">Timezone:</Label>
-              <Select value={settings.timezone} onValueChange={(v) => handleSave({ timezone: v })}>
-                <SelectTrigger className="w-48 h-8"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="America/Sao_Paulo">America/Sao_Paulo</SelectItem>
-                  <SelectItem value="UTC">UTC</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </CardContent>
-        </Card>
+        <SDRSchedule />
 
         <Card>
           <CardHeader>

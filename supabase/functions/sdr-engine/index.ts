@@ -131,17 +131,39 @@ async function isBusinessHours(supabase: Supabase, settings: any): Promise<boole
   const now = new Date()
   const tz = settings.timezone ?? "America/Sao_Paulo"
   const dayOfWeek = now.getDay()
+  const localTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: tz })
 
+  // Check new schedule table first
+  const { data: schedule } = await supabase
+    .from("sdr_schedule")
+    .select("start_time, end_time")
+    .eq("day_of_week", dayOfWeek)
+    .eq("is_active", true)
+
+  if (schedule && schedule.length > 0) {
+    // Check each time window
+    for (const slot of schedule) {
+      const start = slot.start_time.slice(0, 5) // HH:MM
+      const end = slot.end_time.slice(0, 5)
+      if (start > end) {
+        // Overnight: e.g., 18:00 -> 08:30
+        if (localTime >= start || localTime <= end) return true
+      } else {
+        if (localTime >= start && localTime <= end) return true
+      }
+    }
+    return false
+  }
+
+  // Fallback to old settings
   const dayMap = [settings.schedule_sunday, settings.schedule_monday, settings.schedule_tuesday,
     settings.schedule_wednesday, settings.schedule_thursday, settings.schedule_friday, settings.schedule_saturday]
 
   if (!dayMap[dayOfWeek]) return false
 
-  const localTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: tz })
   const start = settings.schedule_start_time
   const end = settings.schedule_end_time
 
-  // Handle overnight schedules (e.g., 18:00 -> 08:30)
   if (start > end) {
     return localTime >= start || localTime <= end
   }
