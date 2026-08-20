@@ -7,32 +7,41 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // System prompt (protected - never modified by user)
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `Você é a Sofia, do ATENDATOP. Sistema para prestadores de serviço.
+const SYSTEM_PROMPT = `Voce e a Sofia, do ATENDATOP. Sistema para prestadores de servico.
 
-Objetivo: qualificar o lead e agendar demonstração. NÃO falar preços.
+Seu papel:
+- Receber o lead com cordialidade
+- Entender rapidamente o servico que ele presta
+- Descobrir como ele controla sua operacao hoje
+- Identificar uma ou duas necessidades relevantes
+- Apresentar SOMENTE funcionalidades que facam sentido
+- Informar que um especialista ira retornar para concluir o atendimento
 
 Regras:
-- Uma pergunta por vez
-- Não repita perguntas já feitas
-- Seja breve e natural como uma conversa de WhatsApp
-- Não liste funcionalidades, só mencione as relevantes
+- Uma pergunta por vez, sempre
+- Nao repita perguntas ja feitas
+- Seja breve e natural como WhatsApp
+- Nao fale preços, planos ou descontos
+- Nao invente funcionalidades
+- Nao invente horarios
+- Quando o lead estiver qualificado, informe que um especialista retornara
 
-Fluxo natural:
-1. Entender o serviço → 2. Entender a equipe → 3. Entender o controle atual → 4. Mostrar solução → 5. Agendar demo
+Fluxo:
+1. Cumprimentar e entender o servico
+2. Perguntar como controla a operacao
+3. Identificar necessidade
+4. Mencionar funcionalidade relevante do AtendaTop
+5. Quando perceber interesse suficiente, informe:
+   "Obrigada pelas informacoes! Um dos nossos especialistas vai entrar em contato para te mostrar como o AtendaTop pode ajudar na sua operacao. Pode aguardar!"
 
-Sobre agendamento:
-- Quando o lead demonstrar interesse, ofereça horários disponíveis
-- Os horários disponíveis estão no contexto (HORÁRIOS_DISPONIVEIS)
-- Se não houver horário disponível, informe e ofereça retorno humano
-- Se o lead escolher um horário que NÃO está disponível, informe e ofereça alternativas
-- NUNCA confirme um horário que não esteja na lista de disponíveis
-- Formato do horário: "segunda às 14h", "terça às 9h", etc.
+Se perguntarem preco: "Um especialista vai te orientar melhor sobre isso."
+Se pedirem humano: "Certo, um especialista ira retornar em breve!"
 
-Se perguntarem preço: "Posso te mostrar na demonstração. Qual o melhor horário?"
-Se pedirem humano: concorde e agende retorno.
+Horarios disponiveis: use apenas quando o lead pedir especificamente para agendar.
+Se nao houver horario, diga que um especialista ira retornar.
 
 Responda em JSON:
-{"response":"texto","intent":"qualification|pricing|human_request|other","temperature":"cold|warm|hot","suggested_action":"continue|schedule_demo|transfer_human|schedule_callback","confidence":0.9,"extracted_info":{"service_type":null,"team_size":null,"current_tool":null,"main_need":null}}
+{"response":"texto","intent":"qualification|pricing|human_request|other","temperature":"cold|warm|hot","suggested_action":"continue|transfer_human|schedule_callback","confidence":0.9,"extracted_info":{"service_type":null,"team_size":null,"current_tool":null,"main_need":null}}
 
 Apenas o JSON.`;
 
@@ -241,11 +250,18 @@ async function processMessage(
     .order("sent_at", { ascending: false })
     .limit(15)
 
-  // Reverse to chronological order
+  // Reverse to chronological order - include all messages (even without content)
   const conversationContext = (recentMsgs ?? [])
     .reverse()
-    .filter((m: any) => m.content)
-    .map((m: any) => `${m.direction === "inbound" ? "CLIENTE" : "SOFIA"}: ${m.content}`)
+    .map((m: any) => {
+      const label = m.direction === "inbound" ? "CLIENTE" : "SOFIA"
+      if (m.content) return `${label}: ${m.content}`
+      if (m.type === "audio") return `${label}: [audio]`
+      if (m.type === "image") return `${label}: [imagem]`
+      if (m.type === "video") return `${label}: [video]`
+      if (m.type === "document") return `${label}: [documento]`
+      return `${label}: [mensagem]`
+    })
     .join("\n")
 
   // 11. Build prompt - use chat messages for better context
@@ -487,50 +503,63 @@ Deno.serve(async (req) => {
         const wasTestMode = settings?.test_mode
         await supabase.from("sdr_settings").update({ enabled: true, test_mode: false }).eq("id", settings?.id)
 
-        // Use provided conversation_id or create/reuse a test conversation
+        // Reuse or create test conversation using FIXED ids so history persists across test calls
+        const TEST_CONTACT_ID = "2ff00aff-2ce4-4609-8ed7-e10ee91c4d04"
+        const TEST_CONVERSATION_ID = "763783f6-5466-40a9-95ef-2859a8c9f771"
         let testConvId = conversation_id
+        let testContactId = TEST_CONTACT_ID
         if (!testConvId) {
-          // Check if test conversation exists
-          const { data: existing } = await supabase
-            .from("sdr_conversations")
-            .select("conversation_id")
-            .eq("metadata->>'type'", "test")
-            .limit(1)
-            .single()
-          
-          if (existing) {
-            testConvId = existing.conversation_id
+          // Find or create the test contact (by phone, since phone is unique)
+          const { data: existingContact } = await supabase
+            .from("contacts")
+            .select("id")
+            .eq("phone", "5500000000000")
+            .maybeSingle()
+          if (existingContact) {
+            testContactId = existingContact.id
           } else {
-            // Create a test contact and conversation
-            const { data: testContact } = await supabase
-              .from("contacts")
-              .insert({ phone: "5500000000000", name: "Teste SDR IA", source: "manual" })
-              .select()
-              .single()
-            
-            const { data: testConv } = await supabase
-              .from("conversations")
-              .insert({
-                contact_id: testContact?.id,
-                instance_id: "00000000-0000-0000-0000-000000000000",
-                status: "open",
-              })
-              .select()
-              .single()
-            
-            testConvId = testConv?.id
-            
-            // Mark as test conversation
             await supabase
-              .from("sdr_conversations")
-              .insert({
-                conversation_id: testConvId,
-                contact_id: testContact?.id,
-                status: "active",
-                metadata: { type: "test" },
-              })
+              .from("contacts")
+              .insert({ id: TEST_CONTACT_ID, phone: "5500000000000", name: "Teste SDR IA", source: "manual" })
               .then(() => {}, () => {})
           }
+
+          // Use a real instance for the conversation FK
+          const { data: inst } = await supabase
+            .from("whatsapp_instances")
+            .select("id")
+            .limit(1)
+            .maybeSingle()
+          const instId = inst?.id ?? "d94c3f65-7969-474e-91bc-45dfa3da5f02"
+
+          // Upsert test conversation
+          await supabase
+            .from("conversations")
+            .upsert(
+              {
+                id: TEST_CONVERSATION_ID,
+                contact_id: testContactId,
+                instance_id: instId,
+                status: "open",
+              },
+              { onConflict: "id" }
+            )
+            .then(() => {}, () => {})
+
+          // Ensure SDR conversation is active
+          await supabase
+            .from("sdr_conversations")
+            .upsert(
+              {
+                conversation_id: TEST_CONVERSATION_ID,
+                contact_id: testContactId,
+                status: "active",
+                metadata: { type: "test" },
+              },
+              { onConflict: "conversation_id" }
+            )
+            .then(() => {}, () => {})
+          testConvId = TEST_CONVERSATION_ID
         }
 
         // Store the test message as inbound
@@ -547,8 +576,8 @@ Deno.serve(async (req) => {
 
         const result = await processMessage(
           supabase,
-          testConvId ?? "00000000-0000-0000-0000-000000000000",
-          "00000000-0000-0000-0000-000000000000",
+          testConvId ?? TEST_CONVERSATION_ID,
+          testContactId,
           message,
           "test",
           "test-" + Date.now(),

@@ -695,7 +695,7 @@ export default function ChatPage() {
           pendingFile.file,
         )
       } else {
-        await proxySendText(selected.instance_id, targetPhone, text.trim())
+        await proxySendText(selected.instance_id, targetPhone, text.trim(), instance?.instance_name)
       }
       setText("")
       setPendingFile(null)
