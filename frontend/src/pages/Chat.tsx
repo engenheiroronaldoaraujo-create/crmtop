@@ -515,12 +515,15 @@ export default function ChatPage() {
     if (!selectedId) return
     setSdrToggling(true)
     try {
-      if (sdrStatus === "active") {
-        // Pause SDR
+      if (sdrStatus === "active" || sdrStatus === null) {
+        // Pause SDR (create record if doesn't exist)
         await supabase
           .from("sdr_conversations")
-          .update({ status: "paused_human" })
-          .eq("conversation_id", selectedId)
+          .upsert({
+            conversation_id: selectedId,
+            contact_id: selected?.contact_id,
+            status: "paused_human",
+          }, { onConflict: "conversation_id" })
         setSdrStatus("paused_human")
         toast.success("SDR pausado nesta conversa")
       } else {
@@ -889,24 +892,22 @@ export default function ChatPage() {
                 <Button variant="outline" size="sm" onClick={openOppDialog}>
                   <FlaskConical className="mr-1 h-4 w-4" /> Adicionar ao Funil
                 </Button>
-                {sdrStatus && (
-                  <Button
-                    variant={sdrStatus === "active" ? "default" : "outline"}
-                    size="sm"
-                    onClick={toggleSDR}
-                    disabled={sdrToggling}
-                    className={sdrStatus === "active" ? "bg-green-600 hover:bg-green-700 text-white" : ""}
-                  >
-                    {sdrToggling ? (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    ) : sdrStatus === "active" ? (
-                      <Zap className="mr-1 h-3 w-3" />
-                    ) : (
-                      <ZapOff className="mr-1 h-3 w-3" />
-                    )}
-                    {sdrStatus === "active" ? "SDR Ativo" : "SDR Pausado"}
-                  </Button>
-                )}
+                <Button
+                  variant={sdrStatus === "active" ? "default" : "outline"}
+                  size="sm"
+                  onClick={toggleSDR}
+                  disabled={sdrToggling}
+                  className={sdrStatus === "active" ? "bg-green-600 hover:bg-green-700 text-white" : ""}
+                >
+                  {sdrToggling ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : sdrStatus === "active" ? (
+                    <Zap className="mr-1 h-3 w-3" />
+                  ) : (
+                    <ZapOff className="mr-1 h-3 w-3" />
+                  )}
+                  {sdrStatus === "active" ? "SDR Ativo" : sdrStatus === "paused_human" ? "SDR Pausado" : "SDR Desligado"}
+                </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm">
