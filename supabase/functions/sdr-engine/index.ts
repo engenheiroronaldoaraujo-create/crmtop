@@ -114,7 +114,7 @@ function parseResponse<T>(text: string): T | null {
   try {
     if (!text || !text.trim()) return null
 
-    // Strip thinking/reasoning tags (<think>, [REASONING], etc.)
+    // Strip thinking/reasoning tags
     let cleaned = text
       .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/\[REASONING\][\s\S]*?\[\/REASONING\]/gi, "")
@@ -126,32 +126,59 @@ function parseResponse<T>(text: string): T | null {
       cleaned = codeBlockMatch[1].trim()
     }
 
-    // Find the last complete JSON object (model may have text after JSON)
-    const jsonMatches = cleaned.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)
-    if (jsonMatches) {
-      // Try each match from last to first (most likely the final JSON is the answer)
-      for (let i = jsonMatches.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(jsonMatches[i]) as T
-          if (parsed && typeof parsed === "object" && "response" in parsed) {
-            return parsed
-          }
-        } catch {
-          continue
-        }
+    // Find JSON using brace counting (handles nested braces in strings)
+    const jsonStr = extractJson(cleaned)
+    if (jsonStr) {
+      const parsed = JSON.parse(jsonStr) as T
+      if (parsed && typeof parsed === "object" && "response" in parsed) {
+        return parsed
       }
-    }
-
-    // Last resort: try parsing the whole cleaned text
-    const parsed = JSON.parse(cleaned) as T
-    if (parsed && typeof parsed === "object" && "response" in parsed) {
-      return parsed
     }
 
     return null
   } catch {
     return null
   }
+}
+
+function extractJson(text: string): string | null {
+  const start = text.indexOf("{")
+  if (start === -1) return null
+
+  let depth = 0
+  let inString = false
+  let escape = false
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+
+    if (escape) {
+      escape = false
+      continue
+    }
+
+    if (ch === "\\" && inString) {
+      escape = true
+      continue
+    }
+
+    if (ch === '"') {
+      inString = !inString
+      continue
+    }
+
+    if (inString) continue
+
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) {
+        return text.slice(start, i + 1)
+      }
+    }
+  }
+
+  return null
 }
 
 // ---------------------------------------------------------------------------
