@@ -122,7 +122,10 @@ function OpportunityCard({
             snapshot.isDragging && "rotate-2 shadow-lg"
           )}
         >
-          <Card className="cursor-grab border-border/60 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing">
+          <Card
+            className="cursor-grab border-border/60 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
+            title={opportunity.description ? `Necessidade: ${opportunity.description}` : undefined}
+          >
             <CardContent className="p-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
@@ -132,6 +135,11 @@ function OpportunityCard({
                   <p className="truncate text-xs text-muted-foreground">
                     {opportunity.title}
                   </p>
+                  {opportunity.description && opportunity.description !== opportunity.title && (
+                    <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 italic">
+                      {opportunity.description}
+                    </p>
+                  )}
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

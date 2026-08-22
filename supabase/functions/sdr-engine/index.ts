@@ -124,6 +124,100 @@ function parseResponse<T>(text: string): T | null {
 }
 
 // ---------------------------------------------------------------------------
+// Create opportunity if not exists (reusable for transfer_human + schedule_callback)
+// ---------------------------------------------------------------------------
+
+async function createOpportunityIfNotExists(
+  supabase: Supabase,
+  contactId: string,
+  conversationId: string,
+  temperature: string,
+  extractedInfo: Record<string, string | null>,
+  pushName: string | null,
+  phone: string | null,
+): Promise<string | null> {
+  try {
+    // Check for existing open opportunity
+    const { data: existingOpp } = await supabase
+      .from("opportunities")
+      .select("id")
+      .eq("contact_id", contactId)
+      .eq("status", "open")
+      .limit(1)
+
+    if (existingOpp && existingOpp.length > 0) {
+      return existingOpp[0].id
+    }
+
+    // Get default pipeline
+    const { data: pipeline } = await supabase
+      .from("pipelines")
+      .select("id")
+      .eq("is_default", true)
+      .limit(1)
+      .single()
+
+    if (!pipeline) return null
+
+    // Get stage based on temperature
+    const stageName = temperature === "cold" ? "Novo Lead" : "Qualificado"
+    const { data: stage } = await supabase
+      .from("pipeline_stages")
+      .select("id")
+      .eq("pipeline_id", pipeline.id)
+      .eq("name", stageName)
+      .limit(1)
+      .single()
+
+    // Fallback to first stage if name not found
+    let stageId = stage?.id
+    if (!stageId) {
+      const { data: fallbackStage } = await supabase
+        .from("pipeline_stages")
+        .select("id")
+        .eq("pipeline_id", pipeline.id)
+        .order("position", { ascending: true })
+        .limit(1)
+        .single()
+      stageId = fallbackStage?.id
+    }
+
+    if (!stageId) return null
+
+    // Build title from extracted_info or contact data
+    const title = extractedInfo.service_type
+      ?? pushName
+      ?? phone
+      ?? "Novo Lead"
+
+    // Insert opportunity
+    const { data: newOpp, error } = await supabase
+      .from("opportunities")
+      .insert({
+        contact_id: contactId,
+        pipeline_id: pipeline.id,
+        stage_id: stageId,
+        title,
+        created_by: null,
+        conversation_id: conversationId,
+        description: extractedInfo.main_need ?? null,
+      })
+      .select("id")
+      .single()
+
+    if (error) {
+      console.error("SDR_OPP_CREATE_ERROR", error)
+      return null
+    }
+
+    return newOpp?.id ?? null
+  } catch (err) {
+    console.error("SDR_OPP_CREATE_ERROR", err)
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Business hours check
 // ---------------------------------------------------------------------------
 
@@ -289,8 +383,10 @@ async function processMessage(
     })
     .join("\n")
 
-  // 11. Build prompt - use chat messages for better context
-  const systemMsg = SYSTEM_PROMPT + (settings.system_prompt ? `\n\nInstruções adicionais: ${settings.system_prompt}` : "")
+  // 11. Build prompt - use custom system_prompt if provided, fallback to default
+  const systemMsg = settings.system_prompt?.trim()
+    ? settings.system_prompt
+    : SYSTEM_PROMPT
 
   // Use the conversation as the user message (includes the new message naturally)
   const userMsg = `Conversa até agora:
@@ -350,9 +446,25 @@ Responda a última mensagem do CLIENTE.`
 
   // 13. Handle actions based on suggested_action
   if (parsed.suggested_action === "transfer_human") {
+    // Create opportunity before transferring
+    const oppId = await createOpportunityIfNotExists(
+      supabase,
+      contactId,
+      conversationId,
+      parsed.temperature,
+      parsed.extracted_info,
+      contact?.push_name ?? null,
+      contact?.phone ?? null,
+    )
+
     await supabase
       .from("sdr_conversations")
-      .update({ status: "transferred", handoff_reason: "customer_requested" })
+      .update({
+        status: "transferred",
+        handoff_reason: "customer_requested",
+        opportunity_id: oppId,
+        metadata: { extracted_info: parsed.extracted_info, temperature: parsed.temperature },
+      })
       .eq("conversation_id", conversationId)
       .then(() => {}, () => {})
 
@@ -364,47 +476,46 @@ Responda a última mensagem do CLIENTE.`
       action: "transfer_human",
       latency_ms: latency,
       model: settings.primary_model,
+      metadata: parsed.extracted_info,
     }).then(() => {}, () => {})
 
     return { action: "transfer_human", response: parsed.response }
   }
 
   if (parsed.suggested_action === "schedule_demo" || parsed.suggested_action === "schedule_callback") {
-    // Create opportunity if not exists
-    const { data: existingOpp } = await supabase
-      .from("opportunities")
-      .select("id")
-      .eq("contact_id", contactId)
-      .eq("status", "open")
-      .limit(1)
-
-    let oppId = existingOpp?.[0]?.id
-    if (!oppId) {
-      const { data: newOpp } = await supabase
-        .from("opportunities")
-        .insert({
-          contact_id: contactId,
-          pipeline_id: (await supabase.from("pipelines").select("id").eq("is_default", true).single())?.data?.id,
-          stage_id: (await supabase.from("pipeline_stages").select("id").eq("name", "Novo").single())?.data?.id,
-          title: `Lead - ${contact?.name ?? "Novo contato"}`,
-          created_by: null,
-          conversation_id: conversationId,
-        })
-        .select()
-        .single()
-      oppId = newOpp?.id
-    }
+    // Create opportunity using shared function
+    const oppId = await createOpportunityIfNotExists(
+      supabase,
+      contactId,
+      conversationId,
+      parsed.temperature,
+      parsed.extracted_info,
+      contact?.push_name ?? null,
+      contact?.phone ?? null,
+    )
 
     // Update SDR conversation
+    const sdrUpdate: Record<string, unknown> = {
+      status: "active",
+      metadata: { extracted_info: parsed.extracted_info, temperature: parsed.temperature },
+    }
+    if (oppId) sdrUpdate.opportunity_id = oppId
+
     await supabase
       .from("sdr_conversations")
-      .update({ opportunity_id: oppId, status: "active" })
+      .update(sdrUpdate)
       .eq("conversation_id", conversationId)
       .then(() => {}, () => {})
+
     if (!sdrConv) {
       await supabase
         .from("sdr_conversations")
-        .insert({ conversation_id: conversationId, contact_id: contactId, opportunity_id: oppId })
+        .insert({
+          conversation_id: conversationId,
+          contact_id: contactId,
+          opportunity_id: oppId,
+          metadata: { extracted_info: parsed.extracted_info, temperature: parsed.temperature },
+        })
         .then(() => {}, () => {})
     }
   }

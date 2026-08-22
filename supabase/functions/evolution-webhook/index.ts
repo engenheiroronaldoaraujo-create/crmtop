@@ -325,7 +325,7 @@ async function processMessage(
         }
       }
     } catch (e) {
-      console.error("SDR_INTEGRATION_ERROR", e)
+      console.error("SDR_INTEGRATION_ERROR", String(e), e?.stack)
     }
   }
 }
@@ -342,6 +342,7 @@ async function callSDREngine(
   instanceName: string,
   messageId: string | null,
 ): Promise<void> {
+  console.info("SDR_ENGINE_CALL_START", { conversationId, instanceName, messageId })
   try {
     const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/sdr-engine`, {
       method: "POST",
@@ -363,6 +364,7 @@ async function callSDREngine(
 
     if (res.ok) {
       const result = await res.json()
+      console.info("SDR_ENGINE_RESULT", { action: result.action, hasResponse: !!result.response })
       if (result.response && result.action !== "skip" && result.action !== "error") {
         // Save SDR response to messages table FIRST (so context is available)
         await supabase.from("messages").insert({
