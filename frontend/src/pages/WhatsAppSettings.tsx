@@ -86,17 +86,19 @@ export default function WhatsAppSettings() {
   const instance = instances[0] ?? null
 
   const refreshStatus = useCallback(async () => {
-    if (!instance) return
+    if (!instance) return null
     try {
       const data = await proxyGetStatus(instance.id)
       if (data?.status) {
         setInstances((prev) =>
           prev.map((i) => (i.id === instance.id ? { ...i, status: data.status } : i)),
         )
+        return data.status as string
       }
     } catch {
       // keep last known status
     }
+    return null
   }, [instance])
 
   const refreshQr = useCallback(async () => {
@@ -118,18 +120,23 @@ export default function WhatsAppSettings() {
   // Poll status every 3s; refresh QR while not connected (it expires).
   useEffect(() => {
     if (!instance) return
-    const tick = () => {
-      refreshStatus()
-      if (instance.status !== "connected") {
+    let active = true
+    const tick = async () => {
+      if (!active) return
+      const status = await refreshStatus()
+      if (!active) return
+      // Only fetch QR if confirmed not connected
+      if (status !== "connected" && instance.status !== "connected") {
         refreshQr()
       }
     }
     tick()
     pollRef.current = window.setInterval(tick, 3000)
     return () => {
+      active = false
       if (pollRef.current !== null) window.clearInterval(pollRef.current)
     }
-  }, [instance, refreshStatus, refreshQr])
+  }, [instance?.id, refreshStatus, refreshQr])
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault()
