@@ -78,6 +78,16 @@ function contactPhone(c: { phone?: string | null; lid?: string | null; jid?: str
 // Opportunity Card
 // ---------------------------------------------------------------------------
 
+function sdrMetadataTooltip(meta: Record<string, string | null> | null | undefined): string | undefined {
+  if (!meta) return undefined
+  const lines: string[] = []
+  if (meta.service_type) lines.push(`Tipo de servico: ${meta.service_type}`)
+  if (meta.current_tool) lines.push(`Ferramenta atual: ${meta.current_tool}`)
+  if (meta.main_need) lines.push(`Necessidade: ${meta.main_need}`)
+  if (meta.team_size) lines.push(`Equipe: ${meta.team_size}`)
+  return lines.length > 0 ? lines.join("\n") : undefined
+}
+
 function OpportunityCard({
   opportunity,
   index,
@@ -124,7 +134,7 @@ function OpportunityCard({
         >
           <Card
             className="cursor-grab border-border/60 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
-            title={opportunity.description ? `Necessidade: ${opportunity.description}` : undefined}
+            title={sdrMetadataTooltip(opportunity.metadata)}
           >
             <CardContent className="p-3">
               <div className="flex items-start justify-between gap-2">
@@ -135,11 +145,6 @@ function OpportunityCard({
                   <p className="truncate text-xs text-muted-foreground">
                     {opportunity.title}
                   </p>
-                  {opportunity.description && opportunity.description !== opportunity.title && (
-                    <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70 italic">
-                      {opportunity.description}
-                    </p>
-                  )}
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

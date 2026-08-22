@@ -201,6 +201,7 @@ async function createOpportunityIfNotExists(
         created_by: null,
         conversation_id: conversationId,
         description: extractedInfo.main_need ?? null,
+        metadata: extractedInfo,
       })
       .select("id")
       .single()

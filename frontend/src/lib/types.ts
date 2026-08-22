@@ -121,6 +121,7 @@ export type Opportunity = {
   created_at: string
   updated_at: string
   closed_at: string | null
+  metadata: Record<string, string | null> | null
   // Joined fields
   contact?: Contact | null
   pipeline?: Pipeline | null
