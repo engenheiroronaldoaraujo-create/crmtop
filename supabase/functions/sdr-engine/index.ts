@@ -96,8 +96,12 @@ async function callAI(
   }
 
   const data = await res.json();
+  const content = data.choices?.[0]?.message?.content ?? "";
+  if (!content) {
+    console.error("SDR_AI_EMPTY_CONTENT", { model, responseData: JSON.stringify(data).slice(0, 500) })
+  }
   return {
-    content: data.choices?.[0]?.message?.content ?? "",
+    content,
     usage: data.usage,
   };
 }
@@ -108,21 +112,42 @@ async function callAI(
 
 function parseResponse<T>(text: string): T | null {
   try {
-    // Try to find JSON in the response (may have thinking text before it)
-    // Also handle markdown code blocks
-    let jsonStr = text
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (!text || !text.trim()) return null
+
+    // Strip thinking/reasoning tags (<think>, [REASONING], etc.)
+    let cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")
+      .replace(/\[REASONING\][\s\S]*?\[\/REASONING\]/gi, "")
+      .trim()
+
+    // Try markdown code blocks first
+    const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
     if (codeBlockMatch) {
-      jsonStr = codeBlockMatch[1].trim()
-    } else {
-      const jsonMatch = text.match(/\{[\s\S]*\}/)
-      if (jsonMatch) jsonStr = jsonMatch[0]
+      cleaned = codeBlockMatch[1].trim()
     }
-    const parsed = JSON.parse(jsonStr) as T
-    // Validate required fields
+
+    // Find the last complete JSON object (model may have text after JSON)
+    const jsonMatches = cleaned.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)
+    if (jsonMatches) {
+      // Try each match from last to first (most likely the final JSON is the answer)
+      for (let i = jsonMatches.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(jsonMatches[i]) as T
+          if (parsed && typeof parsed === "object" && "response" in parsed) {
+            return parsed
+          }
+        } catch {
+          continue
+        }
+      }
+    }
+
+    // Last resort: try parsing the whole cleaned text
+    const parsed = JSON.parse(cleaned) as T
     if (parsed && typeof parsed === "object" && "response" in parsed) {
       return parsed
     }
+
     return null
   } catch {
     return null
@@ -440,12 +465,13 @@ Responda a última mensagem do CLIENTE.`
   }>(aiResponse)
 
   if (!parsed || !parsed.response) {
+    console.error("SDR_PARSE_FAIL", { aiResponse: aiResponse.slice(0, 500) })
     await supabase.from("sdr_logs").insert({
       conversation_id: conversationId,
       contact_id: contactId,
       message_id: messageId,
       status: "failed",
-      error: "Invalid AI response",
+      error: `Invalid AI response: ${aiResponse.slice(0, 200)}`,
       latency_ms: latency,
     }).then(() => {}, () => {})
     return { action: "error", response: "Resposta inválida da IA" }
