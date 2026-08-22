@@ -98,7 +98,7 @@ function parseAIResponse(text: string): Record<string, unknown> | null {
 }
 
 // ---------------------------------------------------------------------------
-// Find candidates
+// Find candidates — unified search
 // ---------------------------------------------------------------------------
 
 async function findCandidates(supabase: any, params: any, userId: string) {
@@ -120,122 +120,88 @@ async function findCandidates(supabase: any, params: any, userId: string) {
   cutoffDate.setDate(cutoffDate.getDate() - params.stalled_days);
   const cutoff = cutoffDate.toISOString();
 
-  const historyCutoff = new Date();
-  historyCutoff.setDate(historyCutoff.getDate() - params.history_days);
+  // 1. Get ALL stalled conversations with at least 1 inbound message
+  const { data: convs } = await supabase
+    .from("conversations")
+    .select(`
+      id, contact_id, last_message_at,
+      contact:contacts(name, phone)
+    `)
+    .lt("last_message_at", cutoff)
+    .not("contact_id", "is", null);
 
-  // a) Open opportunities with conversation, stalled
-  if (params.include_opportunities) {
-    let q = supabase
+  if (!convs || convs.length === 0) return candidates;
+
+  // 2. For each conversation, find linked opportunity and check inbound count
+  for (const conv of convs) {
+    // Check inbound message count
+    const { count } = await supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conv.id)
+      .eq("direction", "inbound");
+
+    if ((count ?? 0) < 1) continue;
+
+    // Find opportunity: by conversation_id first, then by contact_id
+    let opp: any = null;
+
+    // Direct link
+    const { data: directOpp } = await supabase
       .from("opportunities")
       .select(`
-        id, title, contact_id, conversation_id, metadata, assigned_to,
-        last_message_at, stage:pipeline_stages(name),
-        contact:contacts(name, phone)
+        id, title, contact_id, conversation_id, metadata, assigned_to, status,
+        stage_id, stage:pipeline_stages(name)
       `)
-      .eq("status", "open")
-      .not("conversation_id", "is", null)
-      .lt("last_message_at", cutoff);
+      .eq("conversation_id", conv.id)
+      .limit(1)
+      .maybeSingle();
 
-    if (params.stage_ids && params.stage_ids.length > 0) {
-      q = q.in("stage_id", params.stage_ids);
+    if (directOpp) {
+      opp = directOpp;
+    } else {
+      // Indirect link: same contact_id, open status
+      const { data: contactOpp } = await supabase
+        .from("opportunities")
+        .select(`
+          id, title, contact_id, conversation_id, metadata, assigned_to, status,
+          stage_id, stage:pipeline_stages(name)
+        `)
+        .eq("contact_id", conv.contact_id)
+        .eq("status", "open")
+        .limit(1)
+        .maybeSingle();
+
+      if (contactOpp) opp = contactOpp;
     }
 
-    const { data: opps } = await q;
-
-    for (const opp of opps ?? []) {
-      const days = Math.floor(
-        (Date.now() - new Date(opp.last_message_at).getTime()) / 86400000
-      );
-      candidates.push({
-        type: "opportunity",
-        opportunity_id: opp.id,
-        conversation_id: opp.conversation_id,
-        contact_id: opp.contact_id,
-        contact_name: opp.contact?.name ?? "Sem nome",
-        contact_phone: opp.contact?.phone ?? null,
-        opp_title: opp.title,
-        stage_name: opp.stage?.name ?? null,
-        metadata: opp.metadata,
-        days_stalled: days,
-        assigned_to: opp.assigned_to,
-      });
+    // Skip closed opportunities unless include_closed
+    if (opp && (opp.status === "won" || opp.status === "lost") && !params.include_closed) {
+      continue;
     }
-  }
 
-  // b) Orphan conversations (no opportunity linked)
-  if (params.include_orphan_conversations) {
-    // Get conversations with last_message_at < cutoff that have no opportunity
-    const { data: convs } = await supabase
-      .from("conversations")
-      .select(`
-        id, contact_id, last_message_at,
-        contact:contacts(name, phone)
-      `)
-      .lt("last_message_at", cutoff)
-      .not("id", "in",
-        `(SELECT conversation_id FROM opportunities WHERE conversation_id IS NOT NULL)`
-      );
-
-    for (const conv of convs ?? []) {
-      // Check if has at least 2 inbound messages
-      const { count } = await supabase
-        .from("messages")
-        .select("id", { count: "exact", head: true })
-        .eq("conversation_id", conv.id)
-        .eq("direction", "inbound");
-
-      if ((count ?? 0) < 2) continue;
-
-      const days = Math.floor(
-        (Date.now() - new Date(conv.last_message_at).getTime()) / 86400000
-      );
-      candidates.push({
-        type: "orphan",
-        opportunity_id: null,
-        conversation_id: conv.id,
-        contact_id: conv.contact_id,
-        contact_name: conv.contact?.name ?? "Sem nome",
-        contact_phone: conv.contact?.phone ?? null,
-        opp_title: null,
-        stage_name: null,
-        metadata: null,
-        days_stalled: days,
-        assigned_to: null,
-      });
+    // Filter by stage_ids if provided
+    if (opp && params.stage_ids && params.stage_ids.length > 0) {
+      if (!params.stage_ids.includes(opp.stage_id)) continue;
     }
-  }
 
-  // c) Closed opportunities (if requested)
-  if (params.include_closed) {
-    const { data: closedOpps } = await supabase
-      .from("opportunities")
-      .select(`
-        id, title, contact_id, conversation_id, metadata, assigned_to,
-        last_message_at, stage:pipeline_stages(name),
-        contact:contacts(name, phone)
-      `)
-      .in("status", ["won", "lost"])
-      .not("conversation_id", "is", null)
-      .lt("last_message_at", cutoff);
+    const days = Math.floor(
+      (Date.now() - new Date(conv.last_message_at).getTime()) / 86400000
+    );
 
-    for (const opp of closedOpps ?? []) {
-      const days = Math.floor(
-        (Date.now() - new Date(opp.last_message_at).getTime()) / 86400000
-      );
-      candidates.push({
-        type: "opportunity",
-        opportunity_id: opp.id,
-        conversation_id: opp.conversation_id,
-        contact_id: opp.contact_id,
-        contact_name: opp.contact?.name ?? "Sem nome",
-        contact_phone: opp.contact?.phone ?? null,
-        opp_title: opp.title,
-        stage_name: opp.stage?.name ?? null,
-        metadata: opp.metadata,
-        days_stalled: days,
-        assigned_to: opp.assigned_to,
-      });
-    }
+    candidates.push({
+      type: opp ? "opportunity" : "orphan",
+      opportunity_id: opp?.id ?? null,
+      conversation_id: conv.id,
+      contact_id: conv.contact_id,
+      contact_name: conv.contact?.name ?? "Sem nome",
+      contact_phone: conv.contact?.phone ?? null,
+      opp_title: opp?.title ?? null,
+      stage_name: opp?.stage?.name ?? null,
+      metadata: opp?.metadata ?? null,
+      days_stalled: days,
+      assigned_to: opp?.assigned_to ?? null,
+    });
   }
 
   return candidates;
@@ -270,13 +236,21 @@ async function analyzeCandidate(
     return `[${time} ${dir}] ${content}`;
   }).join("\n");
 
-  const userMsg = `Oportunidade: ${candidate.opp_title ?? "Sem oportunidade"}
+  const userMsg = candidate.opp_title
+    ? `Oportunidade: ${candidate.opp_title}
 Estagio atual: ${candidate.stage_name ?? "N/A"}
 Dias sem atividade do cliente: ${candidate.days_stalled}
 Informacoes coletadas pelo SDR: ${JSON.stringify(candidate.metadata ?? {})}
 
 Historico da conversa (mais recente primeiro):
-${history || "(sem mensagens)"}`;
+${history || "(sem mensagens)"}`
+    : `CONVERSA SEM OPORTUNIDADE/CARD VINCULADO
+Dias sem atividade do cliente: ${candidate.days_stalled}
+
+Historico da conversa (mais recente primeiro):
+${history || "(sem mensagens)"}
+
+Se houver potencial de venda, classifique como "no_opportunity".`;
 
   const content = await callAI(apiKey, model, [
     { role: "system", content: INSPECTOR_SYSTEM_PROMPT },

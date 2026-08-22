@@ -40,8 +40,6 @@ import {
 interface InspectorParams {
   stalled_days: number
   history_days: number
-  include_opportunities: boolean
-  include_orphan_conversations: boolean
   include_closed: boolean
   stage_ids: string[]
   stall_reasons: string[]
@@ -148,8 +146,6 @@ export function DealInspectorDialog({
   // Config state
   const [stalledDays, setStalledDays] = useState(3)
   const [historyDays, setHistoryDays] = useState(30)
-  const [includeOpps, setIncludeOpps] = useState(true)
-  const [includeOrphans, setIncludeOrphans] = useState(true)
   const [includeClosed, setIncludeClosed] = useState(false)
   const [selectedStages, setSelectedStages] = useState<string[]>([])
   const [selectedReasons, setSelectedReasons] = useState<string[]>(Object.keys(STALL_REASONS))
@@ -194,8 +190,6 @@ export function DealInspectorDialog({
       const params: InspectorParams = {
         stalled_days: stalledDays,
         history_days: historyDays,
-        include_opportunities: includeOpps,
-        include_orphan_conversations: includeOrphans,
         include_closed: includeClosed,
         stage_ids: selectedStages,
         stall_reasons: selectedReasons,
@@ -229,7 +223,7 @@ export function DealInspectorDialog({
       toast.error(e.message ?? "Erro ao executar Deal Inspector")
       setPhase("config")
     }
-  }, [stalledDays, historyDays, includeOpps, includeOrphans, includeClosed, selectedStages, selectedReasons, actionMode])
+  }, [stalledDays, historyDays, includeClosed, selectedStages, selectedReasons, actionMode])
 
   const handleCreateTask = async (insight: InsightResult) => {
     const dueAt = new Date()
@@ -318,14 +312,10 @@ export function DealInspectorDialog({
 
             <Separator />
 
-            {/* Scope */}
+            {/* Options */}
             <div className="space-y-3">
-              <h4 className="text-sm font-semibold">Escopo</h4>
-              <div className="space-y-2">
-                <ToggleCheck label="Oportunidades abertas com conversa" active={includeOpps} onClick={() => setIncludeOpps(!includeOpps)} />
-                <ToggleCheck label="Conversas sem oportunidade (leads ocultos)" active={includeOrphans} onClick={() => setIncludeOrphans(!includeOrphans)} />
-                <ToggleCheck label="Oportunidades encerradas (ganhos/perdidos)" active={includeClosed} onClick={() => setIncludeClosed(!includeClosed)} />
-              </div>
+              <h4 className="text-sm font-semibold">Opcoes</h4>
+              <ToggleCheck label="Incluir oportunidades encerradas (ganhos/perdidos)" active={includeClosed} onClick={() => setIncludeClosed(!includeClosed)} />
             </div>
 
             <Separator />
