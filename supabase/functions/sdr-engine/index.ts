@@ -109,13 +109,19 @@ async function callAI(
 function parseResponse<T>(text: string): T | null {
   try {
     // Try to find JSON in the response (may have thinking text before it)
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]) as T
-      // Validate required fields
-      if (parsed && typeof parsed === "object" && "response" in parsed) {
-        return parsed
-      }
+    // Also handle markdown code blocks
+    let jsonStr = text
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1].trim()
+    } else {
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) jsonStr = jsonMatch[0]
+    }
+    const parsed = JSON.parse(jsonStr) as T
+    // Validate required fields
+    if (parsed && typeof parsed === "object" && "response" in parsed) {
+      return parsed
     }
     return null
   } catch {

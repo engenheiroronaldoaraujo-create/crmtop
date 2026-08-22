@@ -7,14 +7,11 @@ import {
   MessageCircle,
   Check,
   Copy,
-  AlertTriangle,
   Eye,
-  ChevronDown,
   ChevronUp,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
-import { contactDisplayName } from "@/lib/utils"
 import type { PipelineStage } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -161,16 +158,12 @@ export function DealInspectorDialog({
   // Result detail
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
-  // Task creation
-  const [profiles, setProfiles] = useState<Array<{ id: string; full_name: string | null }>>([])
-
   useEffect(() => {
     if (open) {
       setPhase("config")
       setResults([])
       setSummary({ total: 0, analyzed: 0, errors: 0 })
       setExpandedId(null)
-      supabase.from("profiles").select("id, full_name").order("full_name").then(({ data }) => setProfiles(data ?? []))
     }
   }, [open])
 
