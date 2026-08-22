@@ -18,6 +18,7 @@ import {
   Clock,
   Trash2,
   Settings,
+  AlertTriangle,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
@@ -29,6 +30,7 @@ import {
 } from "@/hooks/use-commercial"
 import { contactDisplayName, cn, formatPhone, isRealPhone } from "@/lib/utils"
 import type { Opportunity, PipelineStage, Profile } from "@/lib/types"
+import { DealInspectorDialog } from "@/components/DealInspectorDialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -99,6 +101,7 @@ function OpportunityCard({
   onAssign,
   onDelete,
   tags,
+  insight,
   onCreateMeeting,
   onCreateTask,
   onCreateFollowUp,
@@ -113,6 +116,7 @@ function OpportunityCard({
   onAssign: (o: Opportunity) => void
   onDelete?: (o: Opportunity) => void
   tags?: { tag_id: string; tag?: { name: string; color: string } }[]
+  insight?: { priority: string; days_stalled: number } | null
   onCreateMeeting?: (o: Opportunity) => void
   onCreateTask?: (o: Opportunity) => void
   onCreateFollowUp?: (o: Opportunity) => void
@@ -145,6 +149,20 @@ function OpportunityCard({
                   <p className="truncate text-xs text-muted-foreground">
                     {opportunity.title}
                   </p>
+                  {insight && (
+                    <span
+                      className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                        insight.priority === "high"
+                          ? "bg-red-100 text-red-700"
+                          : insight.priority === "medium"
+                          ? "bg-yellow-100 text-yellow-700"
+                          : "bg-blue-100 text-blue-700"
+                      }`}
+                    >
+                      <AlertTriangle className="h-3 w-3" />
+                      {insight.days_stalled}d parado
+                    </span>
+                  )}
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -264,6 +282,7 @@ function KanbanColumn({
   stage,
   opportunities,
   oppTagsMap,
+  oppInsightsMap,
   onEdit,
   onWin,
   onLose,
@@ -278,6 +297,7 @@ function KanbanColumn({
   stage: PipelineStage
   opportunities: Opportunity[]
   oppTagsMap: Map<string, any[]>
+  oppInsightsMap: Map<string, { priority: string; days_stalled: number }>
   onEdit: (o: Opportunity) => void
   onWin: (o: Opportunity) => void
   onLose: (o: Opportunity) => void
@@ -338,6 +358,7 @@ function KanbanColumn({
                 opportunity={opp}
                 index={idx}
                 tags={oppTagsMap.get(opp.id)}
+                insight={oppInsightsMap.get(opp.id) ?? null}
                 onEdit={onEdit}
                 onWin={onWin}
                 onLose={onLose}
@@ -1059,6 +1080,10 @@ export default function PipelinePage() {
   // Stage management
   const [stageDialogOpen, setStageDialogOpen] = useState(false)
 
+  // Deal Inspector
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [oppInsightsMap, setOppInsightsMap] = useState<Map<string, { priority: string; days_stalled: number }>>(new Map())
+
   // Load contacts and profiles
   useEffect(() => {
     supabase.from("contacts").select("id, name, push_name, phone, lid, jid").order("name").then(({ data }) => setContacts(data ?? []))
@@ -1130,6 +1155,29 @@ export default function PipelinePage() {
       }
       setOppTagsMap(map)
     })
+  }, [filteredOpps])
+
+  // Load deal insights for visible opportunities
+  useEffect(() => {
+    if (filteredOpps.length === 0) { setOppInsightsMap(new Map()); return }
+    const ids = filteredOpps.map((o) => o.id)
+    supabase
+      .from("deal_insights")
+      .select("opportunity_id, priority, days_stalled")
+      .is("action_taken", null)
+      .in("status", ["stalled", "at_risk"])
+      .in("opportunity_id", ids)
+      .then(({ data }) => {
+        const map = new Map<string, { priority: string; days_stalled: number }>()
+        for (const row of data ?? []) {
+          // Keep highest priority insight per opportunity
+          const existing = map.get(row.opportunity_id)
+          if (!existing || (row.priority === "high" && existing.priority !== "high")) {
+            map.set(row.opportunity_id, { priority: row.priority, days_stalled: row.days_stalled })
+          }
+        }
+        setOppInsightsMap(map)
+      })
   }, [filteredOpps])
 
   // Drag & drop
@@ -1271,6 +1319,9 @@ export default function PipelinePage() {
           <Button variant="outline" onClick={() => setStageDialogOpen(true)}>
             <Settings className="mr-2 h-4 w-4" /> Etapas
           </Button>
+          <Button variant="outline" onClick={() => setInspectorOpen(true)}>
+            <Search className="mr-2 h-4 w-4" /> Vasculhar
+          </Button>
           <Button onClick={() => setCreateOpen(true)}>
             <Plus className="mr-2 h-4 w-4" /> Oportunidade
           </Button>
@@ -1302,6 +1353,7 @@ export default function PipelinePage() {
                   stage={stage}
                   opportunities={oppsByStage.get(stage.id) ?? []}
                   oppTagsMap={oppTagsMap}
+                  oppInsightsMap={oppInsightsMap}
                   onEdit={(o) => { setEditOpp(o); setEditOpen(true) }}
                   onWin={(o) => { setWinTarget(o); setWinOpen(true) }}
                   onLose={(o) => { setLoseTarget(o); setLoseOpen(true) }}
@@ -1392,6 +1444,12 @@ export default function PipelinePage() {
         pipelineId={selectedPipelineId ?? ""}
         stages={stages}
         onRefresh={refreshStages}
+      />
+
+      <DealInspectorDialog
+        open={inspectorOpen}
+        onOpenChange={setInspectorOpen}
+        stages={stages}
       />
     </div>
     </>

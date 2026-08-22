@@ -76,7 +76,7 @@ async function callOpenRouter(
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       "HTTP-Referer": "https://crm-top.vercel.app",
       "X-Title": "CRM_TOP",
