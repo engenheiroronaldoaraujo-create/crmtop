@@ -260,6 +260,17 @@ async function actionGetQr(
   body: { instance_id?: string },
 ): Promise<Response> {
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+
+  // Skip QR fetch if already connected (avoids disrupting the connection)
+  const { data: inst } = await supabase
+    .from("whatsapp_instances")
+    .select("status")
+    .eq("id", body.instance_id)
+    .single();
+  if (inst?.status === "connected") {
+    return jsonResponse(200, { qrcode: { base64: null, code: null, pairingCode: null }, connected: true });
+  }
+
   const { res, data } = await callEvolution(`/instance/connect/${instance_name}`, {
     method: "GET",
   });
