@@ -7,7 +7,26 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 // System prompt (protected - never modified by user)
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `Voce e a Sofia, do ATENDATOP. Sistema para prestadores de servico.
+const SYSTEM_PROMPT = `FORMATO DE RESPOSTA OBRIGATORIO:
+Responda APENAS com JSON valido e nada mais.
+Sem markdown, sem \`\`\`json, sem texto antes ou depois do JSON.
+O JSON deve ter EXATAMENTE estes campos:
+{
+  "response": "mensagem para enviar ao lead",
+  "intent": "qualification|pricing|human_request|other",
+  "temperature": "cold|warm|hot",
+  "suggested_action": "continue|transfer_human|schedule_callback",
+  "confidence": 0.9,
+  "extracted_info": {
+    "service_type": null,
+    "team_size": null,
+    "current_tool": null,
+    "main_need": null
+  }
+}
+Nao adicione explicacoes fora do JSON.
+
+Voce e a Sofia, do ATENDATOP. Sistema para prestadores de servico.
 
 Seu papel:
 - Receber o lead com cordialidade
@@ -35,9 +54,6 @@ Fluxo:
 
 Se perguntarem preco: "Um especialista vai te orientar melhor sobre isso."
 Se pedirem humano: "Certo, um especialista ira retornar em breve!"
-
-Responda em JSON:
-{"response":"texto","intent":"qualification|pricing|human_request|other","temperature":"cold|warm|hot","suggested_action":"continue|transfer_human|schedule_callback","confidence":0.9,"extracted_info":{"service_type":null,"team_size":null,"current_tool":null,"main_need":null}}
 
 Apenas o JSON.`;
 
@@ -107,12 +123,21 @@ async function callAI(
 }
 
 // ---------------------------------------------------------------------------
-// Parse structured response
+// Parse structured response — tolerant
 // ---------------------------------------------------------------------------
+
+const FALLBACK_RESPONSE = {
+  response: "Desculpe, pode repetir? 😊",
+  intent: "unknown",
+  temperature: "cold",
+  suggested_action: "continue",
+  confidence: 0,
+  extracted_info: {} as Record<string, string | null>,
+}
 
 function parseResponse<T>(text: string): T | null {
   try {
-    if (!text || !text.trim()) return null
+    if (!text || text.trim().length < 5) return null
 
     // Strip thinking/reasoning tags
     let cleaned = text
@@ -120,18 +145,43 @@ function parseResponse<T>(text: string): T | null {
       .replace(/\[REASONING\][\s\S]*?\[\/REASONING\]/gi, "")
       .trim()
 
-    // Try markdown code blocks first
-    const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (codeBlockMatch) {
-      cleaned = codeBlockMatch[1].trim()
-    }
+    // Strip markdown fences
+    cleaned = cleaned
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim()
 
-    // Find JSON using brace counting (handles nested braces in strings)
+    // Find JSON using brace counting
     const jsonStr = extractJson(cleaned)
     if (jsonStr) {
-      const parsed = JSON.parse(jsonStr) as T
-      if (parsed && typeof parsed === "object" && "response" in parsed) {
-        return parsed
+      try {
+        const parsed = JSON.parse(jsonStr)
+        if (parsed && typeof parsed === "object") {
+          // Normalize: accept "response" or "message" as the text field
+          if (!parsed.response && parsed.message) {
+            parsed.response = parsed.message
+          }
+          if (parsed.response && typeof parsed.response === "string") {
+            return parsed as T
+          }
+          // Has text/content/reply field
+          const textField = parsed.text ?? parsed.content ?? parsed.reply
+          if (textField && typeof textField === "string") {
+            parsed.response = textField
+            return parsed as T
+          }
+        }
+      } catch {
+        // JSON parse failed, try text extraction below
+      }
+    }
+
+    // Last resort: extract text from raw string
+    if (cleaned.length > 10) {
+      const textMatch = cleaned.match(/"(?:response|message|text|content|reply)"\s*:\s*"([^"]{5,})"/)
+      if (textMatch) {
+        return { ...FALLBACK_RESPONSE, response: textMatch[1] } as T
       }
     }
 
@@ -492,16 +542,21 @@ Responda a última mensagem do CLIENTE.`
   }>(aiResponse)
 
   if (!parsed || !parsed.response) {
-    console.error("SDR_PARSE_FAIL", { aiResponse: aiResponse.slice(0, 500) })
+    // NEVER fail silently — use fallback response
+    console.error("SDR_PARSE_FAIL", { aiResponse: aiResponse.slice(0, 300) })
+    // Log but continue with fallback
+    const fallback = { ...FALLBACK_RESPONSE }
     await supabase.from("sdr_logs").insert({
       conversation_id: conversationId,
       contact_id: contactId,
       message_id: messageId,
-      status: "failed",
-      error: `Invalid AI response: ${aiResponse.slice(0, 200)}`,
+      status: "completed",
+      action: "fallback",
       latency_ms: latency,
+      model: settings.primary_model,
+      metadata: { raw_response: aiResponse.slice(0, 300) },
     }).then(() => {}, () => {})
-    return { action: "error", response: "Resposta inválida da IA" }
+    return { action: "continue", response: fallback.response }
   }
 
   // 13. Handle actions based on suggested_action
