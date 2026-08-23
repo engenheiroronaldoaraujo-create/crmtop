@@ -185,6 +185,12 @@ function parseResponse<T>(text: string): T | null {
       }
     }
 
+    // If text is not JSON at all but has meaningful content, use it as response
+    // (model returned plain text instead of JSON)
+    if (cleaned.length > 20 && !cleaned.startsWith("{")) {
+      return { ...FALLBACK_RESPONSE, response: cleaned } as T
+    }
+
     return null
   } catch {
     return null
