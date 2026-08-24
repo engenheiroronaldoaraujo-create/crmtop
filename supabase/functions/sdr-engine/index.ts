@@ -202,29 +202,35 @@ function parseResponse<T>(text: string): T | null {
     // If text is not JSON at all but has meaningful content, use it as response
     // (model returned plain text instead of JSON)
     if (cleaned.length > 20 && !cleaned.startsWith("{")) {
-      // Strip pseudo-code / function calls (model hallucinating tool calls)
-      let humanText = cleaned
-        // Remove function calls: transfer_to_human(), add_tag(...), etc.
-        .replace(/\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note|create_followup)\s*\([^)]*\)/gi, "")
-        // Remove field assignments: "name": value, name=value, name: value
-        .replace(/^\s*["']?\w+["']?\s*[=:]\s*["'\[\{][^\n]*/gm, "")
-        // Remove dictionary/object literals: {"key": "value", ...}
-        .replace(/\{[^{}]*"[\w_]+"[^{}]*\}/g, "")
-        // Remove array literals: ["item1", "item2"]
-        .replace(/\[[^\[\]]*\]/g, "")
-        // Remove Python-style code
-        .replace(/\b(if|else|for|while|def|class|import|return)\b[^:]*:/gi, "")
-        .replace(/\b(filter_by|pipeline|stage|fields|name|tag|contact_id|message|status|note)\s*[=:]\s*["\{][^"'\n]*/gi, "")
-        .replace(/\bvar\s+\w+\s*=\s*[^;]+;/gi, "")
-        .replace(/\bfunction\s+\w+\s*\([^)]*\)\s*\{[^}]*\}/gi, "")
-        // Remove lines that look like code (indented with quotes/brackets)
-        .replace(/^\s+["']?\w+["']?\s*[:=].*$/gm, "")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
+      // Detect pseudo-code patterns (model hallucinating tool calls)
+      const hasPseudoCode = /[{}\[\]]/.test(cleaned) 
+        || /^\s*\.\w+,/m.test(cleaned)
+        || /^\s*["']?\w+["']?\s*:\s*["'\[\{]/m.test(cleaned)
+        || /\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note|create_followup)\b/i.test(cleaned)
 
-      if (humanText.length > 10) {
-        return { ...FALLBACK_RESPONSE, response: humanText } as T
+      if (hasPseudoCode) {
+        // Extract only the human-readable part (before pseudo-code starts)
+        const lines = cleaned.split("\n")
+        const humanLines: string[] = []
+        for (const line of lines) {
+          const trimmed = line.trim()
+          // Stop at lines that look like code
+          if (/^\s*\.\w+,/.test(trimmed)) break
+          if (/^\s*["']?\w+["']?\s*:\s*["'\[\{]/.test(trimmed)) break
+          if (/^\s*["']?\w+["']?\s*[=:]\s*\[/.test(trimmed)) break
+          if (/^\s*\{/.test(trimmed) && trimmed.includes('"')) break
+          if (/^\s*\[/.test(trimmed) && trimmed.includes('"')) break
+          if (/\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note|create_followup)\s*\(/i.test(trimmed)) break
+          if (trimmed.length > 0) humanLines.push(trimmed)
+        }
+        const humanText = humanLines.join(" ").trim()
+        if (humanText.length > 10) {
+          return { ...FALLBACK_RESPONSE, response: humanText } as T
+        }
       }
+
+      // Plain text without pseudo-code — use as-is
+      return { ...FALLBACK_RESPONSE, response: cleaned } as T
     }
 
     return null
