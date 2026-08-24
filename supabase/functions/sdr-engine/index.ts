@@ -3,6 +3,8 @@ import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
+let cachedModel: string | null = null
+
 // ---------------------------------------------------------------------------
 // System prompt (protected - never modified by user)
 // ---------------------------------------------------------------------------
@@ -80,13 +82,16 @@ async function callAI(
   }
   if (!apiKey) throw new Error("API Key não configurada");
 
-  // Get model from settings
-  const { data: sdrConfig } = await supabase
-    .from("sdr_settings")
-    .select("primary_model")
-    .limit(1)
-    .single();
-  const model = sdrConfig?.primary_model ?? "openrouter/free";
+  // Get model from settings (cached)
+  if (!cachedModel) {
+    const { data: sdrConfig } = await supabase
+      .from("sdr_settings")
+      .select("primary_model")
+      .limit(1)
+      .single();
+    cachedModel = sdrConfig?.primary_model ?? "openrouter/free";
+  }
+  const model = cachedModel;
 
   const body = {
     model,
@@ -95,16 +100,25 @@ async function callAI(
     max_tokens: options.max_tokens ?? 1024,
   };
 
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://crm-top.vercel.app",
-      "X-Title": "CRM_TOP_SDR",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 25000)
+
+  let res: Response
+  try {
+    res = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://crm-top.vercel.app",
+        "X-Title": "CRM_TOP_SDR",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     const err = await res.text();
@@ -188,7 +202,20 @@ function parseResponse<T>(text: string): T | null {
     // If text is not JSON at all but has meaningful content, use it as response
     // (model returned plain text instead of JSON)
     if (cleaned.length > 20 && !cleaned.startsWith("{")) {
-      return { ...FALLBACK_RESPONSE, response: cleaned } as T
+      // Strip pseudo-code / function calls (model hallucinating tool calls)
+      let humanText = cleaned
+        .replace(/\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note)\s*\([^)]*\)/gi, "")
+        .replace(/\b(filter_by|pipeline|stage|fields|name|tag|contact_id|message|status|note)\s*[=:]\s*["\{][^"'\n]*/gi, "")
+        .replace(/\bif\s*\([^)]*\)\s*\{[^}]*\}/gi, "")
+        .replace(/\belse\s*\{[^}]*\}/gi, "")
+        .replace(/\bvar\s+\w+\s*=\s*[^;]+;/gi, "")
+        .replace(/\bfunction\s+\w+\s*\([^)]*\)\s*\{[^}]*\}/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+
+      if (humanText.length > 10) {
+        return { ...FALLBACK_RESPONSE, response: humanText } as T
+      }
     }
 
     return null
@@ -424,10 +451,10 @@ async function processMessage(
     .from("sdr_conversations")
     .select("*")
     .eq("conversation_id", conversationId)
-    .single()
+    .maybeSingle()
 
   // If conversation is paused or completed, skip
-  if (sdrConv && (sdrConv.status === "paused_human" || sdrConv.status === "completed" || sdrConv.status === "transferred")) {
+  if (sdrConv && ["paused_human", "completed", "transferred", "paused_limit"].includes(sdrConv.status)) {
     return { action: "skip", response: `SDR ${sdrConv.status}` }
   }
 
@@ -600,6 +627,7 @@ Responda a última mensagem do CLIENTE.`
       metadata: parsed.extracted_info,
     }).then(() => {}, () => {})
 
+    // Don't increment counter or update last_auto_reply_at for transfers
     return { action: "transfer_human", response: parsed.response }
   }
 
@@ -641,15 +669,21 @@ Responda a última mensagem do CLIENTE.`
     }
   }
 
-  // 14. Update conversation state
-  await supabase
-    .from("sdr_conversations")
-    .update({
-      auto_messages_count: (sdrConv?.auto_messages_count ?? 0) + 1,
-      last_auto_reply_at: new Date().toISOString(),
-    })
-    .eq("conversation_id", conversationId)
-    .then(() => {}, () => {})
+  // 14. Update conversation state (only for continue/schedule actions, not fallback)
+  const isRealResponse = parsed.suggested_action === "continue"
+    || parsed.suggested_action === "schedule_callback"
+    || parsed.suggested_action === "schedule_demo"
+
+  if (isRealResponse) {
+    await supabase
+      .from("sdr_conversations")
+      .update({
+        auto_messages_count: (sdrConv?.auto_messages_count ?? 0) + 1,
+        last_auto_reply_at: new Date().toISOString(),
+      })
+      .eq("conversation_id", conversationId)
+      .then(() => {}, () => {})
+  }
 
   // 15. Log
   await supabase.from("sdr_logs").insert({
@@ -664,30 +698,6 @@ Responda a última mensagem do CLIENTE.`
   }).then(() => {}, () => {})
 
   return { action: parsed.suggested_action, response: parsed.response }
-}
-
-// ---------------------------------------------------------------------------
-// Send message via Evolution API
-// ---------------------------------------------------------------------------
-
-async function sendWhatsAppMessage(
-  instanceName: string,
-  phone: string,
-  message: string,
-): Promise<boolean> {
-  const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
-  const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
-
-  try {
-    const res = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": apiKey },
-      body: JSON.stringify({ number: phone, text: message }),
-    })
-    return res.ok
-  } catch {
-    return false
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -719,11 +729,32 @@ Deno.serve(async (req) => {
 
       case "update_settings": {
         const updates = data as Record<string, unknown>
+        // Whitelist allowed fields to prevent accidental corruption
+        const allowedFields = [
+          "enabled", "test_mode", "timezone", "instance_id",
+          "schedule_sunday", "schedule_monday", "schedule_tuesday",
+          "schedule_wednesday", "schedule_thursday", "schedule_friday", "schedule_saturday",
+          "schedule_start_time", "schedule_end_time",
+          "after_hours_enabled", "callback_enabled",
+          "silence_start", "silence_end",
+          "meeting_duration_minutes", "meeting_buffer_minutes",
+          "max_messages_per_conversation", "cooldown_seconds",
+          "tone", "system_prompt", "primary_model", "fallback_model",
+        ]
+        const filtered: Record<string, unknown> = {}
+        for (const key of allowedFields) {
+          if (key in updates) filtered[key] = updates[key]
+        }
+        if (Object.keys(filtered).length === 0) {
+          return jsonResponse(400, { error: "No valid fields to update" })
+        }
         const { error } = await supabase
           .from("sdr_settings")
-          .update(updates)
+          .update(filtered)
           .eq("id", (await supabase.from("sdr_settings").select("id").limit(1).single())?.data?.id)
         if (error) return jsonResponse(400, { error: error.message })
+        // Invalidate model cache if model changed
+        if ("primary_model" in filtered) cachedModel = null
         return jsonResponse(200, { ok: true })
       }
 
@@ -760,7 +791,8 @@ Deno.serve(async (req) => {
         const wasTestMode = settings?.test_mode
         await supabase.from("sdr_settings").update({ enabled: true, test_mode: false }).eq("id", settings?.id)
 
-        // Reuse or create test conversation using FIXED ids so history persists across test calls
+        // Use unique IDs per test call to avoid interference
+        const testSuffix = Date.now().toString(36)
         const TEST_CONTACT_ID = "2ff00aff-2ce4-4609-8ed7-e10ee91c4d04"
         const TEST_CONVERSATION_ID = "763783f6-5466-40a9-95ef-2859a8c9f771"
         let testConvId = conversation_id
