@@ -204,12 +204,21 @@ function parseResponse<T>(text: string): T | null {
     if (cleaned.length > 20 && !cleaned.startsWith("{")) {
       // Strip pseudo-code / function calls (model hallucinating tool calls)
       let humanText = cleaned
-        .replace(/\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note)\s*\([^)]*\)/gi, "")
+        // Remove function calls: transfer_to_human(), add_tag(...), etc.
+        .replace(/\b(transfer_to_human|add_tag|create_opportunity|update_opportunity|get_contact|send_message|create_task|set_status|update_contact|move_stage|add_note|create_followup)\s*\([^)]*\)/gi, "")
+        // Remove field assignments: "name": value, name=value, name: value
+        .replace(/^\s*["']?\w+["']?\s*[=:]\s*["'\[\{][^\n]*/gm, "")
+        // Remove dictionary/object literals: {"key": "value", ...}
+        .replace(/\{[^{}]*"[\w_]+"[^{}]*\}/g, "")
+        // Remove array literals: ["item1", "item2"]
+        .replace(/\[[^\[\]]*\]/g, "")
+        // Remove Python-style code
+        .replace(/\b(if|else|for|while|def|class|import|return)\b[^:]*:/gi, "")
         .replace(/\b(filter_by|pipeline|stage|fields|name|tag|contact_id|message|status|note)\s*[=:]\s*["\{][^"'\n]*/gi, "")
-        .replace(/\bif\s*\([^)]*\)\s*\{[^}]*\}/gi, "")
-        .replace(/\belse\s*\{[^}]*\}/gi, "")
         .replace(/\bvar\s+\w+\s*=\s*[^;]+;/gi, "")
         .replace(/\bfunction\s+\w+\s*\([^)]*\)\s*\{[^}]*\}/gi, "")
+        // Remove lines that look like code (indented with quotes/brackets)
+        .replace(/^\s+["']?\w+["']?\s*[:=].*$/gm, "")
         .replace(/\n{3,}/g, "\n\n")
         .trim()
 
