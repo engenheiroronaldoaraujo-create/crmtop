@@ -1,0 +1,7 @@
+{
+  "nodeModulesDir": false,
+  "test": {
+    "include": ["supabase/functions/_shared/"],
+    "exclude": ["supabase/functions/_shared/026_commercial_test.ts"]
+  }
+}

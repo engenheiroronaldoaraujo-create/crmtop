@@ -5,6 +5,7 @@ import {
   normalizePhoneStrict,
   normalizeWhatsAppIdentity,
 } from "../_shared/evolution-identity.ts";
+import { createLidCacheStore, resolveLidPhone } from "../_shared/lid-phone-resolver.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -205,10 +206,31 @@ async function processMessage(
     remoteJidAlt: raw.key?.remoteJidAlt ?? raw.remoteJidAlt,
     senderPn: raw.key?.senderPn ?? raw.senderPn,
   });
-  const { phone, lid } = identity;
-  if (!phone && !lid) {
+  const { phone: identityPhone, lid } = identity;
+  if (!identityPhone && !lid) {
     console.warn("EVOLUTION_IDENTITY_UNRESOLVED", jid);
     return;
+  }
+  let phone = identityPhone;
+
+  // LID sem telefone: tenta resolver UMA vez via Evolution (cache 24h/30d).
+  // Sem isso o contato nasce sem número e a conversa vira "Contato sem número".
+  if (!phone && lid) {
+    try {
+      const resolved = await resolveLidPhone({
+        store: createLidCacheStore(supabase),
+        baseUrl: EVOLUTION_API_URL,
+        apiKey: EVOLUTION_API_KEY,
+        instanceName,
+        lidDigits: lid.replace(/^lid:/, ""),
+      });
+      if (resolved) {
+        phone = resolved;
+        console.info("EVOLUTION_LID_PHONE_RESOLVED", lid, resolved);
+      }
+    } catch (err) {
+      console.warn("EVOLUTION_LID_PHONE_RESOLVE_FAILED", String(err));
+    }
   }
   if (identity.isLid) console.info("EVOLUTION_LID_DETECTED", identity.lid, phone ? `phone=${phone}` : "sem phone");
 
