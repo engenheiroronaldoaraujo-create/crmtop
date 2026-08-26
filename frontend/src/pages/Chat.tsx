@@ -614,7 +614,8 @@ export default function ChatPage() {
       if (q) {
         const name = c.contact ? contactDisplayName(c.contact).toLowerCase() : ""
         const phone = c.contact?.phone ?? ""
-        if (!name.includes(q) && !phone.includes(q)) return false
+        const lid = c.contact?.lid ?? ""
+        if (!name.includes(q) && !phone.includes(q) && !lid.includes(q)) return false
       }
       return true
     })

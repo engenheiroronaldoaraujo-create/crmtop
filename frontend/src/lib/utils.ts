@@ -141,6 +141,7 @@ export function contactDisplayName(c: {
   push_name?: string | null
   phone?: string | null
   jid?: string | null
+  lid?: string | null
 }): string {
   // Names that are just digits are LID identifiers, not real names.
   const n = c.name || c.push_name
@@ -150,5 +151,10 @@ export function contactDisplayName(c: {
   const jidPhone = phoneFromJid(c.jid)
   if (jidPhone) return `+${jidPhone}`
   // LID é identificador WhatsApp, não telefone — nunca derivar número.
+  // O sufixo diferencia threads ainda sem telefone na lista/busca.
+  if (c.lid) {
+    const digits = c.lid.replace(/^lid:/, "").replace(/\D/g, "")
+    if (digits.length >= 4) return `Contato ••${digits.slice(-4)}`
+  }
   return "Contato sem número"
 }

@@ -71,7 +71,7 @@ export default function ContactsPage() {
     const q = queryValue.trim()
     if (q) {
       builder = builder.or(
-        `name.ilike.%${q}%,push_name.ilike.%${q}%,phone.ilike.%${q}%`,
+        `name.ilike.%${q}%,push_name.ilike.%${q}%,phone.ilike.%${q}%,lid.ilike.%${q}%`,
       )
     }
     const { data, error, count } = await builder
