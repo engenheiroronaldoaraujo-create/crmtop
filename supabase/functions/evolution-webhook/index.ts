@@ -197,7 +197,12 @@ async function processMessage(
   raw: RawMessage,
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
-  if (!isRelevantJid(jid)) return;
+  if (!isRelevantJid(jid)) {
+    // Nunca descartar em silêncio: quedas de entrega só são diagnosticáveis
+    // se o drop aparecer nos logs.
+    console.warn("EVOLUTION_MESSAGE_SKIPPED_IRRELEVANT_JID", jid, raw.key?.id ?? "");
+    return;
+  }
 
   // EVOLUTION_IDENTITY_RESOLVED — a camada central decide phone/LID.
   // Lê remoteJidAlt/senderPn tanto no `key` quanto no nível raiz do item.
@@ -533,19 +538,144 @@ async function handleConnectionUpdate(
   if (state === "open") status = "connected";
   else if (state === "connecting" || state === "pairing") status = "connecting";
 
+  console.info("EVOLUTION_CONNECTION_UPDATE", instanceName, `state=${state}`, `status=${status}`);
+
   const { data: instance } = await supabase
     .from("whatsapp_instances")
-    .select("id")
+    .select("id, status")
     .eq("instance_name", instanceName)
     .maybeSingle();
   if (instance) {
-    const { error } = await supabase
-      .from("whatsapp_instances")
-      .update({ status })
-      .eq("id", instance.id);
-    if (error) console.error("EVOLUTION_INSTANCE_STATUS_FAILED", error.message);
+    if (instance.status !== status) {
+      const { error } = await supabase
+        .from("whatsapp_instances")
+        .update({ status })
+        .eq("id", instance.id);
+      if (error) console.error("EVOLUTION_INSTANCE_STATUS_FAILED", error.message);
+    }
+    // Reconexão (não-open → open): sinais de queda de entrega. Reconcilia o
+    // histórico recente em background — o dedup por evolution_message_id
+    // descarta o que já foi importado.
+    if (status === "connected" && instance.status !== "connected") {
+      try {
+        const job = reconcileInstanceMessages(supabase, instanceName, instance.id);
+        const g = globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } };
+        if (g.EdgeRuntime?.waitUntil) {
+          g.EdgeRuntime.waitUntil(job);
+        } else {
+          job.catch(() => {});
+        }
+      } catch (err) {
+        console.warn("EVOLUTION_RECONCILE_KICK_FAILED", String(err));
+      }
+    }
   }
   return jsonResponse(200, { ok: true, status });
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliação pós-reconexão
+// ---------------------------------------------------------------------------
+
+// Quedas de entrega (Evolution↔WhatsApp ou Evolution→webhook) fazem mensagens
+// chegarem ao WhatsApp sem nunca invocar este webhook — buraco silencioso que
+// já perdeu mensagens reais de clientes. Ao reconectar, reimportamos as
+// últimas mensagens das conversas movimentadas na janela. Best-effort.
+const RECONCILE_WINDOW_DAYS = 3;
+const RECONCILE_MAX_CONVERSATIONS = 25;
+const RECONCILE_FETCH_LIMIT = 30;
+const RECONCILE_FETCH_TIMEOUT_MS = 8000;
+
+/** Normaliza as formas de resposta do fetchMessages para uma lista de linhas. */
+function extractMessageRows(payload: unknown): Record<string, unknown>[] {
+  if (!payload || typeof payload !== "object") return Array.isArray(payload) ? [] : [];
+  if (Array.isArray(payload)) return payload.filter((x) => x && typeof x === "object");
+  const obj = payload as Record<string, unknown>;
+  const container = (obj.message ?? obj.messages ?? obj.data ?? obj.response) as unknown;
+  if (Array.isArray(container)) return container.filter((x) => x && typeof x === "object");
+  if (container && typeof container === "object" && Array.isArray((container as Record<string, unknown>).records)) {
+    return ((container as Record<string, unknown>).records as unknown[]).filter(
+      (x) => x && typeof x === "object",
+    ) as Record<string, unknown>[];
+  }
+  return [];
+}
+
+/**
+ * JID remoto da conversa conforme a store da Evolution: preferimos o jid
+ * confirmado do contato; fallback é montar do telefone canônico.
+ */
+function conversationRemoteJid(contact: { jid?: string | null; phone?: string | null; lid?: string | null }): string | null {
+  if (contact.jid) {
+    const type = contact.jid.split("@")[1] ?? "";
+    if (type === "s.whatsapp.net" || type === "lid") return contact.jid;
+  }
+  if (contact.phone) return `${contact.phone}@s.whatsapp.net`;
+  if (contact.lid) return `${contact.lid.replace(/^lid:/, "")}@lid`;
+  return null;
+}
+
+async function reconcileInstanceMessages(
+  supabase: Supabase,
+  instanceName: string,
+  instanceId: string,
+): Promise<void> {
+  if (!EVOLUTION_API_URL || !EVOLUTION_API_KEY) return;
+  const started = Date.now();
+  const since = new Date(started - RECONCILE_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: convs } = await supabase
+    .from("conversations")
+    .select("id, last_message_at, contact:contacts(jid, phone, lid)")
+    .eq("instance_id", instanceId)
+    .gte("last_message_at", since)
+    .order("last_message_at", { ascending: false })
+    .limit(RECONCILE_MAX_CONVERSATIONS);
+
+  const rows = (convs ?? []) as unknown as Array<{
+    id: string;
+    last_message_at: string | null;
+    contact?: { jid?: string | null; phone?: string | null; lid?: string | null } | null;
+  }>;
+  if (rows.length === 0) return;
+
+  console.info("EVOLUTION_RECONCILE_STARTED", instanceName, `chats=${rows.length}`);
+  let fetched = 0;
+  let processed = 0;
+
+  for (const conv of rows) {
+    const remoteJid = conversationRemoteJid(conv.contact ?? {});
+    if (!remoteJid) continue;
+
+    let res: Response;
+    try {
+      res = await fetch(`${EVOLUTION_API_URL}/chat/fetchMessages/${instanceName}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY },
+        body: JSON.stringify({ where: { remoteJid }, limit: RECONCILE_FETCH_LIMIT }),
+        signal: AbortSignal.timeout(RECONCILE_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      continue; // instância indisponível / timeout — próxima conversa
+    }
+    if (!res.ok) continue;
+
+    const items = extractMessageRows(await res.json().catch(() => null));
+    fetched += items.length;
+    for (const item of items) {
+      // Linha da store Baileys tem a mesma forma de um item MESSAGES_UPSERT.
+      await processMessage(supabase, instanceId, instanceName, item as unknown as RawMessage);
+      processed += 1;
+    }
+  }
+
+  console.info(
+    "EVOLUTION_RECONCILE_DONE",
+    instanceName,
+    `fetched=${fetched}`,
+    `processed=${processed}`,
+    `ms=${Date.now() - started}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +782,9 @@ Deno.serve(async (req) => {
     const payload = await req.json();
     const event = String(payload.event ?? "");
     const instanceName = String(payload.instance ?? "");
+    // Rastro de ingestão: sem isso, quedas de entrega ficam invisíveis
+    // (foi exatamente o bug do chat "perdido" das 21:07).
+    console.info("EVOLUTION_EVENT_RECEIVED", event, instanceName);
     const supabase = serviceClient();
 
     switch (event) {
