@@ -1261,7 +1261,7 @@ export default function PipelinePage() {
     <>
     <div className="flex h-full flex-col">
       {/* Header */}
-      <header className="flex h-16 shrink-0 items-center gap-4 border-b px-6">
+      <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b px-3 py-2 md:h-16 md:flex-nowrap md:px-6 md:py-0">
         <h1 className="text-xl font-semibold">Funil de Vendas</h1>
 
         {/* Pipeline selector */}
@@ -1329,7 +1329,7 @@ export default function PipelinePage() {
       </header>
 
       {/* Board */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 md:p-6">
         {loading ? (
           <div className="flex gap-4">
             {[1, 2, 3, 4].map((i) => (

@@ -726,15 +726,15 @@ export default function AgendaPage() {
         </div>
       </header>
 
-      <div className="flex items-center justify-between border-b px-6 py-2">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-2 md:px-6">
         <Button variant="ghost" size="sm" onClick={() => setWeekStart(addDays(weekStart, -7))}>
           <ChevronLeft className="h-4 w-4" />
         </Button>
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 flex-wrap items-center justify-center gap-x-4 gap-y-1">
           <span className="text-sm font-medium">
             {MONTH_NAMES[weekStart.getMonth()]} {weekStart.getFullYear()}
           </span>
-          <span className="text-xs text-muted-foreground">
+          <span className="hidden text-xs text-muted-foreground sm:inline">
             {fmtDate(weekStart.toISOString())} - {fmtDate(weekEnd.toISOString())}
           </span>
           <Badge variant="secondary">{todayCount} hoje</Badge>

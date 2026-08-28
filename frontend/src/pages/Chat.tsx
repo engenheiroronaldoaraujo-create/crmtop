@@ -9,6 +9,7 @@ import {
 import { useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   CheckCheck,
   CheckCircle2,
@@ -784,8 +785,13 @@ export default function ChatPage() {
   return (
     <>
     <div className="flex h-full min-h-0">
-      {/* Left: conversation list */}
-      <aside className="flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white">
+      {/* Left: conversation list — no mobile ocupa tudo e some quando há thread aberta */}
+      <aside
+        className={cn(
+          "flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white max-md:w-full",
+          selectedId && "max-md:hidden",
+        )}
+      >
         <div className="border-b border-slate-200 bg-slate-50 p-3">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex gap-1">
@@ -839,8 +845,13 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      {/* Right: thread */}
-      <section className="flex min-w-0 flex-1 flex-col">
+      {/* Right: thread — no mobile só aparece com conversa selecionada */}
+      <section
+        className={cn(
+          "flex min-w-0 flex-1 flex-col",
+          !selectedId && "max-md:hidden",
+        )}
+      >
         {!selected ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
             {!instance && (
@@ -863,9 +874,20 @@ export default function ChatPage() {
           </div>
         ) : (
           <>
-            <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-slate-900">{contactName}</p>
+            <header className="flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-y-2 border-b border-slate-200 bg-white px-3 py-2 md:h-16 md:flex-nowrap md:px-4 md:py-0">
+              <div className="flex min-w-0 items-center gap-2">
+                {/* Volta pra lista no mobile */}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 md:hidden"
+                  title="Voltar para conversas"
+                  onClick={() => setSelectedId(null)}
+                >
+                  <ArrowLeft className="h-5 w-5" />
+                </Button>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-slate-900">{contactName}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {selected.contact && isRealPhone(selected.contact.phone)
                     ? formatPhone(selected.contact.phone)
@@ -879,8 +901,9 @@ export default function ChatPage() {
                       : "WhatsApp desconectado"
                     : "sem instância"}
                 </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {selected.assigned_to === user?.id ? (
                   <Badge variant="secondary">Atribuída a você</Badge>
                 ) : selected.assigned_to ? (

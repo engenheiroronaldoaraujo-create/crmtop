@@ -173,14 +173,14 @@ export default function ContactsPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-16 shrink-0 items-center justify-between border-b px-6">
+      <header className="flex h-16 shrink-0 items-center justify-between border-b px-3 md:px-6">
         <h1 className="text-xl font-semibold">Contatos</h1>
         <Button onClick={openCreate}>
           <Plus className="mr-2 h-4 w-4" /> Novo contato
         </Button>
       </header>
 
-      <div className="shrink-0 space-y-4 p-6 pb-0">
+      <div className="shrink-0 space-y-4 p-3 pb-0 md:p-6 md:pb-0">
         <div className="relative max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -192,7 +192,7 @@ export default function ContactsPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 overflow-auto p-3 md:p-6">
         {loading ? (
           <p className="text-muted-foreground">Carregando...</p>
         ) : contacts.length === 0 ? (
@@ -200,16 +200,18 @@ export default function ContactsPage() {
             {queryValue ? "Nenhum contato encontrado." : "Nenhum contato ainda."}
           </p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Nome</TableHead>
-                <TableHead>Telefone</TableHead>
-                <TableHead>E-mail</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Ações</TableHead>
-              </TableRow>
-            </TableHeader>
+          // Tabela tem 5 colunas — largura mínima garante scroll horizontal no mobile
+          <div className="min-w-[640px]">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Nome</TableHead>
+                  <TableHead>Telefone</TableHead>
+                  <TableHead>E-mail</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Ações</TableHead>
+                </TableRow>
+              </TableHeader>
             <TableBody>
               {contacts.map((c) => (
                 <TableRow key={c.id}>
@@ -266,7 +268,8 @@ export default function ContactsPage() {
                 </TableRow>
               ))}
             </TableBody>
-          </Table>
+            </Table>
+          </div>
         )}
         {!loading && contacts.length > 0 && contacts.length < total && (
           <div className="flex justify-center pt-4">
