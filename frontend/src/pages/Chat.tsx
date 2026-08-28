@@ -304,6 +304,8 @@ export default function ChatPage() {
   const [profiles, setProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  // Bolhas otimistas: enviadas localmente antes da confirmação do proxy.
+  const [optimisticMsgs, setOptimisticMsgs] = useState<Message[]>([])
   const [loadingConversations, setLoadingConversations] = useState(true)
   const [filter, setFilter] = useState<Filter>("all")
   const [query, setQuery] = useState("")
@@ -482,6 +484,7 @@ export default function ChatPage() {
 
   // Load messages for the selected conversation and mark it read.
   useEffect(() => {
+    setOptimisticMsgs([])
     if (!selectedId) {
       setMessages([])
       return
@@ -576,6 +579,22 @@ export default function ChatPage() {
           setMessages((prev) =>
             prev.some((m) => m.id === msg.id) ? prev : [...prev, msg],
           )
+          // A linha real substitui a bolha otimista equivalente (mesmo texto
+          // outbound na mesma conversa).
+          if (msg.direction === "outbound") {
+            setOptimisticMsgs((prev) => {
+              const idx = prev.findIndex(
+                (o) =>
+                  o.conversation_id === msg.conversation_id &&
+                  o.content === msg.content &&
+                  o.status !== "failed",
+              )
+              if (idx === -1) return prev
+              const next = [...prev]
+              next.splice(idx, 1)
+              return next
+            })
+          }
           if (msg.direction === "inbound") markRead(selectedId)
         },
       )
@@ -741,33 +760,68 @@ export default function ChatPage() {
       return
     }
     const targetPhone = selected.contact?.phone ?? ""
+
+    // UI otimista: a bolha aparece na hora com ⏱ pendente; o status vira ✓
+    // quando o proxy confirma e a bolha real substitui via realtime.
+    const tempId = `optimistic-${crypto.randomUUID()}`
+    const nowIso = new Date().toISOString()
+    const isMedia = Boolean(pendingFile)
+    const optimisticMsg: Message = {
+      id: tempId,
+      conversation_id: selected.id,
+      evolution_message_id: null,
+      direction: "outbound",
+      sender_profile_id: user?.id ?? null,
+      type: isMedia ? "document" : "text",
+      content: isMedia
+        ? text.trim() || `📎 ${pendingFile!.file.name}`
+        : text.trim(),
+      media_url: null,
+      status: "pending",
+      sent_at: nowIso,
+      created_at: nowIso,
+    }
+    setOptimisticMsgs((prev) => [...prev, optimisticMsg])
+
+    const mediaFile = pendingFile?.file ?? null
+    const mediaCaption = text.trim()
+    setText("")
+    setPendingFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ""
     setSending(true)
     try {
-      if (pendingFile) {
-        await proxySendMedia(
-          selected.instance_id,
-          targetPhone,
-          text.trim(),
-          pendingFile.file.name,
-          pendingFile.file,
-        )
+      if (isMedia && mediaFile) {
+        await proxySendMedia(selected.instance_id, targetPhone, mediaCaption, mediaFile.name, mediaFile)
+        // Mídia: a linha real tem media_url, então a bolha otimista sai na
+        // confirmação (a real chega pelo realtime logo em seguida).
+        setOptimisticMsgs((prev) => prev.filter((m) => m.id !== tempId))
       } else {
-        await proxySendText(selected.instance_id, targetPhone, text.trim(), instance?.instance_name)
+        await proxySendText(selected.instance_id, targetPhone, optimisticMsg.content ?? "", instance?.instance_name)
+        setOptimisticMsgs((prev) =>
+          prev.map((m) => (m.id === tempId ? { ...m, status: "sent" as const } : m)),
+        )
       }
-      setText("")
-      setPendingFile(null)
-      if (fileInputRef.current) fileInputRef.current.value = ""
     } catch (err) {
+      setOptimisticMsgs((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
+      )
       toast.error(err instanceof Error ? err.message : "Falha ao enviar")
     } finally {
       setSending(false)
     }
   }
 
-  // Group messages by day for separators.
+  // Group messages by day for separators (reais + otimistas, ordenados).
+  const mergedMessages = useMemo(() => {
+    if (optimisticMsgs.length === 0) return messages
+    return [...messages, ...optimisticMsgs].sort(
+      (a, b) => new Date(a.sent_at).getTime() - new Date(b.sent_at).getTime(),
+    )
+  }, [messages, optimisticMsgs])
+
   const groupedMessages = useMemo(() => {
     const groups: { day: string; items: Message[] }[] = []
-    for (const msg of messages) {
+    for (const msg of mergedMessages) {
       const last = groups[groups.length - 1]
       if (last && isSameDay(last.day, msg.sent_at)) {
         last.items.push(msg)
