@@ -1,7 +1,8 @@
-import { NavLink, useNavigate } from "react-router-dom"
+import { NavLink, useLocation, useNavigate } from "react-router-dom"
 import { useState, useEffect } from "react"
 import {
   LogOut,
+  Menu,
   MessageCircle,
   Settings,
   User,
@@ -32,11 +33,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
   const { query, setQuery, results, loading, search } = useGlobalSearch()
   const [searchOpen, setSearchOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const location = useLocation()
 
   useEffect(() => {
     const t = setTimeout(() => { if (query) search(query) }, 300)
     return () => clearTimeout(t)
   }, [query, search])
+
+  // Navegou → fecha o drawer no mobile.
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [location.pathname])
 
   const totalResults = results.contacts.length + results.opportunities.length + results.conversations.length
 
@@ -61,7 +69,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
-      <aside className="flex w-60 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+      {/* Drawer mobile: fundo clicável fecha o menu */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <aside
+        className={cn(
+          // Mobile: drawer fixo que desliza; Desktop: coluna estática como antes.
+          "fixed inset-y-0 left-0 z-50 flex w-60 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-transform duration-200 md:static md:translate-x-0",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
         <div className="flex h-16 items-center gap-2 border-b border-white/10 px-4">
           <MessageCircle className="h-6 w-6 text-primary" />
           <span className="text-lg font-semibold text-white">CRM WhatsApp</span>
@@ -186,7 +207,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </aside>
-      <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+      <main className="flex min-w-0 flex-1 flex-col">
+        {/* Barra superior só no mobile: abre o menu */}
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border bg-sidebar px-2 md:hidden">
+          <Button
+            variant="ghost"
+            size="icon"
+            title="Abrir menu"
+            className="text-sidebar-muted hover:bg-white/10 hover:text-white"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Menu className="h-5 w-5" />
+          </Button>
+          <span className="text-sm font-semibold text-white">CRM WhatsApp</span>
+        </div>
+        {children}
+      </main>
     </div>
   )
 }
