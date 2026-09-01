@@ -78,15 +78,19 @@ function syncSettingsPayload(): Record<string, unknown> {
 }
 
 // Validates the caller JWT (any authenticated user) and resolves the profile.
+// `needRole` false skips the profiles lookup entirely (1 less DB round-trip)
+// — só ações admin precisam do role.
 async function requireUser(
   req: Request,
   supabase: Supabase,
-): Promise<{ id: string; role: string }> {
+  needRole: boolean,
+): Promise<{ id: string; role?: string }> {
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
   if (!token) throw jsonResponse(401, { error: "missing token" });
 
   const { data: { user }, error } = await supabase.auth.getUser(token);
   if (error || !user) throw jsonResponse(401, { error: "invalid token" });
+  if (!needRole) return { id: user.id };
 
   const { data: profile } = await supabase
     .from("profiles")
@@ -97,7 +101,7 @@ async function requireUser(
   return profile;
 }
 
-async function requireAdmin(profile: { role: string }): Promise<void> {
+async function requireAdmin(profile: { role?: string }): Promise<void> {
   if (profile.role !== "admin") {
     throw jsonResponse(403, { error: "forbidden: admin role required" });
   }
@@ -143,7 +147,8 @@ function sanitizePhone(phone: string): string {
 // evolution_message_id) so that if the webhook echo won the race first, we
 // still attach the correct sender_profile_id. `status` is explicit: 'sent'
 // only after the Evolution API confirmed, 'failed' otherwise — never before
-// confirmation.
+// confirmation. O bump_conversation roda em background (não bloqueia a
+// resposta; o eco do webhook refaz o bump se o isolate congelar).
 async function recordOutboundMessage(
   supabase: Supabase,
   instanceId: string,
@@ -158,11 +163,11 @@ async function recordOutboundMessage(
     sentAt: string;
   },
   status: "sent" | "failed" = "sent",
-): Promise<{ conversationId: string }> {
+): Promise<{ conversationId: string; messageId: string | null }> {
   const contactId = await upsertContact(supabase, phone, lid, null);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
-  await supabase.from("messages").upsert(
+  const { data: msgRow } = await supabase.from("messages").upsert(
     {
       conversation_id: conversationId,
       evolution_message_id: msg.evolutionId,
@@ -175,16 +180,19 @@ async function recordOutboundMessage(
       status,
     },
     { onConflict: "conversation_id, evolution_message_id" },
-  );
+  ).select("id").maybeSingle();
 
-  await supabase.rpc("bump_conversation", {
-    p_id: conversationId,
-    p_sent_at: msg.sentAt,
-    p_preview: (msg.content ?? `[${msg.type}]`).slice(0, 140),
-    p_inbound: false,
-  });
+  void (async () => {
+    const { error } = await supabase.rpc("bump_conversation", {
+      p_id: conversationId,
+      p_sent_at: msg.sentAt,
+      p_preview: (msg.content ?? `[${msg.type}]`).slice(0, 140),
+      p_inbound: false,
+    });
+    if (error) console.error("BUMP_CONVERSATION_FAILED", error.message);
+  })();
 
-  return { conversationId };
+  return { conversationId, messageId: msgRow?.id ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -378,14 +386,16 @@ async function actionSendText(
 
     const evolutionId = data?.key?.id ?? null;
 
-    // Fire-and-forget: record message in background (don't block response)
-    recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+    // Grava a mensagem antes de responder (3 round-trips rápidos de DB; o
+    // bump já sai em background dentro de recordOutboundMessage). Assim a
+    // linha persistida não depende do isolate sobreviver após a resposta.
+    await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
       evolutionId,
       type: "text",
       content: text,
       mediaUrl: null,
       sentAt,
-    }, "sent").catch((e) => console.error("BG_RECORD_FAILED", e));
+    }, "sent");
 
     return jsonResponse(200, {
       ok: true,
@@ -499,9 +509,17 @@ async function actionSendMedia(
 
   const evolutionId = data?.key?.id ?? null;
 
-  // Fire-and-forget: upload media and record message in background
+  // Grava a linha da mensagem antes de responder (sem media_url); o upload
+  // para o Storage continua em background e anexa o caminho quando terminar.
+  const { messageId } = await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+    evolutionId,
+    type: msgType,
+    content: caption || null,
+    mediaUrl: null,
+    sentAt,
+  }, "sent");
+
   (async () => {
-    let mediaUrl: string | null = null;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
@@ -509,18 +527,18 @@ async function actionSendMedia(
       const { error: uploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
-      if (!uploadError) mediaUrl = objectPath;
-      else console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
+      if (uploadError) {
+        console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
+        return;
+      }
+      if (!messageId) {
+        console.error("EVOLUTION_MEDIA_NO_MESSAGE_ID", evolutionId);
+        return;
+      }
+      await supabase.from("messages").update({ media_url: objectPath }).eq("id", messageId);
     } catch (err) {
       console.error("EVOLUTION_MEDIA_UPLOAD_ERROR", err);
     }
-    await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
-      evolutionId,
-      type: msgType,
-      content: caption || null,
-      mediaUrl,
-      sentAt,
-    }, "sent").catch((e) => console.error("BG_RECORD_FAILED", e));
   })();
 
   return jsonResponse(200, {
@@ -1516,6 +1534,22 @@ async function actionDeleteInstance(
 // Entry point
 // ---------------------------------------------------------------------------
 
+const ADMIN_ACTIONS = new Set([
+  "create-instance",
+  "get-qr",
+  "logout-instance",
+  "delete-instance",
+  "set-webhook",
+  "sync-history",
+  "sync-contacts",
+  "sync-messages",
+  "sync-names",
+  "sync-media",
+  "link-conversation-phone",
+  "debug-chats",
+  "debug-find-messages",
+]);
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -1523,7 +1557,6 @@ Deno.serve(async (req) => {
 
   try {
     const supabase = serviceClient();
-    const user = await requireUser(req, supabase);
 
     const contentType = req.headers.get("content-type") ?? "";
     let body: any = {};
@@ -1533,10 +1566,14 @@ Deno.serve(async (req) => {
       const action = String(formData.get("action") ?? "");
       body = { action };
     } else {
-      body = await req.json();
+      body = await req.json().catch(() => ({}));
     }
 
     const { action } = body as { action: string };
+
+    // Role só é consultado para ações de admin — send-text/send-media/etc.
+    // respondem 1 round-trip de DB mais rápido.
+    const user = await requireUser(req, supabase, ADMIN_ACTIONS.has(String(action)));
 
     switch (action) {
       case "create-instance": {

@@ -84,6 +84,8 @@ import {
 
 type Filter = "all" | "mine" | "unassigned"
 
+const MESSAGE_PAGE_SIZE = 200
+
 function MediaMessage({ msg }: { msg: Message }) {
   const [url, setUrl] = useState<string | null>(null)
 
@@ -304,6 +306,8 @@ export default function ChatPage() {
   const [profiles, setProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [hasMoreOlder, setHasMoreOlder] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
   // Bolhas otimistas: enviadas localmente antes da confirmação do proxy.
   const [optimisticMsgs, setOptimisticMsgs] = useState<Message[]>([])
   const [loadingConversations, setLoadingConversations] = useState(true)
@@ -311,7 +315,6 @@ export default function ChatPage() {
   const [query, setQuery] = useState("")
   const [text, setText] = useState("")
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null)
-  const [sending, setSending] = useState(false)
 
   // SDR state for current conversation
   const [sdrStatus, setSdrStatus] = useState<string | null>(null)
@@ -487,6 +490,7 @@ export default function ChatPage() {
     setOptimisticMsgs([])
     if (!selectedId) {
       setMessages([])
+      setHasMoreOlder(false)
       return
     }
     let active = true
@@ -494,15 +498,41 @@ export default function ChatPage() {
       .from("messages")
       .select("*")
       .eq("conversation_id", selectedId)
-      .order("sent_at", { ascending: true })
+      .order("sent_at", { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE)
       .then(({ data, error }) => {
-        if (active && !error) setMessages((data as Message[]) ?? [])
+        if (!active || error) return
+        const rows = ((data as Message[]) ?? []).slice().reverse()
+        setMessages(rows)
+        setHasMoreOlder(rows.length === MESSAGE_PAGE_SIZE)
       })
     markRead(selectedId)
     return () => {
       active = false
     }
   }, [selectedId, markRead])
+
+  const loadOlder = useCallback(async () => {
+    if (!selectedId || messages.length === 0) return
+    setLoadingOlder(true)
+    const oldestSentAt = messages[0].sent_at
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("conversation_id", selectedId)
+      .lt("sent_at", oldestSentAt)
+      .order("sent_at", { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE)
+    if (!error && data) {
+      const rows = ((data as Message[]) ?? []).slice().reverse()
+      if (rows.length < MESSAGE_PAGE_SIZE) setHasMoreOlder(false)
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.id))
+        return [...rows.filter((r) => !seen.has(r.id)), ...prev]
+      })
+    }
+    setLoadingOlder(false)
+  }, [selectedId, messages])
 
   // Load SDR status for selected conversation
   useEffect(() => {
@@ -618,13 +648,6 @@ export default function ChatPage() {
       supabase.removeChannel(channel)
     }
   }, [selectedId, markRead])
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    })
-  }, [messages])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -788,7 +811,6 @@ export default function ChatPage() {
     setText("")
     setPendingFile(null)
     if (fileInputRef.current) fileInputRef.current.value = ""
-    setSending(true)
     try {
       if (isMedia && mediaFile) {
         await proxySendMedia(selected.instance_id, targetPhone, mediaCaption, mediaFile.name, mediaFile)
@@ -806,8 +828,6 @@ export default function ChatPage() {
         prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
       )
       toast.error(err instanceof Error ? err.message : "Falha ao enviar")
-    } finally {
-      setSending(false)
     }
   }
 
@@ -830,7 +850,18 @@ export default function ChatPage() {
       }
     }
     return groups
-  }, [messages])
+  }, [mergedMessages])
+
+  const lastMessageId = mergedMessages[mergedMessages.length - 1]?.id ?? ""
+
+  // Auto-scroll só quando a ÚLTIMA mensagem muda (envio/recebimento).
+  // Carregar mensagens antigas (prepend) não mexe no scroll.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    })
+  }, [lastMessageId])
 
   const contactName = selected?.contact
     ? contactDisplayName(selected.contact)
@@ -1176,6 +1207,21 @@ export default function ChatPage() {
             )}
 
             <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+              {hasMoreOlder && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadOlder}
+                    disabled={loadingOlder}
+                  >
+                    {loadingOlder ? (
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    ) : null}
+                    Carregar mensagens anteriores
+                  </Button>
+                </div>
+              )}
               {groupedMessages.length === 0 ? (
                 <p className="pt-10 text-center text-sm text-muted-foreground">
                   Sem mensagens nesta conversa.
@@ -1242,7 +1288,7 @@ export default function ChatPage() {
               <Button
                 type="submit"
                 size="icon"
-                disabled={sending || (!text.trim() && !pendingFile)}
+                disabled={!text.trim() && !pendingFile}
               >
                 <Send className="h-4 w-4" />
               </Button>
