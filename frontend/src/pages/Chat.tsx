@@ -29,6 +29,7 @@ import {
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
+import { getSignedMediaUrl } from "@/lib/media-cache"
 import { proxyLinkConversationPhone, proxySendMedia, proxySendText } from "@/lib/api"
 import {
   contactDisplayName,
@@ -89,23 +90,36 @@ type Filter = "all" | "mine" | "unassigned"
 
 const MESSAGE_PAGE_SIZE = 200
 
+// Bip curto via WebAudio (sem asset) para avisar inbound fora da conversa aberta.
+let beepCtx: AudioContext | null = null
+function playInboundBeep() {
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!Ctx) return
+    beepCtx = beepCtx ?? new Ctx()
+    const osc = beepCtx.createOscillator()
+    const gain = beepCtx.createGain()
+    osc.frequency.value = 880
+    gain.gain.setValueAtTime(0.001, beepCtx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.15, beepCtx.currentTime + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.001, beepCtx.currentTime + 0.25)
+    osc.connect(gain).connect(beepCtx.destination)
+    osc.start()
+    osc.stop(beepCtx.currentTime + 0.26)
+  } catch {
+    // silencioso: áudio é cortesia, nunca pode quebrar o chat
+  }
+}
+
 function MediaMessage({ msg }: { msg: Message }) {
   const [url, setUrl] = useState<string | null>(null)
 
   useEffect(() => {
     if (!msg.media_url) return
     let cancelled = false
-    supabase.storage
-      .from("whatsapp-media")
-      .createSignedUrl(msg.media_url, 3600)
-      .then(({ data, error }) => {
-        if (cancelled) return
-        if (error) {
-          console.error("createSignedUrl", error)
-        } else {
-          setUrl(data.signedUrl)
-        }
-      })
+    getSignedMediaUrl(msg.media_url).then((signed) => {
+      if (!cancelled && signed) setUrl(signed)
+    })
     return () => {
       cancelled = true
     }
@@ -165,7 +179,7 @@ function MediaMessage({ msg }: { msg: Message }) {
   }
 }
 
-function MessageBubble({ msg }: { msg: Message }) {
+function MessageBubble({ msg, onRetry }: { msg: Message; onRetry?: (m: Message) => void }) {
   const outbound = msg.direction === "outbound"
   const showStatus = outbound
   return (
@@ -194,6 +208,17 @@ function MessageBubble({ msg }: { msg: Message }) {
         )}
         {!msg.content && !msg.media_url && msg.type === "unknown" && (
           <p className="italic opacity-70">Mensagem não suportada</p>
+        )}
+        {outbound && msg.status === "failed" && onRetry && msg.id.startsWith("optimistic-") && (
+          <div className="text-right">
+            <button
+              type="button"
+              onClick={() => onRetry(msg)}
+              className="text-[11px] font-medium underline underline-offset-2"
+            >
+              Tentar novamente
+            </button>
+          </div>
         )}
         <p
           className={cn(
@@ -457,6 +482,7 @@ export default function ChatPage() {
       .from("conversations")
       .select("*, contact:contacts(*), assignee:profiles(id, full_name)")
       .order("last_message_at", { ascending: false, nullsFirst: false })
+      .limit(500)
     if (error) {
       toast.error(error.message)
     } else {
@@ -606,20 +632,68 @@ export default function ChatPage() {
     }
   }
 
-  // Realtime: conversation list updates (new/updated conversations).
+  // Realtime: conversation list updates — debounce para não re-buscar a lista
+  // inteira a cada evento de um burst (ex.: reconciliação de madrugada).
   useEffect(() => {
+    let timer: number | undefined
+    let alive = true
+    const schedule = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        if (alive) loadConversations()
+      }, 1500)
+    }
     const channel = supabase
       .channel("crm-conversations")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "conversations" },
-        () => loadConversations(),
+        schedule,
+      )
+      .subscribe()
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+      supabase.removeChannel(channel)
+    }
+  }, [loadConversations])
+
+  // Aviso de inbound em qualquer conversa: bip curto quando a mensagem chega
+  // em conversa que não está aberta na tela.
+  const selectedIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+  }, [selectedId])
+  useEffect(() => {
+    const channel = supabase
+      .channel("crm-inbound-alert")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: "direction=eq.inbound",
+        },
+        (payload) => {
+          const msg = payload.new as Message
+          if (msg.conversation_id !== selectedIdRef.current) playInboundBeep()
+        },
       )
       .subscribe()
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [loadConversations])
+  }, [])
+
+  // Contador de não lidas no título da aba.
+  const totalUnread = useMemo(
+    () => conversations.reduce((sum, c) => sum + (c.unread_count ?? 0), 0),
+    [conversations],
+  )
+  useEffect(() => {
+    document.title = totalUnread > 0 ? `(${totalUnread}) CRM WhatsApp` : "CRM WhatsApp"
+  }, [totalUnread])
 
   // Realtime: new messages in the selected conversation.
   useEffect(() => {
@@ -776,23 +850,32 @@ export default function ChatPage() {
     if (error) toast.error(error.message)
   }
 
-  async function handleLinkPhone(conv: Conversation) {
-    const phone = window.prompt(
-      "Informe o telefone deste contato (com DDI, ex.: 5511940136791):",
-      "",
-    )
-    if (!phone) return
-    const digits = phone.replace(/\D/g, "")
+  const [linkPhoneOpen, setLinkPhoneOpen] = useState(false)
+  const [linkPhoneValue, setLinkPhoneValue] = useState("")
+  const [linkPhoneSaving, setLinkPhoneSaving] = useState(false)
+
+  function openLinkPhone() {
+    setLinkPhoneValue("")
+    setLinkPhoneOpen(true)
+  }
+
+  async function handleLinkPhone() {
+    if (!selected) return
+    const digits = linkPhoneValue.replace(/\D/g, "")
     if (digits.length < 10 || digits.length > 13) {
       toast.error("Telefone inválido — use 10 a 13 dígitos (ex.: 5511940136791)")
       return
     }
+    setLinkPhoneSaving(true)
     try {
-      await proxyLinkConversationPhone(conv.id, digits)
+      await proxyLinkConversationPhone(selected.id, digits)
       toast.success("Telefone vinculado ao contato")
+      setLinkPhoneOpen(false)
       loadConversations()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao vincular telefone")
+    } finally {
+      setLinkPhoneSaving(false)
     }
   }
 
@@ -858,6 +941,30 @@ export default function ChatPage() {
         prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
       )
       toast.error(err instanceof Error ? err.message : "Falha ao enviar")
+    }
+  }
+
+  async function handleRetry(msg: Message) {
+    if (!selected || !instance) return
+    if (instance.status !== "connected") {
+      toast.error("WhatsApp não está conectado")
+      return
+    }
+    const text = (msg.content ?? "").trim()
+    if (!text || msg.id.startsWith("optimistic-") === false) return
+    setOptimisticMsgs((prev) =>
+      prev.map((m) => (m.id === msg.id ? { ...m, status: "pending" as const } : m)),
+    )
+    try {
+      await proxySendText(selected.instance_id, selected.contact?.phone ?? "", text, instance.instance_name)
+      setOptimisticMsgs((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, status: "sent" as const } : m)),
+      )
+    } catch (err) {
+      setOptimisticMsgs((prev) =>
+        prev.map((m) => (m.id === msg.id ? { ...m, status: "failed" as const } : m)),
+      )
+      toast.error(err instanceof Error ? err.message : "Falha ao reenviar")
     }
   }
 
@@ -1105,7 +1212,7 @@ export default function ChatPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => handleLinkPhone(selected)}
+                    onClick={openLinkPhone}
                   >
                     <Phone className="mr-1 h-4 w-4" /> Vincular telefone
                   </Button>
@@ -1265,7 +1372,7 @@ export default function ChatPage() {
                       </span>
                     </div>
                     {group.items.map((msg) => (
-                      <MessageBubble key={msg.id} msg={msg} />
+                      <MessageBubble key={msg.id} msg={msg} onRetry={handleRetry} />
                     ))}
                   </div>
                 ))
@@ -1445,6 +1552,39 @@ export default function ChatPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Vincular telefone ao contato via ID (LID) */}
+      <Dialog open={linkPhoneOpen} onOpenChange={setLinkPhoneOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Vincular telefone</DialogTitle>
+            <DialogDescription>
+              Este contato chegou só pelo ID do WhatsApp (LID). Informe o telefone
+              com DDI para enviar mensagens e unificar o histórico.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="link-phone">Telefone (com DDI)</Label>
+            <Input
+              id="link-phone"
+              autoFocus
+              placeholder="5511940136791"
+              value={linkPhoneValue}
+              onChange={(e) => setLinkPhoneValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleLinkPhone()}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setLinkPhoneOpen(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleLinkPhone} disabled={linkPhoneSaving}>
+              {linkPhoneSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Vincular
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

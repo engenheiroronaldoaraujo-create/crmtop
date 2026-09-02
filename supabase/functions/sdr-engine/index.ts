@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
+import { getOpenRouterKey } from "../_shared/secrets.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -69,17 +70,7 @@ async function callAI(
   options: { temperature?: number; max_tokens?: number } = {},
 ): Promise<{ content: string; usage?: any }> {
   // Get API key
-  let apiKey = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-  if (!apiKey) {
-    const { data } = await supabase
-      .from("activity_log")
-      .select("new_data")
-      .eq("entity_type", "ai_key")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    apiKey = (data?.new_data as any)?.key ?? "";
-  }
+  const apiKey = await getOpenRouterKey(supabase);
   if (!apiKey) throw new Error("API Key não configurada");
 
   // Get model from settings (cached)
@@ -89,7 +80,7 @@ async function callAI(
       .select("primary_model")
       .limit(1)
       .single();
-    cachedModel = sdrConfig?.primary_model ?? "openrouter/free";
+    cachedModel = sdrConfig?.primary_model ?? "google/gemini-2.5-flash";
   }
   const model = cachedModel;
 

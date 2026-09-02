@@ -1,232 +1,112 @@
 # CRM WhatsApp
 
-CRM de vendas simples e enxuto com WhatsApp no centro, construído sobre Supabase
-(Postgres + Auth + Realtime + Edge Functions + Storage) e Evolution API.
+CRM de vendas com WhatsApp no centro, construído sobre Supabase (Postgres +
+Auth + Realtime + Edge Functions + Storage) e Evolution API.
 
-**Status atual: Fase 0 (Fundação) + Fase 1 (Chat + Evolution API).** Fases F2+
-(funil, agenda, follow-up, IA) estão no roadmap e **não** devem ser implementadas agora.
-
----
+**Status: F0–F4 implementadas** — fundação, chat, funil, agenda, automações,
+SDR IA (com transcrição de áudio), templates de resposta e dashboard.
 
 ## Stack
 
-- **Frontend**: React 18 + Vite + TypeScript + Tailwind + shadcn/ui (`frontend/`)
+- **Frontend**: React 18 + Vite + TypeScript + Tailwind + shad/ui (rotas com code-splitting)
 - **Backend**: Supabase — Postgres + Auth + Edge Functions + Realtime + Storage
-- **WhatsApp**: Evolution API self-hosted (URL e API key vivem **somente** em
-  secrets de Edge Function — nunca no frontend)
+- **WhatsApp**: Evolution API self-hosted (credenciais só em secrets server-side)
+- **IA**: OpenRouter (key em `app_secrets`, service-role only; default `google/gemini-2.5-flash`)
 - **Timezone de negócio**: `America/Sao_Paulo`
 
-## Modelo de operação
+## Funcionalidades
 
-UM número de WhatsApp da empresa, vários vendedores atendendo com **atribuição de
-conversa**. O schema já suporta múltiplas instâncias (`whatsapp_instances`), mas a
-UI da F1 gerencia uma só.
+| Área | Rota | Notas |
+| --- | --- | --- |
+| Chat | `/` | Realtime, envio otimista, status ✓✓, templates com `{{nome}}`, transcrição de áudio, bip/título com não-lidas |
+| Contatos | `/contacts` | Busca, tags, vínculo telefone↔LID |
+| Funil | `/pipeline` | Kanban (drag & drop), oportunidades por contato |
+| Agenda | `/agenda` | Tarefas, follow-ups, reuniões |
+| Automações | `/automations` | Regras disparadas por eventos (admin) |
+| Dashboard | `/dashboard` | Métricas comerciais |
+| Configurações | `/settings` | Usuários, WhatsApp, Templates, IA, SDR IA (admin) |
+| Minha conta | `/account` | Troca de senha |
 
----
+### SDR IA + áudio
+
+Áudios recebidos são transcritos no webhook (best-effort, em background) e o
+texto alimenta o SDR (`sdr-engine`), os resumos/insights (`ai-service`) e o
+inspector de deals (`deal-inspector`). Configuração em **Configurações → IA →
+Transcrição de Áudios** (modelo + liga/desliga). Coluna: `messages.transcription`.
+
+### Confiabilidade do webhook
+
+- **Dedup** por `(conversation_id, evolution_message_id)` — reentrega não duplica.
+- **Reconciliação na reconexão**: ao voltar para `connected`, o webhook lista os
+  chats da própria Evolution (`findChats` + `findMessages`, janela de 3 dias) e
+  reimporta o que caiu — cobre mensagens perdidas em queda de entrega, inclusive
+  conversas novas (leads) que ainda não existiam no CRM.
+- Enriquecimento (transcrição → SDR → automação) roda **após** responder a
+  Evolution (via `EdgeRuntime.waitUntil`), evitando timeout/queda de entrega.
 
 ## Estrutura
 
 ```
 supabase/
-  migrations/           001..024 (profiles, contacts, instances, conversations, messages, status, repair)
+  migrations/          001..040 (profiles → message_templates, app_secrets, merge LID)
   functions/
-    _shared/
-      cors.ts                    CORS + jsonResponse
-      evolution-identity.ts      Camada ÚNICA de identidade (JID/LID/phone) + normalização BR
-      evolution-identity_test.ts Testes dos 13 casos obrigatórios (deno test)
-      contacts.ts                Upsert de contato/conversa (merge LID→phone, anti-duplicação)
-    admin-users/         Gestão de usuários (admin, server-side)
-    evolution-webhook/   Webhook público validado por token na URL
-    evolution-proxy/     Proxy autenticado para a Evolution API
-  config.toml
+    _shared/           cors, evolution-identity (camada única de identidade LID/JID/phone),
+                       contacts (upsert merge-aware), lid-phone-resolver (cache),
+                       transcribe (OpenRouter audio), secrets (app_secrets)
+    admin-users/       gestão de usuários + config IA/segredos (admin, server-side)
+    evolution-webhook  entrada dos eventos da Evolution (token na URL)
+    evolution-proxy    proxy autenticado p/ Evolution (send-text/media, instâncias, syncs)
+    ai-service         resumos, análise de lead, sugestão de resposta, transcrição on-demand
+    sdr-engine         atendimento automático (qualificação), agenda de SDR, métricas
+    automation-engine  regras evento→ação (chamado pelo webhook)
+    deal-inspector     análise de deals parados
 frontend/
-  src/
-    pages/    Login, Chat, Contacts, Settings (Usuários + WhatsApp), MyAccount
-    components/  Layout, ProtectedRoute, ui/ (shadcn)
-    hooks/use-auth.tsx
-    lib/      supabase.ts, api.ts, types.ts, utils.ts
+  src/pages/           Chat, Contacts, Pipeline, Agenda, Automations, Dashboard,
+                       Settings (UsersAdmin/WhatsApp/AISettings/SDRSettings/Templates), MyAccount, Login
+  src/hooks/           use-auth, use-ai, use-tags, use-templates, use-commercial
+  src/lib/             supabase, api (Edge Functions), types, utils, media-cache
 ```
-
----
 
 ## Setup
 
-> Deploy atual: projeto `crm_top` (ref `lxvhrzncqniexksxowah`), funções
-> deployadas, migrations 001–006 aplicadas e signup desligado.
-
-### 1. Link do projeto e migrations
-
 ```bash
-supabase link --project-ref <project-ref>
-supabase db push          # aplica as migrations 001–006
+supabase link --project-ref <ref>
+supabase db push
+supabase secrets set EVOLUTION_API_URL=... EVOLUTION_API_KEY=... WEBHOOK_SECRET=...
+cd frontend && cp .env.example .env   # VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+npm install && npm run dev
 ```
 
-- **Importante**: em Authentication → Providers → Email, mantenha
-  **"Enable sign ups" DESLIGADO** no dashboard do Supabase. Não existe tela de
-  cadastro na UI; usuários são criados pelo admin (sem billing público).
-- A migration `001` também desliga signup no `config.toml` local.
-
-### 2. Secrets das Edge Functions
-
-```bash
-supabase secrets set EVOLUTION_API_URL=https://sua-evolution-api.com
-supabase secrets set EVOLUTION_API_KEY=<api-key-da-evolution>
-supabase secrets set WEBHOOK_SECRET=<string-aleatoria>
-```
-
-`SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` são injetadas automaticamente pela
-plataforma. Documentação do comando: `supabase secrets set`.
-
-**Neste deploy** já estão definidos: `WEBHOOK_SECRET` (gerado). Faltam apenas
-`EVOLUTION_API_URL` e `EVOLUTION_API_KEY` com os valores da sua Evolution API —
-sem eles, criar instância/QR e enviar mensagens falham com erro do Evolution.
-
-### 3. Frontend
-
-```bash
-cd frontend
-cp .env.example .env   # preencha VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY
-npm install
-npm run dev
-```
-
-### 4. Deploy das funções
-
-```bash
-supabase functions deploy admin-users
-supabase functions deploy evolution-proxy
-supabase functions deploy evolution-webhook
-```
-
-### 5. Configuração da Evolution API
-
-O webhook é registrado automaticamente no fluxo **Configurações → WhatsApp** do
-admin, apontando para:
-
-```
-https://<project-ref>.supabase.co/functions/v1/evolution-webhook?token=<WEBHOOK_SECRET>
-```
-
-Eventos: `MESSAGES_UPSERT`, `MESSAGES_UPDATE` (entrega/leitura), `MESSAGES_SET`
-(histórico do pareamento), `CONTACTS_SET`/`CONTACTS_UPSERT` e `CONNECTION_UPDATE`.
-
----
-
-## Como funciona (F1)
-
-### Webhook (`evolution-webhook`)
-
-- Validado por `token` na query string (igual a `WEBHOOK_SECRET`).
-- Por mensagem: extrai `remoteJid` → **resolução de identidade central**
-  (`_shared/evolution-identity.ts`: classifica JID, LID nunca vira telefone,
-  `remoteJidAlt`/`senderPn` recuperam o telefone real de LIDs) → **upsert em
-  `contacts`** (merge-aware por LID→phone, com variantes do nono dígito BR) →
-  **upsert em `conversations`** (`(contact_id, instance_id)` único) → **insert em
-  `messages`** com `ON CONFLICT (conversation_id, evolution_message_id) DO NOTHING`.
-- **Deduplicação por design**: reenviar o mesmo payload não duplica (teste de
-  aceite). Rows com `evolution_message_id` nulo seguem sem dedup (aceitável).
-- `messages.update` atualiza o `status` da mensagem outbound
-  (`pending/sent/delivered/read/failed`) via RPC `update_message_status`.
-- Mídia: baixa via `POST /chat/getBase64FromMediaMessage/{instance}` da Evolution,
-  salva no bucket **privado** `whatsapp-media` e grava o caminho em `media_url`
-  (o frontend gera URLs assinadas).
-- Grupos (`@g.us`), status (`@broadcast`), listas e canais são ignorados na F1.
-- `connection.update` atualiza `whatsapp_instances.status`
-  (`open→connected`, `connecting/pairing→connecting`, senão `disconnected`).
-- `syncFullHistory: true` é aplicado na criação da instância (meta de ~60 dias de
-  histórico; a cobertura real é decidida pelo WhatsApp).
-
-### Proxy (`evolution-proxy`)
-
-- Requer JWT de usuário autenticado (validado server-side). Ações admin
-  (`create-instance`, `get-qr`, `logout-instance`, sincronizações) exigem
-  `role = admin`.
-- `send-text` / `send-media`: o **destino é resolvido pela camada central**
-  (`resolveSendTarget`: JID confirmado → telefone E.164 → LID com prefixo
-  `lid:`; nunca inventa número). Enviam via Evolution **e** gravam a mensagem
-  outbound no banco com `sender_profile_id` do JWT; falhas ficam `failed` e
-  sucesso `sent` (nunca `sent` antes da confirmação da API). O eco do webhook
-  não duplica (mesmo `evolution_message_id`), e o proxy usa upsert para corrigir
-  o `sender` caso o webhook vença a corrida.
-
-### Frontend
-
-- Chat em tempo real via Supabase Realtime (publication em `messages` e
-  `conversations`). Abrir a conversa zera `unread_count` via RPC
-  `mark_conversation_read`. A coluna `status` da mensagem mostra
-  ✓ (enviada), ✓✓ (entregue), ✓✓ azul (lida), ⏱ (pendente) e ⚠ (falha) — as
-  transições `delivered`/`read` chegam em tempo real via `messages.update`.
-- **Nenhum request do navegador vai direto para a Evolution** — tudo passa pelas
-  Edge Functions (confira na aba Network).
-
-### Testes
-
-```bash
-npm test   # deno test supabase/functions/_shared/ (19 casos de normalização)
-```
-
----
-
-## Variáveis de ambiente
-
-**Frontend (`frontend/.env`):**
-
-| Variável | Uso |
-| --- | --- |
-| `VITE_SUPABASE_URL` | URL do projeto Supabase |
-| `VITE_SUPABASE_ANON_KEY` | Chave anon pública |
-
-**Secrets de Edge Functions (`supabase secrets set`):**
-
-| Secret | Uso |
-| --- | --- |
-| `EVOLUTION_API_URL` | Base URL da sua Evolution API |
-| `EVOLUTION_API_KEY` | API key da Evolution |
-| `WEBHOOK_SECRET` | Token de validação do webhook (na URL) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Injetada pela plataforma (não defina manualmente) |
-
----
+Deploy das funções: `supabase functions deploy <nome>` (por função).
+Signup público **desligado** — usuários criados pelo admin.
+Webhook: `https://<ref>.supabase.co/functions/v1/evolution-webhook?token=<WEBHOOK_SECRET>`.
 
 ## Notas de segurança
 
-- Todo acesso a tabelas passa por RLS. Padrão canônico: `DROP POLICY IF EXISTS`
-  seguido de `CREATE POLICY` (nunca `CREATE POLICY IF NOT EXISTS`).
-- `is_platform_admin` é a única flag de admin de plataforma; **nunca** checagem por
+- **Segredos**: `app_secrets` sem policies — leitura apenas por service role nas
+  Edge Functions. A key da OpenRouter **nunca** fica mais em `activity_log`.
+- `activity_log`: leitura/escrita restrita a admin (a policy antiga expunha tudo
+  a qualquer usuário autenticado).
+- RLS em tudo; admin checado por `public.is_admin()` (SECURITY DEFINER), nunca
   e-mail hardcoded.
-- Checagem de admin em policies via `public.is_admin()` (função `SECURITY
-  DEFINER` que consulta `profiles.role` por `auth.uid()`). **Não** use o
-  `EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin')`
-  inline numa policy sobre a própria tabela `profiles` — no Postgres 17 isso
-  dispara `infinite recursion detected in policy` (bug comprovado e corrigido na
-  migration `006_admin_policies_fix.sql`).
-- `profiles`: usuários leem/editem o próprio; **admin** gerencia papéis
-  (server-side na `admin-users`). Uma policy extra permite que **toda a equipe leia
-  os nomes** (necessário para o dropdown de atribuição e o indicador de dono) — a
-  escrita permanece restrita a si mesmo/admin.
-- `messages`: INSERT só via service role (Edge Functions); usuários apenas leem.
-- Usuários **desativados** são banidos (`ban_duration`) e **nunca** deletados —
-  preservando histórico de mensagens e atribuições.
+- `messages`: INSERT apenas via service role; usuários leem.
+- Credenciais da Evolution só vivem em secrets de Edge Function.
 
----
+## Testes e CI
 
-## Critérios de aceite
+```bash
+npm test          # deno test supabase/functions/_shared/ (37 casos)
+npm run build     # tsc + vite
+npm --prefix frontend run lint
+```
 
-### F0
+CI no GitHub Actions (`.github/workflows/ci.yml`): testes Deno, type-check das
+Edge Functions, lint e build do frontend em cada push/PR.
 
-- [ ] `supabase db push` aplica as migrations sem erro
-- [ ] Login funciona
-- [ ] Vendedor NÃO consegue alterar role de ninguém (via RLS, não só UI)
-- [ ] Admin cria vendedor pela UI; o vendedor loga com a senha provisória e troca a senha
-- [ ] Chamada a `admin-users` com JWT de vendedor retorna **403**
-- [ ] Signup direto pela API do Supabase falha (signup desligado)
-- [ ] Usuário desativado não loga; ao reativar, volta com o mesmo histórico
-- [ ] Nenhuma credencial da Evolution existe em código de frontend
+## Dívida conhecida / próximos passos
 
-### F1
-
-- [ ] Escanear o QR conecta e o status muda para `connected` sozinho (via webhook)
-- [ ] Mensagem recebida aparece no chat em <3s sem refresh
-- [ ] Enviar texto e imagem pelo CRM chega no WhatsApp do destinatário
-- [ ] Histórico do pareamento populou conversas/mensagens retroativas
-- [ ] Reprocessar o mesmo webhook NÃO duplica mensagem
-- [ ] Nenhum request do navegador vai direto para a Evolution
+- Atualizações **majors** pendentes (avisadas pelo `npm audit`): vite 5→8 e
+  react-router 6→7 (com testes), em branch dedicada.
+- `evolution-proxy` com ~1.7k linhas — dividir em módulos na próxima mudança grande.
+- Regras de automação fora `MESSAGE_RECEIVED`/`FIRST_MESSAGE_RECEIVED` ainda não
+  têm emissor (ex.: `OPPORTUNITY_STAGE_CHANGED`, `TASK_OVERDUE` via cron).

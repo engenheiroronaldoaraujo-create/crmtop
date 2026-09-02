@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Edge Function tests (deno)
+        run: deno test supabase/functions/_shared/
+
+      - name: Type-check Edge Functions
+        run: deno check supabase/functions/ai-service/index.ts supabase/functions/sdr-engine/index.ts supabase/functions/deal-inspector/index.ts supabase/functions/automation-engine/index.ts supabase/functions/evolution-webhook/index.ts supabase/functions/evolution-proxy/index.ts supabase/functions/admin-users/index.ts
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+
+      - name: Frontend build (tsc + vite)
+        working-directory: frontend
+        run: npm run build

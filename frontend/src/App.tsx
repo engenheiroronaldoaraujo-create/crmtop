@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { Toaster } from "sonner"
 
@@ -5,14 +6,15 @@ import { AuthProvider, useAuth } from "@/hooks/use-auth"
 import { ProtectedRoute } from "@/components/ProtectedRoute"
 import { Layout } from "@/components/Layout"
 import LoginPage from "@/pages/Login"
-import ChatPage from "@/pages/Chat"
-import ContactsPage from "@/pages/Contacts"
-import SettingsPage from "@/pages/Settings"
-import MyAccountPage from "@/pages/MyAccount"
-import PipelinePage from "@/pages/Pipeline"
-import AgendaPage from "@/pages/Agenda"
-import AutomationsPage from "@/pages/Automations"
-import DashboardPage from "@/pages/Dashboard"
+
+const ChatPage = lazy(() => import("@/pages/Chat"))
+const ContactsPage = lazy(() => import("@/pages/Contacts"))
+const SettingsPage = lazy(() => import("@/pages/Settings"))
+const MyAccountPage = lazy(() => import("@/pages/MyAccount"))
+const PipelinePage = lazy(() => import("@/pages/Pipeline"))
+const AgendaPage = lazy(() => import("@/pages/Agenda"))
+const AutomationsPage = lazy(() => import("@/pages/Automations"))
+const DashboardPage = lazy(() => import("@/pages/Dashboard"))
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
@@ -118,7 +120,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
+        <Suspense fallback={null}>
+          <AppRoutes />
+        </Suspense>
         <Toaster position="top-center" richColors />
       </AuthProvider>
     </BrowserRouter>

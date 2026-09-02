@@ -4,28 +4,22 @@ import {
   DEFAULT_TRANSCRIPTION_MODEL,
   transcribeAudio,
 } from "../_shared/transcribe.ts";
+import { getOpenRouterKey, setSecret, OPENROUTER_KEY_NAME } from "../_shared/secrets.ts";
 
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/free";
+const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "google/gemini-2.5-flash";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 async function getApiKey(supabase: Supabase): Promise<string> {
-  // Try env var first
-  if (OPENROUTER_API_KEY) return OPENROUTER_API_KEY;
-  // Fallback: read from activity_log
-  try {
-    const { data, error } = await supabase
-      .from("activity_log")
-      .select("new_data")
-      .eq("entity_type", "ai_key")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error || !data) return "";
-    return (data.new_data as any)?.key ?? "";
-  } catch {
-    return "";
-  }
+  return await getOpenRouterKey(supabase);
+}
+
+async function isAdmin(supabase: Supabase, userId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", userId)
+    .maybeSingle();
+  return data?.role === "admin";
 }
 
 async function getModel(supabase: Supabase): Promise<string> {
@@ -49,22 +43,10 @@ async function callOpenRouter(
   options: { temperature?: number; max_tokens?: number; response_format?: any } = {},
   supabase?: Supabase,
 ): Promise<{ content: string; usage?: any }> {
-  // Get API key from env or database
-  let apiKey = OPENROUTER_API_KEY;
-  if (!apiKey && supabase) {
-    try {
-      const { data } = await supabase
-        .from("activity_log")
-        .select("new_data")
-        .eq("entity_type", "ai_key")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      apiKey = (data?.new_data as any)?.key ?? "";
-    } catch {
-      // ignore
-    }
-  }
+  // Get API key from env or app_secrets
+  const apiKey = supabase
+    ? await getOpenRouterKey(supabase)
+    : await getOpenRouterKey(serviceClient());
   if (!apiKey) throw new Error("API Key não configurada. Configure em Configurações → IA.");
 
   const model = supabase ? await getModel(supabase) : OPENROUTER_MODEL;
@@ -499,17 +481,16 @@ Deno.serve(async (req) => {
     try {
       switch (action) {
         case "store_api_key": {
-          // Store API key securely in a separate table
+          if (!(await isAdmin(supabase, user.id))) {
+            return jsonResponse(403, { error: "apenas admin pode alterar a API key" });
+          }
           const key = (data as any)?.key;
           if (!key) return jsonResponse(400, { error: "key required" });
-          const { error } = await supabase.from("activity_log").insert({
-            entity_type: "ai_key",
-            entity_id: null,
-            action: "API_KEY_STORED",
-            actor_id: user.id,
-            new_data: { key },
-          });
-          if (error) return jsonResponse(400, { error: error.message });
+          try {
+            await setSecret(supabase, OPENROUTER_KEY_NAME, String(key), user.id);
+          } catch (e: any) {
+            return jsonResponse(400, { error: e.message });
+          }
           return jsonResponse(200, { ok: true });
         }
         case "test_connection":

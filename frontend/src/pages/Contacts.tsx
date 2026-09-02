@@ -136,7 +136,7 @@ export default function ContactsPage() {
       opted_out: form.opted_out,
       source: "manual",
     }
-    let error: { message: string } | null = null
+    let error: { message: string } | null
     if (editingId) {
       const res = await supabase.from("contacts").update(payload).eq("id", editingId)
       error = res.error

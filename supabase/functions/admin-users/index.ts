@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { setSecret } from "../_shared/secrets.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -188,21 +189,26 @@ Deno.serve(async (req) => {
       }
 
       case "set-secret": {
-        // Note: Supabase Edge Function secrets cannot be updated via API.
-        // This action stores the intent; actual secret update requires CLI or Dashboard.
-        // For now, store in activity_log as a record.
+        // Grava o valor em app_secrets (service role only) para uso pelas
+        // Edge Functions. Segredos nativos de runtime (EVOLUTION_API_KEY etc.)
+        // continuam exigindo CLI/Dashboard.
         const secretName = body.name;
         if (!secretName || !body.value) {
           return jsonResponse(400, { error: "name and value required" });
         }
+        try {
+          await setSecret(supabase, String(secretName), String(body.value), profile.id);
+        } catch (e: any) {
+          return jsonResponse(400, { error: e.message });
+        }
         await supabase.from("activity_log").insert({
           entity_type: "secret_update",
           entity_id: null,
-          action: `SECRET_REQUESTED: ${secretName}`,
+          action: `SECRET_UPDATED: ${secretName}`,
           actor_id: profile.id,
           new_data: { name: secretName, value_length: (body.value as string).length },
         }).then(() => {}, () => {});
-        return jsonResponse(200, { ok: true, message: "Secret update requested. Use Supabase Dashboard to update secrets." });
+        return jsonResponse(200, { ok: true });
       }
 
       default:

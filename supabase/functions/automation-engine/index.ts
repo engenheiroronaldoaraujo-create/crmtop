@@ -692,31 +692,44 @@ Deno.serve(async (req) => {
 
     const supabase = serviceClient();
 
-    // Map Evolution events to automation events
-    const triggerEvent: TriggerEvent = {
-      event_type: "MESSAGE_RECEIVED",
-      entity_type: "conversation",
-      entity_id: "",
-      entity_data: {
-        instance_name: instanceName,
-        ...data,
-      },
-    };
+    // Chamado pelo evolution-webhook com payload estruturado (a mensagem já
+    // foi persistida quando a função é invocada).
+    const conversationId = String(data?.conversation_id ?? "");
+    if (!conversationId) {
+      return jsonResponse(200, { ok: true, skipped: "no conversation in payload", event });
+    }
 
-    // Determine entity from event data
-    if (data?.key?.remoteJid) {
-      // Try to find conversation
+    let contactId = (data?.contact_id as string) ?? null;
+    if (!contactId) {
       const { data: conv } = await supabase
         .from("conversations")
-        .select("id, contact_id")
-        .eq("instance_id", (await supabase.from("whatsapp_instances").select("id").eq("instance_name", instanceName).single())?.data?.id ?? "")
-        .single();
-      if (conv) {
-        triggerEvent.entity_id = conv.id;
-        triggerEvent.entity_data.conversation_id = conv.id;
-        triggerEvent.entity_data.contact_id = conv.contact_id;
-      }
+        .select("contact_id")
+        .eq("id", conversationId)
+        .maybeSingle();
+      contactId = conv?.contact_id ?? null;
     }
+
+    // FIRST_MESSAGE_RECEIVED quando é o 1º inbound da conversa (esta já conta).
+    let eventType = "MESSAGE_RECEIVED";
+    const { count: inboundCount } = await supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conversationId)
+      .eq("direction", "inbound");
+    if ((inboundCount ?? 0) <= 1) eventType = "FIRST_MESSAGE_RECEIVED";
+
+    const triggerEvent: TriggerEvent = {
+      event_type: eventType,
+      entity_type: "conversation",
+      entity_id: conversationId,
+      entity_data: {
+        instance_name: instanceName,
+        conversation_id: conversationId,
+        contact_id: contactId,
+        text: data?.text ?? "",
+        media_type: data?.media_type ?? "text",
+      },
+    };
 
     await processTrigger(supabase, triggerEvent);
 

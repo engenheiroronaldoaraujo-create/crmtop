@@ -236,7 +236,9 @@ export default function SDRSettings() {
     try {
       const res = await sdrGetMetrics()
       setMetrics(res.metrics)
-    } catch {}
+    } catch {
+      // falha ao carregar métricas: mantém vazio, sem quebrar a tela
+    }
   }, [])
 
   useEffect(() => { loadSettings(); loadMetrics() }, [loadSettings, loadMetrics])

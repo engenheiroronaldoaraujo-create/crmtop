@@ -11,31 +11,29 @@ import {
   shouldAttemptTranscription,
   transcribeAudio,
 } from "../_shared/transcribe.ts";
+import { getOpenRouterKey } from "../_shared/secrets.ts";
 
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
 
-// Transcrição de áudio (best-effort): chave OpenRouter e config
-// (enabled/model) vêm do mesmo lugar que o resto da IA (activity_log).
-async function getOpenRouterKey(supabase: Supabase): Promise<string> {
-  if (OPENROUTER_API_KEY) return OPENROUTER_API_KEY;
-  try {
-    const { data } = await supabase
-      .from("activity_log")
-      .select("new_data")
-      .eq("entity_type", "ai_key")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return ((data?.new_data as any)?.key as string) ?? "";
-  } catch {
-    return "";
+// Agenda trabalho pós-inserção (transcrição, SDR, automação) sem bloquear a
+// resposta ao webhook. No runtime Deno/Supabase `EdgeRuntime.waitUntil` mantém
+// o isolate vivo após o return; fora dele (reconcile/testes) cai no await.
+function scheduleBackground(promise: Promise<unknown>): void {
+  const g = globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } };
+  if (g.EdgeRuntime?.waitUntil) {
+    g.EdgeRuntime.waitUntil(promise);
+  } else {
+    promise.catch((e) => console.error("BACKGROUND_TASK_FAILED", String(e)));
   }
 }
+
+// Config de transcrição (enabled/model) fica em activity_log::ai_config
+// (não-sensível; a chave em si mora em app_secrets, service role only).
 
 async function getTranscriptionConfig(
   supabase: Supabase,
@@ -285,24 +283,6 @@ async function processMessage(
   }
   if (identity.isLid) console.info("EVOLUTION_LID_DETECTED", identity.lid, phone ? `phone=${phone}` : "sem phone");
 
-  // Diagnóstico temporário: guarda o key bruto dos LIDs para conferir onde a
-  // Evolution envia o telefone alternativo. Best effort (nunca quebra o fluxo).
-  if (identity.isLid) {
-    await supabase
-      .from("webhook_lid_log")
-      .upsert(
-        {
-          instance_name: instanceName,
-          message_id: raw.key?.id ?? null,
-          key: raw.key ?? null,
-          push_name: raw.pushName ?? null,
-          resolved_phone: Boolean(phone),
-        },
-        { onConflict: "instance_name,message_id", ignoreDuplicates: true },
-      )
-      .then(() => {}, () => {});
-  }
-
   const fromMe = Boolean(raw.key?.fromMe);
   const evolutionId = raw.key?.id ?? null;
   const { type, content, mediaMessage } = mapMessageType(raw);
@@ -382,16 +362,51 @@ async function processMessage(
     p_inbound: !fromMe,
   });
 
-  // Transcrição de áudio inbound (best-effort, só em linha nova — dedup evita
-  // re-transcrever). O texto resultante alimenta o SDR e as análises de IA.
-  let sdrContent = content;
-  if (
-    !fromMe &&
-    isNewMessage &&
-    type === "audio" &&
-    audioBase64 &&
-    insertedRow?.id
-  ) {
+  // Enriquecimento (transcrição → SDR → automação) roda em background para o
+  // webhook responder já com a mensagem persistida (evita retry/queda de
+  // entrega por timeout na Evolution). Só em linha NOVA (dedup).
+  if (isNewMessage && !fromMe) {
+    scheduleBackground(
+      postProcessInbound({
+        supabase,
+        instanceName,
+        conversationId,
+        contactId,
+        messageId: insertedRow?.id ?? null,
+        evolutionId,
+        type,
+        content,
+        audioBase64,
+        audioMimetype,
+        hasPhone: Boolean(phone),
+      }),
+    );
+  }
+}
+
+// Cuida da transcrição de áudio, dispara o SDR IA e a engine de automação para
+// uma mensagem inbound já persistida. Nunca lança (best-effort).
+async function postProcessInbound(args: {
+  supabase: Supabase;
+  instanceName: string;
+  conversationId: string;
+  contactId: string;
+  messageId: string | null;
+  evolutionId: string | null;
+  type: string;
+  content: string;
+  audioBase64: string | null;
+  audioMimetype: string | null;
+  hasPhone: boolean;
+}): Promise<void> {
+  const {
+    supabase, instanceName, conversationId, contactId, messageId,
+    evolutionId, type, audioBase64, audioMimetype, hasPhone,
+  } = args;
+  let sdrContent = args.content;
+
+  // Transcrição de áudio inbound (best-effort, só em linha nova).
+  if (type === "audio" && audioBase64 && messageId) {
     try {
       const cfg = await getTranscriptionConfig(supabase);
       if (
@@ -410,7 +425,7 @@ async function processMessage(
           mimetype: audioMimetype ?? "audio/ogg",
         });
         if (transcript) {
-          await supabase.from("messages").update({ transcription: transcript }).eq("id", insertedRow.id);
+          await supabase.from("messages").update({ transcription: transcript }).eq("id", messageId);
           sdrContent = transcript;
           console.info("AUDIO_TRANSCRIBED", evolutionId, `chars=${transcript.length}`);
         } else {
@@ -422,9 +437,8 @@ async function processMessage(
     }
   }
 
-  // SDR IA: processa inbound NOVO se habilitado. Reentregas/backfill de
-  // reconciliação não re-gatilham resposta automática.
-  if (!fromMe && phone && isNewMessage) {
+  // SDR IA: processa se habilitado.
+  if (hasPhone) {
     try {
       const { data: sdrSettings } = await supabase
         .from("sdr_settings")
@@ -440,7 +454,7 @@ async function processMessage(
           .maybeSingle()
 
         const isPaused = sdrConv && ["paused_human", "completed", "transferred"].includes(sdrConv.status)
-        const inCooldown = sdrConv?.last_auto_reply_at && 
+        const inCooldown = sdrConv?.last_auto_reply_at &&
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 
         if (!isPaused && !inCooldown) {
@@ -450,6 +464,21 @@ async function processMessage(
     } catch (e) {
       console.error("SDR_INTEGRATION_ERROR", String(e), e instanceof Error ? e.stack : undefined)
     }
+  }
+
+  // Automação (engine de regras). Best-effort; nunca derruba o restante.
+  try {
+    await fetch(`${SUPABASE_URL}/functions/v1/automation-engine?token=${WEBHOOK_SECRET}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event: "messages.upsert",
+        instance: instanceName,
+        data: { conversation_id: conversationId, contact_id: contactId, text: sdrContent, media_type: type },
+      }),
+    }).catch(() => {});
+  } catch (e) {
+    console.warn("AUTOMATION_KICK_FAILED", String(e));
   }
 }
 

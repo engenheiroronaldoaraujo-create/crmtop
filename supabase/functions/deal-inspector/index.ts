@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getOpenRouterKey } from "../_shared/secrets.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -34,18 +35,7 @@ Regras:
 // ---------------------------------------------------------------------------
 
 async function getApiKey(supabase: any): Promise<string> {
-  let apiKey = Deno.env.get("OPENROUTER_API_KEY") ?? "";
-  if (!apiKey) {
-    const { data } = await supabase
-      .from("activity_log")
-      .select("new_data")
-      .eq("entity_type", "ai_key")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    apiKey = (data?.new_data as any)?.key ?? "";
-  }
-  return apiKey;
+  return await getOpenRouterKey(supabase);
 }
 
 async function getModel(supabase: any): Promise<string> {
@@ -54,7 +44,7 @@ async function getModel(supabase: any): Promise<string> {
     .select("primary_model")
     .limit(1)
     .single();
-  return data?.primary_model ?? "openrouter/free";
+  return data?.primary_model ?? "google/gemini-2.5-flash";
 }
 
 async function callAI(
