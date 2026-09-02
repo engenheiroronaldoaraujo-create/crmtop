@@ -14,6 +14,7 @@ import {
   CheckCheck,
   CheckCircle2,
   Clock,
+  FileText,
   FlaskConical,
   Loader2,
   Paperclip,
@@ -42,6 +43,7 @@ import {
 import type {
   Conversation,
   Message,
+  MessageTemplate,
   Profile,
   WhatsAppInstance,
   Opportunity,
@@ -50,6 +52,7 @@ import type {
 } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { useContactTags, useTags } from "@/hooks/use-tags"
+import { useTemplates } from "@/hooks/use-templates"
 import { useAI } from "@/hooks/use-ai"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -359,6 +362,23 @@ export default function ChatPage() {
   const { contactTags, addTag: addContactTag, removeTag: removeContactTag } = useContactTags(selected?.contact_id ?? null)
   const [tagSearch, setTagSearch] = useState("")
   const [tagMenuOpen, setTagMenuOpen] = useState(false)
+
+  // --- Templates de resposta ---
+  const { templates: allTemplates } = useTemplates()
+  const [tplSearch, setTplSearch] = useState("")
+  const visibleTemplates = useMemo(() => {
+    const q = tplSearch.trim().toLowerCase()
+    if (!q) return allTemplates
+    return allTemplates.filter(
+      (t) => t.title.toLowerCase().includes(q) || t.body.toLowerCase().includes(q),
+    )
+  }, [allTemplates, tplSearch])
+
+  const applyTemplate = (t: MessageTemplate) => {
+    const name = selected?.contact ? contactDisplayName(selected.contact) : ""
+    const resolved = t.body.split("{{nome}}").join(name)
+    setText((prev) => (prev.trim() ? `${prev}\n${resolved}` : resolved))
+  }
 
   const loadContactOpps = useCallback(async (contactId: string) => {
     const { data } = await supabase
@@ -1280,6 +1300,45 @@ export default function ChatPage() {
                   if (file) setPendingFile({ file })
                 }}
               />
+              <DropdownMenu onOpenChange={(open) => !open && setTplSearch("")}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    title="Templates de resposta"
+                  >
+                    <FileText className="h-5 w-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-72">
+                  <div className="p-2">
+                    <Input
+                      placeholder="Buscar template..."
+                      value={tplSearch}
+                      onChange={(e) => setTplSearch(e.target.value)}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                  {visibleTemplates.map((t) => (
+                    <DropdownMenuItem
+                      key={t.id}
+                      onSelect={() => applyTemplate(t)}
+                      className="flex-col items-start gap-0"
+                    >
+                      <span className="text-xs font-medium">{t.title}</span>
+                      <span className="max-w-60 truncate text-[10px] text-muted-foreground">
+                        {t.body}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                  {visibleTemplates.length === 0 && (
+                    <p className="p-2 text-center text-xs text-muted-foreground">
+                      Nenhum template cadastrado.
+                    </p>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
                 type="button"
                 variant="ghost"

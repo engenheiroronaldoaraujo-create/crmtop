@@ -66,6 +66,16 @@ export type Message = {
   created_at: string
 }
 
+export type MessageTemplate = {
+  id: string
+  title: string
+  body: string
+  is_active: boolean
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type AdminUser = {
   id: string
   email: string

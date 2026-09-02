@@ -3,6 +3,7 @@ import UsersAdmin from "@/pages/UsersAdmin"
 import WhatsAppSettings from "@/pages/WhatsAppSettings"
 import AISettings from "@/pages/AISettings"
 import SDRSettings from "@/pages/SDRSettings"
+import TemplatesSettings from "@/pages/TemplatesSettings"
 
 export default function SettingsPage() {
   return (
@@ -15,6 +16,7 @@ export default function SettingsPage() {
           <TabsList>
             <TabsTrigger value="users">Usuários</TabsTrigger>
             <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>
+            <TabsTrigger value="templates">Templates</TabsTrigger>
             <TabsTrigger value="ai">Inteligência Artificial</TabsTrigger>
             <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
@@ -23,6 +25,9 @@ export default function SettingsPage() {
           </TabsContent>
           <TabsContent value="whatsapp">
             <WhatsAppSettings />
+          </TabsContent>
+          <TabsContent value="templates">
+            <TemplatesSettings />
           </TabsContent>
           <TabsContent value="ai">
             <AISettings />
