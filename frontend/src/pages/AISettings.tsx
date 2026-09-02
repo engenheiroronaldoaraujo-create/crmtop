@@ -18,10 +18,33 @@ export default function AISettings() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<"success" | "error" | null>(null)
+  const [transcriptionEnabled, setTranscriptionEnabled] = useState(true)
+  const [transcriptionModel, setTranscriptionModel] = useState("google/gemini-2.5-flash")
+  const [savingTranscription, setSavingTranscription] = useState(false)
+
+  const callAiService = async (action: string, data: Record<string, unknown> = {}) => {
+    const token = (await supabase.auth.getSession()).data.session?.access_token
+    const res = await fetch(`${getSupabaseUrl()}/functions/v1/ai-service`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ action, data }),
+    })
+    if (!res.ok) throw new Error(`ai-service ${action} falhou (${res.status})`)
+    return res.json()
+  }
 
   useEffect(() => {
     // Settings are stored in Edge Function secrets, not in DB
     setModel("openrouter/free")
+    callAiService("get_transcription_config")
+      .then((json) => {
+        const cfg = json?.result
+        if (cfg && typeof cfg === "object") {
+          setTranscriptionEnabled(cfg.enabled !== false)
+          if (cfg.model) setTranscriptionModel(cfg.model)
+        }
+      })
+      .catch(() => {})
   }, [])
 
   const handleSave = async () => {
@@ -105,6 +128,21 @@ export default function AISettings() {
       toast.error("Erro ao salvar API Key")
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSaveTranscription = async () => {
+    setSavingTranscription(true)
+    try {
+      await callAiService("set_transcription_config", {
+        enabled: transcriptionEnabled,
+        model: transcriptionModel.trim(),
+      })
+      toast.success("Transcrição de áudio salva")
+    } catch {
+      toast.error("Erro ao salvar transcrição")
+    } finally {
+      setSavingTranscription(false)
     }
   }
 
@@ -228,6 +266,43 @@ export default function AISettings() {
               <Badge variant="destructive"><XCircle className="mr-1 h-3 w-3" /> Falhou</Badge>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Áudio → texto */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Transcrição de Áudios</CardTitle>
+          <CardDescription>
+            Transcreve áudios recebidos para o SDR IA entender e responder em texto.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={transcriptionEnabled}
+              onChange={(e) => setTranscriptionEnabled(e.target.checked)}
+              className="h-4 w-4 rounded border-input"
+            />
+            Transcrever áudios recebidos automaticamente
+          </label>
+          <div className="space-y-2">
+            <Label>Modelo de transcrição</Label>
+            <Input
+              placeholder="Ex: google/gemini-2.5-flash"
+              value={transcriptionModel}
+              onChange={(e) => setTranscriptionModel(e.target.value)}
+              disabled={!transcriptionEnabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              Modelo multimodal no OpenRouter (suporta entrada de áudio). Padrão: google/gemini-2.5-flash
+            </p>
+          </div>
+          <Button onClick={handleSaveTranscription} disabled={savingTranscription}>
+            {savingTranscription ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+            Salvar transcrição
+          </Button>
         </CardContent>
       </Card>
 

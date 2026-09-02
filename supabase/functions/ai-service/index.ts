@@ -1,5 +1,9 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL,
+  transcribeAudio,
+} from "../_shared/transcribe.ts";
 
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/free";
@@ -145,7 +149,7 @@ interface SuggestedReply {
 async function getConversationContext(supabase: Supabase, conversationId: string): Promise<string> {
   const { data: msgs } = await supabase
     .from("messages")
-    .select("direction, content, type, sent_at")
+    .select("direction, content, type, sent_at, transcription")
     .eq("conversation_id", conversationId)
     .order("sent_at", { ascending: true })
     .limit(50)
@@ -154,7 +158,10 @@ async function getConversationContext(supabase: Supabase, conversationId: string
 
   return msgs.map((m) => {
     const dir = m.direction === "inbound" ? "CLIENTE" : "VENDEDOR"
-    const content = m.type === "text" ? (m.content ?? "[mídia]") : `[${m.type}]`
+    let content: string
+    if (m.type === "text") content = m.content ?? "[mídia]"
+    else if (m.type === "audio" && m.transcription) content = `[áudio do cliente: ${m.transcription}]`
+    else content = `[${m.type}]`
     return `${dir}: ${content}`
   }).join("\n")
 }
@@ -405,6 +412,66 @@ Retorne APENAS o JSON.`
 }
 
 // ---------------------------------------------------------------------------
+// Transcrição de áudio (retprocesso / on-demand)
+// ---------------------------------------------------------------------------
+
+async function getTranscriptionConfig(supabase: Supabase): Promise<{ enabled: boolean; model: string }> {
+  try {
+    const { data } = await supabase
+      .from("activity_log")
+      .select("new_data")
+      .eq("entity_type", "ai_config")
+      .eq("action", "TRANSCRIPTION_CONFIG_UPDATED")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const d = (data?.new_data as any) ?? {};
+    return {
+      enabled: d.enabled !== false,
+      model: String(d.model || Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || DEFAULT_TRANSCRIPTION_MODEL),
+    };
+  } catch {
+    return { enabled: true, model: DEFAULT_TRANSCRIPTION_MODEL };
+  }
+}
+
+// Transcreve uma mensagem de áudio já salva no Storage. Retorna a transcrição
+// e grava em messages.transcription.
+async function transcribeAudioMessage(supabase: Supabase, messageId: string): Promise<{ transcript: string }> {
+  const { data: msg, error } = await supabase
+    .from("messages")
+    .select("id, type, media_url, transcription")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!msg) throw new Error("mensagem não encontrada");
+  if (msg.type !== "audio") throw new Error("mensagem não é um áudio");
+  if (msg.transcription) return { transcript: msg.transcription };
+  if (!msg.media_url) throw new Error("áudio sem mídia para transcrever");
+
+  const { data: blob, error: dlErr } = await supabase.storage
+    .from("whatsapp-media")
+    .download(msg.media_url);
+  if (dlErr || !blob) throw new Error(`falha ao baixar áudio: ${dlErr?.message ?? "vazio"}`);
+
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i]);
+  const base64 = btoa(binary);
+
+  const cfg = await getTranscriptionConfig(supabase);
+  const apiKey = await getApiKey(supabase);
+  const transcript = await transcribeAudio({
+    apiKey,
+    model: cfg.model,
+    base64,
+    mimetype: blob.type || "audio/ogg",
+  });
+  await supabase.from("messages").update({ transcription: transcript || null }).eq("id", messageId);
+  return { transcript };
+}
+
+// ---------------------------------------------------------------------------
 // Edge Function entry point
 // ---------------------------------------------------------------------------
 
@@ -468,6 +535,28 @@ Deno.serve(async (req) => {
         case "analyze_opportunity":
           result = await analyzeOpportunity(supabase, data.opportunity_id as string)
           break
+        case "transcribe_audio":
+          result = await transcribeAudioMessage(supabase, data.message_id as string)
+          break
+        case "set_transcription_config": {
+          await supabase.from("activity_log").insert({
+            entity_type: "ai_config",
+            entity_id: null,
+            action: "TRANSCRIPTION_CONFIG_UPDATED",
+            actor_id: user.id,
+            new_data: {
+              enabled: Boolean((data as any)?.enabled),
+              model: String((data as any)?.model ?? ""),
+            },
+          });
+          result = { ok: true }
+          break
+        }
+        case "get_transcription_config": {
+          const cfg = await getTranscriptionConfig(supabase)
+          result = cfg
+          break
+        }
         default:
           return jsonResponse(400, { error: `Unknown action: ${action}` })
       }

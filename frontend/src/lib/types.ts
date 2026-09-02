@@ -60,6 +60,7 @@ export type Message = {
     | "unknown"
   content: string | null
   media_url: string | null
+  transcription?: string | null
   status: "pending" | "sent" | "delivered" | "read" | "failed"
   sent_at: string
   created_at: string

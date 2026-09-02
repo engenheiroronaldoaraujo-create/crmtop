@@ -221,7 +221,7 @@ async function analyzeCandidate(
   // Get messages
   const { data: msgs } = await supabase
     .from("messages")
-    .select("direction, content, type, sent_at")
+    .select("direction, content, type, sent_at, transcription")
     .eq("conversation_id", candidate.conversation_id)
     .order("sent_at", { ascending: false })
     .limit(30);
@@ -232,7 +232,10 @@ async function analyzeCandidate(
       minute: "2-digit",
     });
     const dir = m.direction === "inbound" ? "cliente" : "vendedor";
-    const content = m.type === "text" ? (m.content ?? "[midia]") : `[${m.type}]`;
+    let content: string;
+    if (m.type === "text") content = m.content ?? "[midia]";
+    else if (m.type === "audio" && m.transcription) content = `[audio do cliente: ${m.transcription}]`;
+    else content = `[${m.type}]`;
     return `[${time} ${dir}] ${content}`;
   }).join("\n");
 

@@ -6,12 +6,58 @@ import {
   normalizeWhatsAppIdentity,
 } from "../_shared/evolution-identity.ts";
 import { createLidCacheStore, resolveLidPhone } from "../_shared/lid-phone-resolver.ts";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL,
+  shouldAttemptTranscription,
+  transcribeAudio,
+} from "../_shared/transcribe.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
+
+// Transcrição de áudio (best-effort): chave OpenRouter e config
+// (enabled/model) vêm do mesmo lugar que o resto da IA (activity_log).
+async function getOpenRouterKey(supabase: Supabase): Promise<string> {
+  if (OPENROUTER_API_KEY) return OPENROUTER_API_KEY;
+  try {
+    const { data } = await supabase
+      .from("activity_log")
+      .select("new_data")
+      .eq("entity_type", "ai_key")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return ((data?.new_data as any)?.key as string) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function getTranscriptionConfig(
+  supabase: Supabase,
+): Promise<{ enabled: boolean; model: string }> {
+  try {
+    const { data } = await supabase
+      .from("activity_log")
+      .select("new_data")
+      .eq("entity_type", "ai_config")
+      .eq("action", "TRANSCRIPTION_CONFIG_UPDATED")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const d = (data?.new_data as any) ?? {};
+    return {
+      enabled: d.enabled !== false,
+      model: String(d.model || Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || DEFAULT_TRANSCRIPTION_MODEL),
+    };
+  } catch {
+    return { enabled: true, model: DEFAULT_TRANSCRIPTION_MODEL };
+  }
+}
 
 interface EvolutionMedia {
   url?: string;
@@ -284,8 +330,10 @@ async function processMessage(
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
   let mediaUrl: string | null = null;
+  let audioBase64: string | null = null;
+  let audioMimetype: string | null = null;
   if (mediaMessage) {
-    const base64 = await downloadMediaBase64(instanceName, raw);
+    const base64 = await downloadMediaBase64(instanceName, raw as unknown as Record<string, unknown>);
     if (base64) {
       const ext = extFromMimetype(mediaMessage.mimetype ?? "", type);
       const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
@@ -296,10 +344,14 @@ async function processMessage(
         mediaMessage.mimetype ?? "application/octet-stream",
       );
       if (uploaded) mediaUrl = objectPath;
+      if (type === "audio" && !fromMe) {
+        audioBase64 = base64;
+        audioMimetype = mediaMessage.mimetype ?? "audio/ogg";
+      }
     }
   }
 
-  const { error } = await supabase.from("messages").upsert(
+  const { data: insertedRow, error } = await supabase.from("messages").upsert(
     {
       conversation_id: conversationId,
       evolution_message_id: evolutionId,
@@ -312,7 +364,10 @@ async function processMessage(
       status: "sent",
     },
     { onConflict: "conversation_id, evolution_message_id", ignoreDuplicates: true },
-  );
+  ).select("id").maybeSingle();
+
+  // Linha efetivamente nova? (ignoreDuplicates → null em reentrega/dedup).
+  const isNewMessage = Boolean(insertedRow?.id);
 
   if (error) {
     console.error("EVOLUTION_MESSAGE_INSERT_FAILED", error.message, { conversationId, evolutionId });
@@ -327,8 +382,49 @@ async function processMessage(
     p_inbound: !fromMe,
   });
 
-  // SDR IA: process inbound messages if enabled
-  if (!fromMe && phone) {
+  // Transcrição de áudio inbound (best-effort, só em linha nova — dedup evita
+  // re-transcrever). O texto resultante alimenta o SDR e as análises de IA.
+  let sdrContent = content;
+  if (
+    !fromMe &&
+    isNewMessage &&
+    type === "audio" &&
+    audioBase64 &&
+    insertedRow?.id
+  ) {
+    try {
+      const cfg = await getTranscriptionConfig(supabase);
+      if (
+        shouldAttemptTranscription({
+          enabled: cfg.enabled,
+          isAudio: true,
+          isFromMe: false,
+          base64Length: audioBase64.length,
+        })
+      ) {
+        const apiKey = await getOpenRouterKey(supabase);
+        const transcript = await transcribeAudio({
+          apiKey,
+          model: cfg.model,
+          base64: audioBase64,
+          mimetype: audioMimetype ?? "audio/ogg",
+        });
+        if (transcript) {
+          await supabase.from("messages").update({ transcription: transcript }).eq("id", insertedRow.id);
+          sdrContent = transcript;
+          console.info("AUDIO_TRANSCRIBED", evolutionId, `chars=${transcript.length}`);
+        } else {
+          console.info("AUDIO_TRANSCRIPTION_EMPTY", evolutionId);
+        }
+      }
+    } catch (err) {
+      console.warn("AUDIO_TRANSCRIBE_FAILED", evolutionId, String(err));
+    }
+  }
+
+  // SDR IA: processa inbound NOVO se habilitado. Reentregas/backfill de
+  // reconciliação não re-gatilham resposta automática.
+  if (!fromMe && phone && isNewMessage) {
     try {
       const { data: sdrSettings } = await supabase
         .from("sdr_settings")
@@ -348,11 +444,11 @@ async function processMessage(
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 
         if (!isPaused && !inCooldown) {
-          await callSDREngine(supabase, conversationId, contactId, content, instanceName, evolutionId)
+          await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, evolutionId)
         }
       }
     } catch (e) {
-      console.error("SDR_INTEGRATION_ERROR", String(e), e?.stack)
+      console.error("SDR_INTEGRATION_ERROR", String(e), e instanceof Error ? e.stack : undefined)
     }
   }
 }

@@ -176,6 +176,16 @@ function MessageBubble({ msg }: { msg: Message }) {
         )}
       >
         {msg.media_url && <MediaMessage msg={msg} />}
+        {msg.type === "audio" && msg.transcription && (
+          <p
+            className={cn(
+              "max-w-xs border-t pt-1 text-[11px] italic leading-snug",
+              outbound ? "border-white/20 text-primary-foreground/80" : "border-border text-muted-foreground",
+            )}
+          >
+            {msg.transcription}
+          </p>
+        )}
         {msg.content && (
           <p className="whitespace-pre-wrap break-words">{msg.content}</p>
         )}

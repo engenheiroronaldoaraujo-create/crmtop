@@ -521,7 +521,7 @@ async function processMessage(
   // 10. Get RECENT messages for context (last 15 messages)
   const { data: recentMsgs } = await supabase
     .from("messages")
-    .select("direction, content, type")
+    .select("direction, content, type, transcription")
     .eq("conversation_id", conversationId)
     .order("sent_at", { ascending: false })
     .limit(15)
@@ -532,6 +532,7 @@ async function processMessage(
     .map((m: any) => {
       const label = m.direction === "inbound" ? "CLIENTE" : "SOFIA"
       if (m.content) return `${label}: ${m.content}`
+      if (m.type === "audio" && m.transcription) return `${label} (áudio transcrito): ${m.transcription}`
       if (m.type === "audio") return `${label}: [audio]`
       if (m.type === "image") return `${label}: [imagem]`
       if (m.type === "video") return `${label}: [video]`
