@@ -51,7 +51,7 @@ Deno.test("shouldAttemptTranscription — rejeita áudio acima do limite de payl
   );
 });
 
-Deno.test("buildTranscriptionRequest — content part input_audio com data URI", () => {
+Deno.test("buildTranscriptionRequest — content part input_audio com base64 puro", () => {
   const body = buildTranscriptionRequest({
     model: "google/gemini-2.5-flash",
     base64: "QUJD",
@@ -62,7 +62,7 @@ Deno.test("buildTranscriptionRequest — content part input_audio com data URI",
   const parts = body.messages[0].content;
   assertEquals(parts[0].type, "text");
   assertEquals(parts[1].type, "input_audio");
-  assertEquals(parts[1].input_audio.data, "data:;base64,QUJD");
+  assertEquals(parts[1].input_audio.data, "QUJD");
   assertEquals(parts[1].input_audio.format, "ogg");
 });
 

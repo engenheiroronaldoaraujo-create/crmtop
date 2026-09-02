@@ -62,7 +62,7 @@ export function buildTranscriptionRequest(opts: {
           {
             type: "input_audio",
             input_audio: {
-              data: `data:;base64,${opts.base64}`,
+              data: opts.base64,
               format: pickAudioFormat(opts.mimetype),
             },
           },
