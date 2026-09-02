@@ -581,10 +581,16 @@ async function handleConnectionUpdate(
 // chegarem ao WhatsApp sem nunca invocar este webhook — buraco silencioso que
 // já perdeu mensagens reais de clientes. Ao reconectar, reimportamos as
 // últimas mensagens das conversas movimentadas na janela. Best-effort.
+//
+// A fonte da verdade é a store da EVOLUTION (`findChats`), não o banco do CRM:
+// leads novos (primeira mensagem de anúncio) não têm conversa no Postgres e
+// eram justamente os que sumiam. O dedup por evolution_message_id torna o
+// reprocesso idempotente.
 const RECONCILE_WINDOW_DAYS = 3;
-const RECONCILE_MAX_CONVERSATIONS = 25;
+const RECONCILE_MAX_CONVERSATIONS = 60;
 const RECONCILE_FETCH_LIMIT = 30;
 const RECONCILE_FETCH_TIMEOUT_MS = 8000;
+const RECONCILE_FINDCHATS_TIMEOUT_MS = 15000;
 
 /** Normaliza as formas de resposta do fetchMessages para uma lista de linhas. */
 function extractMessageRows(payload: unknown): Record<string, unknown>[] {
@@ -622,37 +628,69 @@ async function reconcileInstanceMessages(
 ): Promise<void> {
   if (!EVOLUTION_API_URL || !EVOLUTION_API_KEY) return;
   const started = Date.now();
-  const since = new Date(started - RECONCILE_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const sinceSec = Math.floor((started - RECONCILE_WINDOW_DAYS * 24 * 60 * 60 * 1000) / 1000);
 
-  const { data: convs } = await supabase
-    .from("conversations")
-    .select("id, last_message_at, contact:contacts(jid, phone, lid)")
-    .eq("instance_id", instanceId)
-    .gte("last_message_at", since)
-    .order("last_message_at", { ascending: false })
-    .limit(RECONCILE_MAX_CONVERSATIONS);
+  // 1) Fonte primária: a store da Evolution (inclui conversas que o CRM nunca viu).
+  const remoteJids: string[] = [];
+  try {
+    const res = await fetch(`${EVOLUTION_API_URL}/chat/findChats/${instanceName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY },
+      body: "{}",
+      signal: AbortSignal.timeout(RECONCILE_FINDCHATS_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const json = await res.json().catch(() => null);
+      const chats: any[] = Array.isArray(json) ? json : (json?.chats ?? json?.response ?? []);
+      const scored = chats
+        .filter((c) => c && !c.isGroup)
+        .map((c) => ({
+          jid: String(c.remoteJid ?? c.id ?? ""),
+          ts: Number(c.conversationTimestamp ?? c.lastMessage?.messageTimestamp ?? c.lastMsgTimestamp ?? 0),
+        }))
+        .filter(({ jid, ts }) => /@(s\.whatsapp\.net|lid)$/.test(jid) && ts >= sinceSec)
+        .sort((a, b) => b.ts - a.ts);
+      for (const { jid } of scored) {
+        if (remoteJids.length >= RECONCILE_MAX_CONVERSATIONS) break;
+        remoteJids.push(jid);
+      }
+    }
+  } catch (err) {
+    console.warn("EVOLUTION_RECONCILE_FINDCHATS_FAILED", String(err));
+  }
 
-  const rows = (convs ?? []) as unknown as Array<{
-    id: string;
-    last_message_at: string | null;
-    contact?: { jid?: string | null; phone?: string | null; lid?: string | null } | null;
-  }>;
-  if (rows.length === 0) return;
+  // 2) Fallback: se a store não respondeu, usa as conversas do banco (comportamento antigo).
+  if (remoteJids.length === 0) {
+    const since = new Date(started - RECONCILE_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const { data: convs } = await supabase
+      .from("conversations")
+      .select("id, last_message_at, contact:contacts(jid, phone, lid)")
+      .eq("instance_id", instanceId)
+      .gte("last_message_at", since)
+      .order("last_message_at", { ascending: false })
+      .limit(RECONCILE_MAX_CONVERSATIONS);
+    for (const conv of (convs ?? []) as unknown as Array<{
+      id: string;
+      contact?: { jid?: string | null; phone?: string | null; lid?: string | null } | null;
+    }>) {
+      const jid = conversationRemoteJid(conv.contact ?? {});
+      if (jid) remoteJids.push(jid);
+    }
+  }
 
-  console.info("EVOLUTION_RECONCILE_STARTED", instanceName, `chats=${rows.length}`);
+  if (remoteJids.length === 0) return;
+
+  console.info("EVOLUTION_RECONCILE_STARTED", instanceName, `chats=${remoteJids.length}`);
   let fetched = 0;
   let processed = 0;
 
-  for (const conv of rows) {
-    const remoteJid = conversationRemoteJid(conv.contact ?? {});
-    if (!remoteJid) continue;
-
+  for (const remoteJid of remoteJids) {
     let res: Response;
     try {
-      res = await fetch(`${EVOLUTION_API_URL}/chat/fetchMessages/${instanceName}`, {
+      res = await fetch(`${EVOLUTION_API_URL}/chat/findMessages/${instanceName}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", apikey: EVOLUTION_API_KEY },
-        body: JSON.stringify({ where: { remoteJid }, limit: RECONCILE_FETCH_LIMIT }),
+        body: JSON.stringify({ page: 1, limit: RECONCILE_FETCH_LIMIT, remoteJid }),
         signal: AbortSignal.timeout(RECONCILE_FETCH_TIMEOUT_MS),
       });
     } catch {
