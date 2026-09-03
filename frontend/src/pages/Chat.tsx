@@ -209,15 +209,22 @@ function MessageBubble({ msg, onRetry }: { msg: Message; onRetry?: (m: Message) 
         {!msg.content && !msg.media_url && msg.type === "unknown" && (
           <p className="italic opacity-70">Mensagem não suportada</p>
         )}
-        {outbound && msg.status === "failed" && onRetry && msg.id.startsWith("optimistic-") && (
+        {outbound && msg.status === "failed" && (
           <div className="text-right">
-            <button
-              type="button"
-              onClick={() => onRetry(msg)}
-              className="text-[11px] font-medium underline underline-offset-2"
-            >
-              Tentar novamente
-            </button>
+            {msg.send_error && (
+              <p className="mb-0.5 text-[10px] leading-tight opacity-90">
+                Erro: {msg.send_error.split("\n")[0].slice(0, 90)}
+              </p>
+            )}
+            {onRetry && msg.type === "text" && msg.id.startsWith("optimistic-") && (
+              <button
+                type="button"
+                onClick={() => onRetry(msg)}
+                className="text-[11px] font-medium underline underline-offset-2"
+              >
+                Tentar novamente
+              </button>
+            )}
           </div>
         )}
         <p

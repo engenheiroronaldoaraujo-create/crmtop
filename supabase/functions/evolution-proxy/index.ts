@@ -161,6 +161,7 @@ async function recordOutboundMessage(
     content: string | null;
     mediaUrl: string | null;
     sentAt: string;
+    sendError?: string | null;
   },
   status: "sent" | "failed" = "sent",
 ): Promise<{ conversationId: string; messageId: string | null }> {
@@ -178,6 +179,7 @@ async function recordOutboundMessage(
       media_url: msg.mediaUrl,
       sent_at: msg.sentAt,
       status,
+      send_error: msg.sendError ?? null,
     },
     { onConflict: "conversation_id, evolution_message_id" },
   ).select("id").maybeSingle();
@@ -380,6 +382,7 @@ async function actionSendText(
         content: text,
         mediaUrl: null,
         sentAt,
+        sendError: respText.slice(0, 300),
       }, "failed");
       return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
     }
@@ -410,6 +413,7 @@ async function actionSendText(
         content: text,
         mediaUrl: null,
         sentAt,
+        sendError: String(err).slice(0, 300),
       }, "failed");
     } catch (recordErr) {
       console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
@@ -451,8 +455,11 @@ async function actionSendMedia(
   }
 
   const fileType = file.type ?? "";
+  // HEIC/HEIF (fotos de iPhone) são rejeitados pelo Baileys como "image" —
+  // enviam como documento (WhatsApp abre normalmente).
+  const INLINE_IMAGE_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"]);
   let mediatype = "document";
-  if (fileType.startsWith("image/")) mediatype = "image";
+  if (INLINE_IMAGE_TYPES.has(fileType)) mediatype = "image";
   else if (fileType.startsWith("video/")) mediatype = "video";
   else if (fileType.startsWith("audio/")) mediatype = "audio";
   const fileName = String(formData.get("fileName") ?? "file");
@@ -468,28 +475,41 @@ async function actionSendMedia(
   const typeMap: Record<string, string> = { image: "image", video: "video", audio: "audio", document: "document" };
   const msgType = typeMap[mediatype] ?? "document";
 
+  // Uma retomada em erro transitório 5xx da Evolution (comum em uploads
+  // grandes/volume alto) antes de marcar como falha.
   let res: Response;
+  let resText = "";
   try {
     res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
       method: "POST",
       headers: { apikey: EVOLUTION_API_KEY },
       body: form,
     });
+    resText = await res.text();
+    if (res.status >= 500) {
+      await new Promise((r) => setTimeout(r, 1200));
+      res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
+        method: "POST",
+        headers: { apikey: EVOLUTION_API_KEY },
+        body: form,
+      });
+      resText = await res.text();
+    }
   } catch (err) {
     try {
       await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
         evolutionId: null,
         type: msgType,
-        content: caption || null,
+        content: caption || fileName,
         mediaUrl: null,
         sentAt,
+        sendError: String(err).slice(0, 300),
       }, "failed");
     } catch (recordErr) {
       console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
     }
     throw err;
   }
-  const resText = await res.text();
   let data: any = null;
   try {
     data = resText ? JSON.parse(resText) : null;
@@ -500,9 +520,10 @@ async function actionSendMedia(
     await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
       evolutionId: null,
       type: msgType,
-      content: caption || null,
+      content: caption || fileName,
       mediaUrl: null,
       sentAt,
+      sendError: resText.slice(0, 300),
     }, "failed");
     return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
