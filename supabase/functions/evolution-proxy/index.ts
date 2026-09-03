@@ -464,34 +464,57 @@ async function actionSendMedia(
   else if (fileType.startsWith("audio/")) mediatype = "audio";
   const fileName = String(formData.get("fileName") ?? "file");
 
-  const form = new FormData();
-  form.append("number", sendTarget);
-  form.append("mediatype", mediatype);
-  form.append("media", file, fileName);
-  if (caption) form.append("caption", caption);
-  if (fileName) form.append("fileName", fileName);
-
   const sentAt = new Date().toISOString();
   const typeMap: Record<string, string> = { image: "image", video: "video", audio: "audio", document: "document" };
   const msgType = typeMap[mediatype] ?? "document";
 
-  // Uma retomada em erro transitório 5xx da Evolution (comum em uploads
-  // grandes/volume alto) antes de marcar como falha.
+  // Esta build da Evolution rejeita multipart no sendMedia ("Unexpected
+  // field"); aceita media como base64 JSON + isBase64: true (testado ao vivo).
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch {
+    return jsonResponse(400, { error: "falha ao ler o arquivo enviado" });
+  }
+  if (bytes.length > 20 * 1024 * 1024) {
+    return jsonResponse(400, { error: "arquivo muito grande (máx. 20 MB)" });
+  }
+  const CHUNK = 8192;
+  let binaryStr = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binaryStr += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  const mediaBase64 = btoa(binaryStr);
+
   let res: Response;
   let resText = "";
   try {
     res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
       method: "POST",
-      headers: { apikey: EVOLUTION_API_KEY },
-      body: form,
+      headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        number: sendTarget,
+        mediatype,
+        media: mediaBase64,
+        isBase64: true,
+        fileName,
+        ...(caption ? { caption } : {}),
+      }),
     });
     resText = await res.text();
     if (res.status >= 500) {
       await new Promise((r) => setTimeout(r, 1200));
       res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
         method: "POST",
-        headers: { apikey: EVOLUTION_API_KEY },
-        body: form,
+        headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          number: sendTarget,
+          mediatype,
+          media: mediaBase64,
+          isBase64: true,
+          fileName,
+          ...(caption ? { caption } : {}),
+        }),
       });
       resText = await res.text();
     }
@@ -540,11 +563,10 @@ async function actionSendMedia(
     sentAt,
   }, "sent");
 
+  const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
+  const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
   (async () => {
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
-      const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
       const { error: uploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
@@ -1578,6 +1600,7 @@ Deno.serve(async (req) => {
 
   try {
     const supabase = serviceClient();
+
 
     const contentType = req.headers.get("content-type") ?? "";
     let body: any = {};
