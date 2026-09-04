@@ -10,6 +10,8 @@ import { useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   ArrowLeft,
+  Bell,
+  BellOff,
   Check,
   CheckCheck,
   CheckCircle2,
@@ -30,6 +32,12 @@ import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
 import { getSignedMediaUrl } from "@/lib/media-cache"
+import {
+  isAlertMuted,
+  playNewMessageAlert,
+  setAlertMuted,
+  unlockAlertSound,
+} from "@/lib/alert-sound"
 import { proxyLinkConversationPhone, proxySendMedia, proxySendText } from "@/lib/api"
 import {
   contactDisplayName,
@@ -89,27 +97,6 @@ import {
 type Filter = "all" | "mine" | "unassigned"
 
 const MESSAGE_PAGE_SIZE = 200
-
-// Bip curto via WebAudio (sem asset) para avisar inbound fora da conversa aberta.
-let beepCtx: AudioContext | null = null
-function playInboundBeep() {
-  try {
-    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-    if (!Ctx) return
-    beepCtx = beepCtx ?? new Ctx()
-    const osc = beepCtx.createOscillator()
-    const gain = beepCtx.createGain()
-    osc.frequency.value = 880
-    gain.gain.setValueAtTime(0.001, beepCtx.currentTime)
-    gain.gain.exponentialRampToValueAtTime(0.15, beepCtx.currentTime + 0.02)
-    gain.gain.exponentialRampToValueAtTime(0.001, beepCtx.currentTime + 0.25)
-    osc.connect(gain).connect(beepCtx.destination)
-    osc.start()
-    osc.stop(beepCtx.currentTime + 0.26)
-  } catch {
-    // silencioso: áudio é cortesia, nunca pode quebrar o chat
-  }
-}
 
 function MediaMessage({ msg }: { msg: Message }) {
   const [url, setUrl] = useState<string | null>(null)
@@ -665,12 +652,41 @@ export default function ChatPage() {
     }
   }, [loadConversations])
 
-  // Aviso de inbound em qualquer conversa: bip curto quando a mensagem chega
-  // em conversa que não está aberta na tela.
+  // Aviso de inbound em qualquer conversa: alerta sonoro/vibração quando a
+  // mensagem chega em conversa que não está aberta na tela.
   const selectedIdRef = useRef<string | null>(null)
   useEffect(() => {
     selectedIdRef.current = selectedId
   }, [selectedId])
+  const pendingAlertRef = useRef(0)
+  const alertTimerRef = useRef<number | undefined>(undefined)
+  function queueInboundAlert() {
+    pendingAlertRef.current += 1
+    window.clearTimeout(alertTimerRef.current)
+    alertTimerRef.current = window.setTimeout(() => {
+      playNewMessageAlert(pendingAlertRef.current)
+      pendingAlertRef.current = 0
+    }, 500)
+  }
+  const [alertMuted, setAlertMutedState] = useState(() => isAlertMuted())
+  function toggleAlertMuted() {
+    const next = !isAlertMuted()
+    setAlertMuted(next)
+    setAlertMutedState(next)
+    if (!next) playNewMessageAlert(1)
+  }
+
+  // Navegadores mobile só liberam áudio após um gesto: desbloqueia no 1º toque.
+  useEffect(() => {
+    const unlock = () => unlockAlertSound()
+    window.addEventListener("pointerdown", unlock, { once: true })
+    window.addEventListener("keydown", unlock, { once: true })
+    return () => {
+      window.removeEventListener("pointerdown", unlock)
+      window.removeEventListener("keydown", unlock)
+    }
+  }, [])
+
   useEffect(() => {
     const channel = supabase
       .channel("crm-inbound-alert")
@@ -684,7 +700,7 @@ export default function ChatPage() {
         },
         (payload) => {
           const msg = payload.new as Message
-          if (msg.conversation_id !== selectedIdRef.current) playInboundBeep()
+          if (msg.conversation_id !== selectedIdRef.current) queueInboundAlert()
         },
       )
       .subscribe()
@@ -1133,6 +1149,18 @@ export default function ChatPage() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={toggleAlertMuted}
+                  title={alertMuted ? "Ativar alerta sonoro" : "Silenciar alerta sonoro"}
+                >
+                  {alertMuted ? (
+                    <BellOff className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <Bell className="h-4 w-4" />
+                  )}
+                </Button>
                 {selected.assigned_to === user?.id ? (
                   <Badge variant="secondary">Atribuída a você</Badge>
                 ) : selected.assigned_to ? (
