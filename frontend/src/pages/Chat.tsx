@@ -652,12 +652,8 @@ export default function ChatPage() {
     }
   }, [loadConversations])
 
-  // Aviso de inbound em qualquer conversa: alerta sonoro/vibração quando a
-  // mensagem chega em conversa que não está aberta na tela.
-  const selectedIdRef = useRef<string | null>(null)
-  useEffect(() => {
-    selectedIdRef.current = selectedId
-  }, [selectedId])
+  // Aviso de inbound em qualquer conversa (inclusive a aberta na tela):
+  // alerta sonoro/vibração a cada mensagem recebida.
   const pendingAlertRef = useRef(0)
   const alertTimerRef = useRef<number | undefined>(undefined)
   function queueInboundAlert() {
@@ -700,7 +696,7 @@ export default function ChatPage() {
         },
         (payload) => {
           const msg = payload.new as Message
-          if (msg.conversation_id !== selectedIdRef.current) queueInboundAlert()
+          if (msg.direction === "inbound") queueInboundAlert()
         },
       )
       .subscribe()
