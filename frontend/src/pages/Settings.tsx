@@ -4,6 +4,7 @@ import WhatsAppSettings from "@/pages/WhatsAppSettings"
 import AISettings from "@/pages/AISettings"
 import SDRSettings from "@/pages/SDRSettings"
 import TemplatesSettings from "@/pages/TemplatesSettings"
+import ApkSettings from "@/pages/ApkSettings"
 
 export default function SettingsPage() {
   return (
@@ -17,6 +18,7 @@ export default function SettingsPage() {
             <TabsTrigger value="users">Usuários</TabsTrigger>
             <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>
             <TabsTrigger value="templates">Templates</TabsTrigger>
+            <TabsTrigger value="app">App Android</TabsTrigger>
             <TabsTrigger value="ai">Inteligência Artificial</TabsTrigger>
             <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
@@ -28,6 +30,9 @@ export default function SettingsPage() {
           </TabsContent>
           <TabsContent value="templates">
             <TemplatesSettings />
+          </TabsContent>
+          <TabsContent value="app">
+            <ApkSettings />
           </TabsContent>
           <TabsContent value="ai">
             <AISettings />

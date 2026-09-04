@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom"
 import { MessageCircle } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
+import { APK_DOWNLOAD_URL } from "@/lib/apk"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -40,7 +41,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex h-screen items-center justify-center bg-muted/40">
+    <div className="flex h-screen flex-col items-center justify-center gap-4 bg-muted/40">
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center space-y-2 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
@@ -87,6 +88,12 @@ export default function LoginPage() {
           </form>
         </CardContent>
       </Card>
+      <a
+        href={APK_DOWNLOAD_URL}
+        className="text-sm text-primary underline underline-offset-4"
+      >
+        Baixar app Android (APK)
+      </a>
     </div>
   )
 }
