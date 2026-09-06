@@ -14,6 +14,7 @@ import {
   ensureZernioProfile,
   getZernioConnection,
   getZernioKey,
+  metaCooldownRemainingMinutes,
   normalizeE164,
   requireConnected,
   zernioRequest,
@@ -21,6 +22,7 @@ import {
   ZERNIO_API_KEY_NAME,
   ZERNIO_WEBHOOK_SECRET_NAME,
   ZERNIO_WEBHOOK_TOKEN_NAME,
+  ZernioApiError,
 } from "../_shared/zernio.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -104,8 +106,10 @@ async function actionSetApiKey(
 async function actionGetConfig(supabase: Supabase): Promise<Response> {
   const key = await getZernioKey(supabase);
   const conn = await getZernioConnection(supabase);
+  const cooldownMin = await metaCooldownRemainingMinutes(supabase);
   return jsonResponse(200, {
     has_api_key: Boolean(key),
+    meta_cooldown_minutes: cooldownMin,
     connection: conn
       ? {
           profile_id: conn.profile_id,
@@ -966,6 +970,10 @@ Deno.serve(async (req) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("zernio-proxy error", err);
+    if (err instanceof ZernioApiError) {
+      const status = err.status >= 400 && err.status < 500 ? err.status : 502;
+      return jsonResponse(status, { error: err.message });
+    }
     const status = err instanceof Error && /Zernio 4\d\d/.test(err.message) ? 400 : 500;
     return jsonResponse(status, { error: err instanceof Error ? err.message : "internal error" });
   }

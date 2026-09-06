@@ -3,8 +3,45 @@ import {
   buildBroadcastTemplate,
   chunk,
   countTemplatePlaceholders,
+  META_COOLDOWN_KEY,
+  metaCooldownRemainingMinutes,
   normalizeE164,
 } from "./zernio.ts";
+import type { Supabase } from "./contacts.ts";
+
+function sbWithSecret(value: string | null): Supabase {
+  return {
+    from: () => ({
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => ({ data: value ? { value } : null }),
+        }),
+      }),
+    }),
+  } as unknown as Supabase;
+}
+
+Deno.test("metaCooldownRemainingMinutes: sem registro = livre", async () => {
+  assertEquals(await metaCooldownRemainingMinutes(sbWithSecret(null)), 0);
+});
+
+Deno.test("metaCooldownRemainingMinutes: timestamp no passado = livre", async () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  assertEquals(await metaCooldownRemainingMinutes(sbWithSecret(past)), 0);
+});
+
+Deno.test("metaCooldownRemainingMinutes: futuro retorna minutos restantes", async () => {
+  const future = new Date(Date.now() + 10 * 60_000).toISOString();
+  assertEquals(await metaCooldownRemainingMinutes(sbWithSecret(future)), 10);
+});
+
+Deno.test("metaCooldownRemainingMinutes: valor inválido = livre", async () => {
+  assertEquals(await metaCooldownRemainingMinutes(sbWithSecret("não-é-data")), 0);
+});
+
+Deno.test("META_COOLDOWN_KEY é estável", () => {
+  assertEquals(META_COOLDOWN_KEY, "zernio_meta_cooldown_until");
+});
 
 Deno.test("normalizeE164: dígitos BR sem '+' viram E.164", () => {
   assertEquals(normalizeE164("5511999998888"), "+5511999998888");

@@ -4,7 +4,7 @@
 // nunca é exposta ao navegador. Toda chamada sai daqui, das Edge Functions.
 
 import type { Supabase } from "./contacts.ts";
-import { getSecret } from "./secrets.ts";
+import { getSecret, setSecret } from "./secrets.ts";
 
 export const ZERNIO_API_URL = "https://zernio.com/api/v1";
 export const ZERNIO_PROFILE_NAME = "CRM TOP";
@@ -111,7 +111,46 @@ export async function getZernioConnection(
   return (data as ZernioConnection) ?? null;
 }
 
-/** Chamada autenticada à API Zernio. Lança ZernioApiError com o status HTTP. */
+/**
+ * Chamada autenticada à API Zernio. Lança ZernioApiError com o status HTTP.
+ *
+ * Conformidade com as boas práticas de rate limit da Meta (Graph API):
+ * a API de Gerenciamento do WhatsApp (message_templates etc.) tem cota por
+ * WABA (200–5.000 chamadas/h) e, ao bater o limite (#80008), CONTINUAR
+ * chamando prolonga o bloqueio. Por isso, em erro de limite marcamos um
+ * cooldown local e recusamos chamadas de gerenciamento até ele expirar —
+ * em vez de ficar tentando de novo em segundos.
+ */
+export const META_COOLDOWN_KEY = "zernio_meta_cooldown_until";
+export const META_COOLDOWN_MINUTES = 40;
+const META_MANAGEMENT_PATHS = ["/whatsapp/templates", "/whatsapp/template-library"];
+
+function isMetaManagementPath(path: string): boolean {
+  return META_MANAGEMENT_PATHS.some((p) => path.startsWith(p));
+}
+
+export class MetaRateLimitedError extends ZernioApiError {
+  constructor(message: string) {
+    super(message, 429);
+    this.name = "MetaRateLimitedError";
+  }
+}
+
+/** Minutos restantes de cooldown da Meta (0 quando livre). */
+export async function metaCooldownRemainingMinutes(sb: Supabase): Promise<number> {
+  const raw = await getSecret(sb, META_COOLDOWN_KEY);
+  if (!raw) return 0;
+  const until = Date.parse(raw);
+  if (Number.isNaN(until)) return 0;
+  return Math.max(0, Math.ceil((until - Date.now()) / 60_000));
+}
+
+async function markMetaCooldown(sb: Supabase): Promise<number> {
+  const until = new Date(Date.now() + META_COOLDOWN_MINUTES * 60_000).toISOString();
+  await setSecret(sb, META_COOLDOWN_KEY, until);
+  return META_COOLDOWN_MINUTES;
+}
+
 export async function zernioRequest(
   sb: Supabase,
   path: string,
@@ -123,6 +162,16 @@ export async function zernioRequest(
 ): Promise<any> {
   const key = await getZernioKey(sb);
   if (!key) throw new ZernioApiError("Zernio API key não configurada", 400);
+
+  if (isMetaManagementPath(path)) {
+    const remaining = await metaCooldownRemainingMinutes(sb);
+    if (remaining > 0) {
+      throw new MetaRateLimitedError(
+        `A Meta limitou temporariamente as chamadas de gerenciamento desta conta. ` +
+          `Aguarde ~${remaining} min antes de tentar de novo (tentativas antes disso prolongam o bloqueio).`,
+      );
+    }
+  }
 
   const url = new URL(`${ZERNIO_API_URL}${path}`);
   for (const [k, v] of Object.entries(opts.query ?? {})) {
@@ -153,10 +202,12 @@ export async function zernioRequest(
       (typeof data?.error?.message === "string" && data.error.message) ||
       text.slice(0, 300) ||
       res.statusText;
-    if (/#\s*80008|too many calls/i.test(detail)) {
-      detail =
-        "Meta limitou temporariamente as chamadas desta conta (rate limit). " +
-        "Aguarde alguns minutos e tente novamente.";
+    if (/#\s*80008|too many calls to this WhatsApp Business/i.test(detail)) {
+      const mins = isMetaManagementPath(path) ? await markMetaCooldown(sb) : META_COOLDOWN_MINUTES;
+      throw new MetaRateLimitedError(
+        `A Meta limitou temporariamente as chamadas desta conta (rate limit). ` +
+          `Pausamos chamadas de gerenciamento por ~${mins} min — tentar antes disso prolonga o bloqueio.`,
+      );
     }
     throw new ZernioApiError(`Zernio ${res.status}: ${detail}`, res.status);
   }
@@ -164,8 +215,10 @@ export async function zernioRequest(
 }
 
 /**
- * zernioRequest com retentativas para erros transitórios de rate limit da
- * Meta (#80008 / HTTP 429). Backoff: 3s, 10s, 30s.
+ * zernioRequest com retentativas PARA ERROS TRANSITÓRIOS DO LADO ZERNIO
+ * (429/5xx da própria Zernio). Erro de rate limit da Meta (#80008) NÃO é
+ * re-tentado: vira cooldown (ver boas práticas da Meta — "pare de chamar
+ * quando o limite foi atingido").
  */
 export async function zernioRequestRetry(
   sb: Supabase,
@@ -175,19 +228,20 @@ export async function zernioRequestRetry(
     query?: Record<string, string | number | undefined>;
     body?: unknown;
   } = {},
-  attempts = 3,
+  attempts = 2,
 ): Promise<any> {
-  const delaysMs = [3_000, 10_000, 30_000];
+  const delaysMs = [3_000, 15_000];
   let lastErr: unknown;
   for (let i = 0; i <= attempts; i++) {
     try {
       return await zernioRequest(sb, path, opts);
     } catch (err) {
       lastErr = err;
+      if (err instanceof MetaRateLimitedError) break; // cooldown, não retry
       const msg = err instanceof Error ? err.message : "";
-      const transient = /#\s*80008|too many calls|rate limit|Zernio 429/i.test(msg);
+      const transient = /Zernio 429|Zernio 5\d\d/i.test(msg);
       if (!transient || i === attempts) break;
-      await new Promise((r) => setTimeout(r, delaysMs[i] ?? 30_000));
+      await new Promise((r) => setTimeout(r, delaysMs[i] ?? 15_000));
     }
   }
   throw lastErr;

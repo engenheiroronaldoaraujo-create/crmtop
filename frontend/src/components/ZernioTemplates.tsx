@@ -3,7 +3,7 @@ import { BookMarked, Plus, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { zernioCreateTemplate, zernioImportLibraryTemplate, zernioSyncTemplates } from "@/lib/api"
+import { zernioCreateTemplate, zernioGetConfig, zernioImportLibraryTemplate, zernioSyncTemplates } from "@/lib/api"
 import type { ZernioTemplate } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -74,6 +74,13 @@ export function ZernioTemplates() {
   const [form, setForm] = useState<CreateForm | null>(null)
   const [libForm, setLibForm] = useState<LibraryForm | null>(null)
   const [saving, setSaving] = useState(false)
+  const [cooldownMin, setCooldownMin] = useState(0)
+
+  useEffect(() => {
+    zernioGetConfig()
+      .then((data) => setCooldownMin(Number(data?.meta_cooldown_minutes) || 0))
+      .catch(() => {})
+  }, [saving])
 
   const refresh = useCallback(async () => {
     const { data, error } = await supabase
@@ -160,6 +167,13 @@ export function ZernioTemplates() {
 
   return (
     <div className="space-y-4">
+      {cooldownMin > 0 && (
+        <p className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm text-muted-foreground">
+          A Meta limitou temporariamente as chamadas de gerenciamento desta conta
+          (rate limit). Novas tentativas antes de ~{cooldownMin} min prolongam o
+          bloqueio — aguarde; a sincronização volta sozinha.
+        </p>
+      )}
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
           Templates oficiais aprovados pela Meta — obrigatórios para iniciar
