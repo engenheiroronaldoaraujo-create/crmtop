@@ -869,7 +869,10 @@ async function actionCampaignSend(
   body: { campaign_id?: string },
 ): Promise<Response> {
   const campaign = await getCampaignOr404(supabase, String(body.campaign_id));
-  if (!["draft", "scheduled"].includes(campaign.status)) {
+  if (campaign.send_mode === "direct" && campaign.status === "sending") {
+    // Retomada: o frontend fechou no meio de um envio individual; continua os
+    // destinatários ainda pendentes.
+  } else if (!["draft", "scheduled"].includes(campaign.status)) {
     return jsonResponse(400, { error: `campanha ${campaign.status}: só drafts/agendadas enviam` });
   }
 

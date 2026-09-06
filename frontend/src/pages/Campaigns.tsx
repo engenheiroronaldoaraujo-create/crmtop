@@ -795,11 +795,37 @@ function CampaignDetail({
     }
   }
 
+  async function sendNowLoop() {
+    try {
+      if (campaign && campaign.send_mode === "direct") {
+        let remaining = Infinity
+        let guard = 0
+        while (remaining > 0 && guard < 200) {
+          const r = await zernioCampaignSend(campaign.id)
+          remaining = Number(r?.remaining ?? 0)
+          guard += 1
+          if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
+        }
+        toast.success("Envio concluído")
+      } else if (campaign) {
+        await zernioCampaignSend(campaign.id)
+        toast.success("Envio iniciado")
+      }
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao enviar")
+    }
+  }
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
   if (!campaign) return <p className="text-muted-foreground">Campanha não encontrada.</p>
 
   const sm = CAMPAIGN_STATUS[campaign.status]
   const active = campaign.status === "sending" || campaign.status === "scheduled"
+  const directPending =
+    campaign.send_mode === "direct" &&
+    campaign.status === "sending" &&
+    campaign.recipient_count > campaign.sent_count + campaign.failed_count
 
   return (
     <div className="space-y-4">
@@ -813,34 +839,15 @@ function CampaignDetail({
             {syncing ? "Sincronizando..." : "Atualizar status"}
           </Button>
           {campaign.status === "draft" && (
-            <Button
-              disabled={busy}
-              onClick={() =>
-                withBusy(async () => {
-                  try {
-                    if (campaign.send_mode === "direct") {
-                      let remaining = Infinity
-                      let guard = 0
-                      while (remaining > 0 && guard < 200) {
-                        const r = await zernioCampaignSend(campaign.id)
-                        remaining = Number(r?.remaining ?? 0)
-                        guard += 1
-                        if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
-                      }
-                      toast.success("Envio concluído")
-                    } else {
-                      await zernioCampaignSend(campaign.id)
-                      toast.success("Envio iniciado")
-                    }
-                    await load()
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : "Falha ao enviar")
-                  }
-                })
-              }
-            >
+            <Button disabled={busy} onClick={() => withBusy(sendNowLoop)}>
               <Send className="mr-2 h-4 w-4" />
               {busy ? "Enviando..." : "Enviar agora"}
+            </Button>
+          )}
+          {directPending && (
+            <Button disabled={busy} onClick={() => withBusy(sendNowLoop)}>
+              <Send className="mr-2 h-4 w-4" />
+              {busy ? "Enviando..." : `Continuar envio (${campaign.recipient_count - campaign.sent_count - campaign.failed_count} restantes)`}
             </Button>
           )}
           {(campaign.status === "draft" || campaign.status === "scheduled") && (
