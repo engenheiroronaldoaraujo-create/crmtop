@@ -388,3 +388,72 @@ export type SDRMetrics = {
   callbacks_scheduled: number
   transfers: number
 }
+
+// ---------------------------------------------------------------------------
+// WhatsApp oficial (Meta) via Zernio + Campanhas
+// ---------------------------------------------------------------------------
+
+export type ZernioConnection = {
+  profile_id: string | null
+  account_id: string | null
+  account_name: string | null
+  phone_number: string | null
+  status: "disconnected" | "connected"
+  webhook_configured: boolean
+  connected_at: string | null
+}
+
+export type ZernioTemplate = {
+  id: string
+  account_id: string
+  meta_template_id: string | null
+  name: string
+  language: string
+  category: "MARKETING" | "UTILITY" | "AUTHENTICATION" | null
+  status: "APPROVED" | "PENDING" | "REJECTED" | null
+  reason: string | null
+  components: unknown[] | null
+  synced_at: string
+}
+
+export type Campaign = {
+  id: string
+  name: string
+  description: string | null
+  zernio_broadcast_id: string | null
+  template_name: string
+  template_language: string
+  variable_mapping: Record<string, VariableMappingEntry>
+  status: "draft" | "scheduled" | "sending" | "completed" | "failed" | "cancelled"
+  scheduled_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  recipient_count: number
+  sent_count: number
+  delivered_count: number
+  read_count: number
+  failed_count: number
+  last_error: string | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type VariableMappingEntry =
+  | { field: "name" | "phone" | "email" | "company" }
+  | { field: "custom"; customValue: string }
+
+export type CampaignRecipient = {
+  id: string
+  campaign_id: string
+  contact_id: string | null
+  phone: string
+  name: string | null
+  status: "pending" | "sent" | "delivered" | "read" | "failed"
+  error: string | null
+  error_code: number | null
+  sent_at: string | null
+  delivered_at: string | null
+  read_at: string | null
+  created_at: string
+}

@@ -187,3 +187,81 @@ export function sdrGetMetrics() {
 export function sdrTestSDR(message: string) {
   return postJson("sdr-engine", { action: "test_sdr", data: { message } })
 }
+
+// ---------------------------------------------------------------------------
+// Zernio (WhatsApp oficial / Meta Cloud API)
+// ---------------------------------------------------------------------------
+
+export function zernioSetApiKey(api_key: string) {
+  return postJson("zernio-proxy", { action: "set-api-key", api_key })
+}
+
+export function zernioGetConfig() {
+  return postJson("zernio-proxy", { action: "get-config" })
+}
+
+export function zernioConnectStart(redirect_url: string) {
+  return postJson("zernio-proxy", { action: "connect-start", redirect_url })
+}
+
+export function zernioConnectComplete(input: {
+  account_id: string
+  profile_id?: string
+  username?: string
+}) {
+  return postJson("zernio-proxy", { action: "connect-complete", ...input })
+}
+
+export function zernioDisconnect() {
+  return postJson("zernio-proxy", { action: "disconnect" })
+}
+
+export function zernioSetupWebhook() {
+  return postJson("zernio-proxy", { action: "setup-webhook" })
+}
+
+export function zernioSyncTemplates() {
+  return postJson("zernio-proxy", { action: "sync-templates" })
+}
+
+export function zernioCreateTemplate(input: {
+  name: string
+  category: string
+  language: string
+  body_text: string
+  footer_text?: string
+}) {
+  return postJson("zernio-proxy", { action: "create-template", ...input })
+}
+
+export function zernioCampaignCreate(input: {
+  name: string
+  description?: string
+  template_name: string
+  template_language: string
+  variable_mapping: Record<string, unknown>
+  scheduled_at?: string | null
+  recipients: Array<{ contact_id?: string | null; phone: string; name?: string | null; email?: string | null }>
+}) {
+  return postJson("zernio-proxy", { action: "campaign-create", ...input })
+}
+
+export function zernioCampaignSend(campaign_id: string) {
+  return postJson("zernio-proxy", { action: "campaign-send", campaign_id })
+}
+
+export function zernioCampaignSchedule(campaign_id: string, scheduled_at: string) {
+  return postJson("zernio-proxy", { action: "campaign-schedule", campaign_id, scheduled_at })
+}
+
+export function zernioCampaignCancel(campaign_id: string) {
+  return postJson("zernio-proxy", { action: "campaign-cancel", campaign_id })
+}
+
+export function zernioCampaignSync(campaign_id: string) {
+  return postJson("zernio-proxy", { action: "campaign-sync", campaign_id })
+}
+
+export function zernioCampaignTest(campaign_id: string, phone: string) {
+  return postJson("zernio-proxy", { action: "campaign-test", campaign_id, phone })
+}

@@ -398,6 +398,12 @@ verify_jwt = false
 [functions.evolution-webhook]
 verify_jwt = false
 
+[functions.zernio-proxy]
+verify_jwt = false
+
+[functions.zernio-webhook]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
