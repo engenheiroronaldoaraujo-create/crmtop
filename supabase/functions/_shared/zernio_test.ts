@@ -3,6 +3,7 @@ import {
   buildBroadcastTemplate,
   chunk,
   countTemplatePlaceholders,
+  hasNamedTemplateParams,
   META_COOLDOWN_KEY,
   metaCooldownRemainingMinutes,
   normalizeE164,
@@ -63,6 +64,27 @@ Deno.test("countTemplatePlaceholders: maior índice posicional", () => {
   assertEquals(countTemplatePlaceholders(components), 3);
   assertEquals(countTemplatePlaceholders([{ type: "BODY", text: "Sem variáveis" }]), 0);
   assertEquals(countTemplatePlaceholders(null), 0);
+});
+
+Deno.test("countTemplatePlaceholders: nomeado NÃO conta como posicional", () => {
+  const components = [
+    { type: "BODY", text: "Olá, {{nome}}! Atencionalmente." },
+  ];
+  assertEquals(countTemplatePlaceholders(components), 0);
+});
+
+Deno.test("hasNamedTemplateParams: detecta {{nome}} (incompatível com broadcast)", () => {
+  const named = [
+    { type: "BODY", text: "Olá, {{nome}}!", example: { body_text_named_params: [{ param_name: "nome" }] } },
+  ];
+  assertEquals(hasNamedTemplateParams(named), true);
+});
+
+Deno.test("hasNamedTemplateParams: numérico puro é compatível", () => {
+  const numbered = [{ type: "BODY", text: "Olá, {{1}}!", example: { body_text: ["Ronaldo"] } }];
+  assertEquals(hasNamedTemplateParams(numbered), false);
+  assertEquals(hasNamedTemplateParams([{ type: "BODY", text: "Fixo" }]), false);
+  assertEquals(hasNamedTemplateParams(null), false);
 });
 
 Deno.test("buildBroadcastTemplate: sem variáveis omite components", () => {

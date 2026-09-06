@@ -14,6 +14,7 @@ import {
   ensureZernioProfile,
   getZernioConnection,
   getZernioKey,
+  hasNamedTemplateParams,
   metaCooldownRemainingMinutes,
   normalizeE164,
   requireConnected,
@@ -481,6 +482,13 @@ async function actionCampaignCreate(
   if (!tpl) return jsonResponse(400, { error: "template não encontrado — sincronize os templates" });
   if (tpl.status !== "APPROVED") {
     return jsonResponse(400, { error: `template ${tpl.status ?? "?"}: só templates aprovados podem enviar` });
+  }
+  if (hasNamedTemplateParams(tpl.components)) {
+    return jsonResponse(400, {
+      error:
+        'este template usa variáveis com nome (ex.: {{nome}}), que o envio em massa da Meta não suporta. ' +
+        "Crie o template com variáveis numeradas — ex.: Olá, {{1}}! — e sincronize novamente.",
+    });
   }
 
   // Nº de variáveis vem do template cacheado (fonte: Meta), não do cliente —

@@ -47,7 +47,7 @@ export function normalizeE164(phone: string | null | undefined): string | null {
 
 /**
  * Maior índice de placeholder posicional ({{1}}, {{2}}...) nos componentes de
- * um template. 0 quando o template não tem variáveis.
+ * um template. 0 quando o template não tem variáveis posicionais.
  */
 export function countTemplatePlaceholders(components: unknown): number {
   let max = 0;
@@ -61,6 +61,23 @@ export function countTemplatePlaceholders(components: unknown): number {
     max = Math.max(max, parseInt(m[1], 10));
   }
   return max;
+}
+
+/**
+ * True quando o template usa variáveis COM NOME ({{nome}} — parameter_format
+ * NAMED, comum em templates criados no WhatsApp Manager). O engine de
+ * broadcast da Zernio não resolve as nomeadas ("only numbered placeholders
+ * are supported") — campanhas com esse template falham com Meta 132000.
+ */
+export function hasNamedTemplateParams(components: unknown): boolean {
+  let text: string;
+  try {
+    text = typeof components === "string" ? components : JSON.stringify(components ?? "");
+  } catch {
+    return false;
+  }
+  // Ignora os tokens de mapeamento que o próprio broadcast usa ({{1}}).
+  return /\{\{\s*[a-zA-Z_]\w*\s*\}\}/.test(text);
 }
 
 /**

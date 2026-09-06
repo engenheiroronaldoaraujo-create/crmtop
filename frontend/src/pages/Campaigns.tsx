@@ -100,6 +100,16 @@ function placeholdersOf(components: unknown): number {
   return max
 }
 
+// Variáveis com nome ({{nome}}) não funcionam em envio em massa na Meta —
+// só as numeradas ({{1}}). Detecta para bloquear a seleção no wizard.
+function hasNamedParams(components: unknown): boolean {
+  try {
+    return /\{\{\s*[a-zA-Z_]\w*\s*\}\}/.test(JSON.stringify(components ?? ""))
+  } catch {
+    return false
+  }
+}
+
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—"
   return new Date(iso).toLocaleString("pt-BR", {
@@ -160,8 +170,9 @@ function NewCampaignWizard({
       .then(({ data }) => {
         const list = (data ?? []) as ZernioTemplate[]
         setWizard((w) => ({ ...w, templates: list }))
-        if (list.length === 1) {
-          setWizard((w) => ({ ...w, templateKey: `${list[0].name}|${list[0].language}` }))
+        const usable = list.filter((t) => !hasNamedParams(t.components))
+        if (usable.length === 1) {
+          setWizard((w) => ({ ...w, templateKey: `${usable[0].name}|${usable[0].language}` }))
         }
       })
   }, [])
@@ -503,11 +514,19 @@ function NewCampaignWizard({
                       <SelectValue placeholder="Selecione o template" />
                     </SelectTrigger>
                     <SelectContent>
-                      {wizard.templates.map((t) => (
-                        <SelectItem key={`${t.name}|${t.language}`} value={`${t.name}|${t.language}`}>
-                          {t.name} ({t.language}) — {t.category ?? "?"}
-                        </SelectItem>
-                      ))}
+                      {wizard.templates.map((t) => {
+                        const named = hasNamedParams(t.components)
+                        return (
+                          <SelectItem
+                            key={`${t.name}|${t.language}`}
+                            value={`${t.name}|${t.language}`}
+                            disabled={named}
+                          >
+                            {t.name} ({t.language}) — {t.category ?? "?"}
+                            {named ? " · usa {{nome}}, incompatível com campanha" : ""}
+                          </SelectItem>
+                        )
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
