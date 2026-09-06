@@ -135,6 +135,39 @@ async function actionConnectStart(
   return jsonResponse(200, { auth_url: res.authUrl });
 }
 
+async function finalizeConnection(
+  supabase: Supabase,
+  account: any,
+  fallbackProfileId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await supabase.from("zernio_connections").upsert(
+    {
+      id: "default",
+      profile_id: String(account.profileId ?? fallbackProfileId),
+      account_id: String(account._id ?? account.id),
+      account_name: account.displayName ?? account.username ?? null,
+      phone_number: String(account.username ?? "").replace(/[^\d]/g, "") || null,
+      status: "connected",
+      connected_at: now,
+    },
+    { onConflict: "id" },
+  );
+  if (error) throw new Error(error.message);
+
+  // Webhook e templates: best-effort — a conexão já valeu.
+  try {
+    await setupWebhook(supabase, fallbackProfileId);
+  } catch (err) {
+    console.error("finalize-connection: setup-webhook falhou", err);
+  }
+  try {
+    await syncTemplates(supabase, String(account._id ?? account.id));
+  } catch (err) {
+    console.error("finalize-connection: sync-templates falhou", err);
+  }
+}
+
 async function actionConnectComplete(
   supabase: Supabase,
   body: { account_id?: string; profile_id?: string; username?: string },
@@ -145,7 +178,7 @@ async function actionConnectComplete(
 
   // Confirma na Zernio que a conta existe e pertence ao profile.
   const list = await zernioRequest(supabase, "/accounts", {
-    query: { profileId: body.profile_id || profileId },
+    query: { profileId },
   });
   const account = (list?.accounts ?? []).find(
     (a: any) => String(a._id ?? a.id) === accountId,
@@ -153,43 +186,27 @@ async function actionConnectComplete(
   if (!account) {
     return jsonResponse(400, { error: "conta não encontrada no Zernio (reconecte)" });
   }
+  await finalizeConnection(supabase, account, profileId);
+  return jsonResponse(200, { ok: true });
+}
 
-  const now = new Date().toISOString();
-  const { error } = await supabase.from("zernio_connections").upsert(
-    {
-      id: "default",
-      profile_id: String(account.profileId ?? body.profile_id ?? profileId),
-      account_id: accountId,
-      account_name: account.displayName ?? account.username ?? null,
-      phone_number: String(account.username ?? body.username ?? "").replace(/[^\d]/g, "") || null,
-      status: "connected",
-      connected_at: now,
-    },
-    { onConflict: "id" },
-  );
-  if (error) throw new Error(error.message);
-
-  // Webhook e templates: best-effort — a conexão já valeu.
-  let webhookOk = false;
-  let templatesOk = false;
-  try {
-    await setupWebhook(supabase, profileId);
-    webhookOk = true;
-  } catch (err) {
-    console.error("connect-complete: setup-webhook falhou", err);
-  }
-  try {
-    await syncTemplates(supabase, accountId);
-    templatesOk = true;
-  } catch (err) {
-    console.error("connect-complete: sync-templates falhou", err);
-  }
-
-  return jsonResponse(200, {
-    ok: true,
-    webhook_ok: webhookOk,
-    templates_ok: templatesOk,
+// Adota a conta WhatsApp já conectada no profile (quando o callback OAuth do
+// app não chegou — ex.: conexão feita pelo dashboard da Zernio).
+async function actionConnectResync(supabase: Supabase): Promise<Response> {
+  const profileId = await ensureZernioProfile(supabase);
+  const list = await zernioRequest(supabase, "/accounts", {
+    query: { profileId, platform: "whatsapp" },
   });
+  const accounts = (list?.accounts ?? []).filter(
+    (a: any) => a.platform === "whatsapp" && a.isActive !== false && a.needsReconnection !== true,
+  );
+  if (accounts.length === 0) {
+    return jsonResponse(404, {
+      error: "nenhuma conta WhatsApp conectada neste profile da Zernio",
+    });
+  }
+  await finalizeConnection(supabase, accounts[0], profileId);
+  return jsonResponse(200, { ok: true, account_id: String(accounts[0]._id ?? accounts[0].id) });
 }
 
 async function actionDisconnect(supabase: Supabase): Promise<Response> {
@@ -766,6 +783,7 @@ const ADMIN_ACTIONS = new Set([
   "get-config",
   "connect-start",
   "connect-complete",
+  "connect-resync",
   "disconnect",
   "setup-webhook",
   "sync-templates",
@@ -805,6 +823,10 @@ Deno.serve(async (req) => {
       case "connect-complete": {
         await requireAdmin(user);
         return await actionConnectComplete(supabase, body);
+      }
+      case "connect-resync": {
+        await requireAdmin(user);
+        return await actionConnectResync(supabase);
       }
       case "disconnect": {
         await requireAdmin(user);

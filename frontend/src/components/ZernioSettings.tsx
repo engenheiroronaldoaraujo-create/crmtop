@@ -5,6 +5,7 @@ import { toast } from "sonner"
 
 import {
   zernioConnectComplete,
+  zernioConnectResync,
   zernioConnectStart,
   zernioDisconnect,
   zernioGetConfig,
@@ -37,6 +38,7 @@ export function ZernioSettings() {
   const [connection, setConnection] = useState<ZernioConnection | null>(null)
   const [loading, setLoading] = useState(true)
   const [connecting, setConnecting] = useState(false)
+  const [resyncing, setResyncing] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [webhookSaving, setWebhookSaving] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
@@ -108,6 +110,19 @@ export function ZernioSettings() {
       toast.error(err instanceof Error ? err.message : "Falha ao salvar API key")
     } finally {
       setSavingKey(false)
+    }
+  }
+
+  async function handleResync() {
+    setResyncing(true)
+    try {
+      await zernioConnectResync()
+      toast.success("Conta WhatsApp detectada e conectada")
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Nenhuma conta encontrada neste profile")
+    } finally {
+      setResyncing(false)
     }
   }
 
@@ -222,15 +237,25 @@ export function ZernioSettings() {
               Conecte sua conta WhatsApp Business (WABA) da Meta pelo fluxo oficial
               de autorização. Você será redirecionado de volta aqui ao concluir.
             </p>
-            <Button onClick={handleConnect} disabled={connecting}>
-              {connecting ? (
-                "Abrindo Meta..."
-              ) : (
-                <>
-                  <Link2 className="mr-2 h-4 w-4" /> Conectar com Meta
-                </>
-              )}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={handleConnect} disabled={connecting}>
+                {connecting ? (
+                  "Abrindo Meta..."
+                ) : (
+                  <>
+                    <Link2 className="mr-2 h-4 w-4" /> Conectar com Meta
+                  </>
+                )}
+              </Button>
+              <Button variant="outline" onClick={handleResync} disabled={resyncing}>
+                <RefreshCw className={resyncing ? "mr-2 h-4 w-4 animate-spin" : "mr-2 h-4 w-4"} />
+                {resyncing ? "Detectando..." : "Já conectei na Zernio"}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Use "Já conectei na Zernio" se você conectou o WhatsApp pelo site da
+              Zernio (e não por aqui) — o CRM detecta a conta do mesmo perfil.
+            </p>
           </div>
         )}
 

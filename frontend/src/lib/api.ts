@@ -212,6 +212,10 @@ export function zernioConnectComplete(input: {
   return postJson("zernio-proxy", { action: "connect-complete", ...input })
 }
 
+export function zernioConnectResync() {
+  return postJson("zernio-proxy", { action: "connect-resync" })
+}
+
 export function zernioDisconnect() {
   return postJson("zernio-proxy", { action: "disconnect" })
 }
