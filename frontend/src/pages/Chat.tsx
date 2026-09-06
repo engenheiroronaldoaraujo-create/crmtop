@@ -113,6 +113,13 @@ const SOURCE_BADGES: Partial<Record<ConversationSource, string>> = {
   campaign: "Campanha",
 }
 
+const SOURCE_MARK_OPTIONS: [ConversationSource, string][] = [
+  ["ad", "Anúncio"],
+  ["campaign", "Campanha"],
+  ["organic", "Orgânico"],
+  ["manual", "Manual"],
+]
+
 const SOURCE_FILTER_KEY = "chat-source-filter"
 
 function initialSourceFilter(): SourceFilter {
@@ -842,6 +849,22 @@ export default function ChatPage() {
     if (error) toast.error(error.message)
   }
 
+  async function handleSetSource(conv: Conversation, source: ConversationSource) {
+    if (conv.source === source) return
+    const sourceMeta = { ...(conv.source_meta ?? {}), marcado_manualmente: true }
+    const { error } = await supabase
+      .from("conversations")
+      .update({ source, source_meta: sourceMeta })
+      .eq("id", conv.id)
+    if (error) {
+      toast.error(error.message)
+      return
+    }
+    setConversations((prev) =>
+      prev.map((c) => (c.id === conv.id ? { ...c, source, source_meta: sourceMeta } : c)),
+    )
+  }
+
   // AI handlers
   async function handleAISummary() {
     if (!selected) return
@@ -1286,6 +1309,25 @@ export default function ChatPage() {
                           {p.full_name ?? p.id.slice(0, 8)}
                         </DropdownMenuItem>
                       ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm">
+                      <Megaphone className="mr-1 h-4 w-4" />
+                      Origem: {SOURCE_MARK_OPTIONS.find(([k]) => k === selected.source)?.[1] ?? "Orgânico"}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel>Marcar origem da conversa</DropdownMenuLabel>
+                    {SOURCE_MARK_OPTIONS.map(([key, label]) => (
+                      <DropdownMenuItem
+                        key={key}
+                        onClick={() => handleSetSource(selected, key)}
+                      >
+                        {selected.source === key ? "✓ " : ""}{label}
+                      </DropdownMenuItem>
+                    ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <Button
