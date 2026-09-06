@@ -21,6 +21,7 @@ import {
   zernioRequest,
   zernioRequestRetry,
   ZERNIO_API_KEY_NAME,
+  ZERNIO_INTERNAL_TOKEN_NAME,
   ZERNIO_WEBHOOK_SECRET_NAME,
   ZERNIO_WEBHOOK_TOKEN_NAME,
   ZernioApiError,
@@ -678,6 +679,7 @@ interface CampaignRow {
   send_mode: string;
   template_name: string;
   template_language: string;
+  updated_at?: string;
   variable_mapping: Record<string, { field?: string; customValue?: string }> | null;
 }
 
@@ -766,14 +768,66 @@ interface DirectPendingRow {
   email: string | null;
 }
 
+function keepAlive(promise: Promise<unknown>): void {
+  const g = globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } };
+  if (g.EdgeRuntime?.waitUntil) {
+    g.EdgeRuntime.waitUntil(promise);
+  } else {
+    promise.catch((e) => console.error("keepAlive task failed", String(e)));
+  }
+}
+
+async function getInternalToken(supabase: Supabase): Promise<string> {
+  let token = await getSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME);
+  if (!token) {
+    token = randomToken();
+    await setSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME, token);
+  }
+  return token;
+}
+
+// Marca a próxima leva como background: a função se auto-invoca (token
+// interno), então o envio continua mesmo com o navegador fechado. Cada leva
+// tem ~50s de orçamento; a fila anda sozinha até terminar ou esbarrar em
+// erro transitório.
+async function scheduleNextHop(supabase: Supabase, campaignId: string): Promise<void> {
+  const token = await getInternalToken(supabase);
+  const url = `${SUPABASE_URL}/functions/v1/zernio-proxy`;
+  const p = fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "campaign-send-batch", campaign_id: campaignId, internal_token: token }),
+  }).then(async (res) => {
+    await res.text().catch(() => {});
+  });
+  keepAlive(p);
+}
+
 // Envio direto: uma chamada POST /v1/inbox/conversations por destinatário,
 // resolvendo os slots nomeados localmente. Processa um lote por invocação
-// (o frontend repete até done) respeitando ~50s de orçamento da Edge Function.
+// (~50s) e se auto-agenda para o próximo lote (background).
 async function campaignSendDirect(
   supabase: Supabase,
   conn: { account_id: string | null },
-  campaign: CampaignRow,
+  campaign: CampaignRow & { updated_at?: string },
+  opts: { fromUser?: boolean } = {},
 ): Promise<Response> {
+  // Guarda anti-corrida: retomada manual enquanto uma corrente de background
+  // ainda está viva (campaigns.updated_at atualiza a cada leva) não duplica
+  // envios — apenas informa que já está em andamento.
+  if (opts.fromUser && campaign.status === "sending" && campaign.updated_at) {
+    const age = Date.now() - Date.parse(campaign.updated_at);
+    if (age < 90_000) {
+      return jsonResponse(200, {
+        ok: true,
+        already_running: true,
+        continued: true,
+        sent: 0,
+        failed: 0,
+      });
+    }
+  }
+
   const mapping = campaign.variable_mapping ?? {};
   const slotCount = Object.keys(mapping).length;
 
@@ -795,6 +849,7 @@ async function campaignSendDirect(
 
   let sent = 0;
   let failed = 0;
+  let stoppedTransient = false;
   const deadline = Date.now() + 50_000;
 
   for (const r of (pending ?? []) as DirectPendingRow[]) {
@@ -826,8 +881,9 @@ async function campaignSendDirect(
       sent += 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Transitório: para o lote e deixa o resto pendente para a próxima chamada.
+      // Transitório: para a leva e não agenda a próxima (não martelar a Meta).
       if (/Zernio 429|Zernio 5\d\d|Meta limitou|network|AbortError|fetch failed/i.test(msg)) {
+        stoppedTransient = true;
         break;
       }
       await supabase
@@ -853,6 +909,8 @@ async function campaignSendDirect(
       .update({ status: "completed", completed_at: new Date().toISOString() })
       .eq("id", campaign.id)
       .eq("status", "sending");
+  } else if (!stoppedTransient) {
+    await scheduleNextHop(supabase, campaign.id);
   }
 
   return jsonResponse(200, {
@@ -861,6 +919,8 @@ async function campaignSendDirect(
     failed,
     remaining,
     done: remaining === 0,
+    continued: remaining > 0 && !stoppedTransient,
+    stopped_transient: stoppedTransient,
   });
 }
 
@@ -878,7 +938,7 @@ async function actionCampaignSend(
 
   if (campaign.send_mode === "direct") {
     const conn = await requireConnected(supabase);
-    return await campaignSendDirect(supabase, conn, campaign);
+    return await campaignSendDirect(supabase, conn, campaign, { fromUser: true });
   }
 
   if (!campaign.zernio_broadcast_id) {
@@ -1138,6 +1198,22 @@ Deno.serve(async (req) => {
     const supabase = serviceClient();
     const body = await req.json().catch(() => ({}));
     const { action } = body as { action: string };
+
+    // Lote de envio em background (auto-invocação): autenticado por token
+    // interno, sem JWT. Roda ANTES do requireUser porque não há usuário aqui.
+    if (action === "campaign-send-batch") {
+      const token = String(body.internal_token ?? "");
+      const expected = await getSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME);
+      if (!expected || token !== expected) {
+        return jsonResponse(401, { error: "internal token inválido" });
+      }
+      const campaign = await getCampaignOr404(supabase, String(body.campaign_id));
+      if (campaign.send_mode !== "direct" || !["draft", "sending"].includes(campaign.status)) {
+        return jsonResponse(200, { ok: true, skipped: true });
+      }
+      const conn = await requireConnected(supabase);
+      return await campaignSendDirect(supabase, conn, campaign);
+    }
 
     const user = await requireUser(req, supabase, ADMIN_ACTIONS.has(String(action)));
 

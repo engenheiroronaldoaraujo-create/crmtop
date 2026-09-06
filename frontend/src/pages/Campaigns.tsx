@@ -340,17 +340,12 @@ function NewCampaignWizard({
       if (wizard.mode === "now") {
         const direct = campaign.send_mode === "direct"
         if (direct) {
-          // Envio individual lote-a-lote: repete até concluir (done) ou estourar
-          // o teto de segurança. Cada chamada resolve os nomes por contato.
-          let remaining = Infinity
-          let guard = 0
-          while (remaining > 0 && guard < 200) {
-            const r = await zernioCampaignSend(campaign.id)
-            remaining = Number(r?.remaining ?? 0)
-            guard += 1
-            if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
-          }
-          toast.success("Envio concluído! Acompanhe entregues/lidas na campanha.")
+          const r = await zernioCampaignSend(campaign.id)
+          toast.success(
+            r?.done
+              ? "Envio concluído!"
+              : "Envio em andamento — continua em segundo plano mesmo se você sair desta página.",
+          )
         } else {
           await zernioCampaignSend(campaign.id)
           toast.success("Envio iniciado! Acompanhe o progresso na página da campanha.")
@@ -796,18 +791,20 @@ function CampaignDetail({
   }
 
   async function sendNowLoop() {
+    if (!campaign) return
     try {
-      if (campaign && campaign.send_mode === "direct") {
-        let remaining = Infinity
-        let guard = 0
-        while (remaining > 0 && guard < 200) {
-          const r = await zernioCampaignSend(campaign.id)
-          remaining = Number(r?.remaining ?? 0)
-          guard += 1
-          if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
+      if (campaign.send_mode === "direct") {
+        const r = await zernioCampaignSend(campaign.id)
+        if (r?.already_running) {
+          toast.info("O envio já está rodando em segundo plano — aguarde atualizar")
+        } else if (r?.done) {
+          toast.success("Envio concluído")
+        } else if (r?.stopped_transient) {
+          toast.warning("A Meta limitou os envios por momento; use 'Continuar envio' mais tarde")
+        } else {
+          toast.success("Envio em andamento — continua em segundo plano mesmo se sair da página")
         }
-        toast.success("Envio concluído")
-      } else if (campaign) {
+      } else {
         await zernioCampaignSend(campaign.id)
         toast.success("Envio iniciado")
       }
@@ -816,6 +813,14 @@ function CampaignDetail({
       toast.error(err instanceof Error ? err.message : "Falha ao enviar")
     }
   }
+
+  // Auto-refresh enquanto há envio em andamento (o servidor segue em
+  // background; a página só espelha).
+  useEffect(() => {
+    if (campaign?.status !== "sending") return
+    const iv = setInterval(load, 10_000)
+    return () => clearInterval(iv)
+  }, [campaign?.status, load])
 
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
   if (!campaign) return <p className="text-muted-foreground">Campanha não encontrada.</p>

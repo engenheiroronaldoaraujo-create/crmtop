@@ -11,6 +11,7 @@ export const ZERNIO_PROFILE_NAME = "CRM TOP";
 export const ZERNIO_API_KEY_NAME = "zernio_api_key";
 export const ZERNIO_WEBHOOK_TOKEN_NAME = "zernio_webhook_token";
 export const ZERNIO_WEBHOOK_SECRET_NAME = "zernio_webhook_secret";
+export const ZERNIO_INTERNAL_TOKEN_NAME = "zernio_internal_token";
 
 export interface ZernioConnection {
   id: string;
