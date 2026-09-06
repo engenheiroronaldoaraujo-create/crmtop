@@ -3,6 +3,7 @@ import { BookUser, Cable, Download, LogOut, MessagesSquare, Plus, QrCode, Refres
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
+import { useAuth } from "@/hooks/use-auth"
 import {
   proxyCreateInstance,
   proxyDeleteInstance,
@@ -50,6 +51,8 @@ function StatusBadge({ status }: { status: WhatsAppInstance["status"] }) {
 }
 
 export default function WhatsAppSettings() {
+  const { profile } = useAuth()
+  const isAdmin = profile?.role === "admin"
   const [instances, setInstances] = useState<WhatsAppInstance[]>([])
   const [loading, setLoading] = useState(true)
   const [name, setName] = useState("")
@@ -64,7 +67,6 @@ export default function WhatsAppSettings() {
   const [syncingContacts, setSyncingContacts] = useState(false)
   const [syncingMessages, setSyncingMessages] = useState(false)
   const [syncingNames, setSyncingNames] = useState(false)
-  const pollRef = useRef<number | null>(null)
 
   const loadInstances = useCallback(async () => {
     const { data, error } = await supabase
@@ -84,14 +86,19 @@ export default function WhatsAppSettings() {
   }, [loadInstances])
 
   const instance = instances[0] ?? null
+  const instanceIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    instanceIdRef.current = instance?.id ?? null
+  }, [instance])
 
-  const refreshStatus = useCallback(async () => {
-    if (!instance) return null
+  // Sem dependência do objeto `instance`: estável entre renders (o poll não
+  // reagenda a si mesmo — bug do loop apertado de get-status/get-qr).
+  const refreshStatus = useCallback(async (id: string): Promise<string | null> => {
     try {
-      const data = await proxyGetStatus(instance.id)
+      const data = await proxyGetStatus(id)
       if (data?.status) {
         setInstances((prev) =>
-          prev.map((i) => (i.id === instance.id ? { ...i, status: data.status } : i)),
+          prev.map((i) => (i.id === id ? { ...i, status: data.status } : i)),
         )
         return data.status as string
       }
@@ -99,44 +106,72 @@ export default function WhatsAppSettings() {
       // keep last known status
     }
     return null
-  }, [instance])
+  }, [])
 
-  const refreshQr = useCallback(async () => {
-    if (!instance) return
-    setQrLoading(true)
+  const fetchQr = useCallback(async (id: string, showToast: boolean) => {
     try {
-      const data = await proxyGetQr(instance.id)
+      const data = await proxyGetQr(id)
       setQr({
         base64: data?.qrcode?.base64 ?? null,
         pairingCode: data?.qrcode?.pairingCode ?? null,
       })
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao obter QR code")
-    } finally {
-      setQrLoading(false)
+      if (showToast) {
+        toast.error(err instanceof Error ? err.message : "Falha ao obter QR code")
+      }
     }
-  }, [instance])
+  }, [])
 
-  // Poll status every 3s; refresh QR while not connected (it expires).
+  const refreshQr = useCallback(async () => {
+    const id = instanceIdRef.current
+    if (!id) return
+    setQrLoading(true)
+    await fetchQr(id, true)
+    setQrLoading(false)
+  }, [fetchQr])
+
+  // Poll de status a cada 3s; QR só quando desconectado e no máximo a cada
+  // 20s (chamar /connect em excesso atrapalha o pareamento). Erro de QR vira
+  // toast no máximo a cada 30s (sem spam).
   useEffect(() => {
-    if (!instance) return
+    if (!instance?.id) return
     let active = true
+    let lastQrAt = 0
+    let lastFailToastAt = 0
     const tick = async () => {
       if (!active) return
-      const status = await refreshStatus()
+      const id = instanceIdRef.current
+      if (!id) return
+      const status = await refreshStatus(id)
       if (!active) return
-      // Only fetch QR if confirmed not connected
-      if (status !== "connected" && instance.status !== "connected") {
-        refreshQr()
+      const now = Date.now()
+      if (status && status !== "connected" && now - lastQrAt > 20000) {
+        lastQrAt = now
+        setQrLoading(true)
+        try {
+          const data = await proxyGetQr(id)
+          if (!active) return
+          setQr({
+            base64: data?.qrcode?.base64 ?? null,
+            pairingCode: data?.qrcode?.pairingCode ?? null,
+          })
+        } catch (err) {
+          if (active && now - lastFailToastAt > 30000) {
+            lastFailToastAt = now
+            toast.error(err instanceof Error ? err.message : "Falha ao obter QR code")
+          }
+        } finally {
+          if (active) setQrLoading(false)
+        }
       }
     }
     tick()
-    pollRef.current = window.setInterval(tick, 3000)
+    const iv = window.setInterval(tick, 3000)
     return () => {
       active = false
-      if (pollRef.current !== null) window.clearInterval(pollRef.current)
+      window.clearInterval(iv)
     }
-  }, [instance?.id, refreshStatus, refreshQr])
+  }, [instance?.id, refreshStatus])
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault()
@@ -241,14 +276,25 @@ export default function WhatsAppSettings() {
     }
   }
 
+  // A sincronização roda em lotes (~páginas); repete até concluir (ou limite
+  // de segurança), mostrando o progresso — antes parava no 1º lote e o toast
+  // "continua" enganava o usuário.
   async function handleSyncMessages() {
     if (!instance) return
     setSyncingMessages(true)
     try {
-      const data = await proxySyncMessages(instance.id)
-      const done = data?.done ? "Concluído" : `continua (página ${data?.page ?? "?"})`
-      toast.success(`Sincronização de mensagens: ${done}`)
-      if (data?.message) console.info(data.message)
+      let pages = 0
+      let last: any = null
+      for (let i = 0; i < 25; i++) {
+        last = await proxySyncMessages(instance.id)
+        pages += 1
+        if (last?.done) break
+      }
+      toast.success(
+        last?.done
+          ? `Sincronização de mensagens concluída (${pages} lote${pages > 1 ? "s" : ""})`
+          : `Sincronização parcial — clique de novo para continuar (página ${last?.page ?? "?"})`,
+      )
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar mensagens")
     } finally {
@@ -260,10 +306,18 @@ export default function WhatsAppSettings() {
     if (!instance) return
     setSyncingNames(true)
     try {
-      const data = await proxySyncNames(instance.id)
-      const done = data?.done ? "Concluído" : `continua (página ${data?.page ?? "?"})`
-      toast.success(`Sincronização de nomes: ${done}`)
-      if (data?.message) console.info(data.message)
+      let pages = 0
+      let last: any = null
+      for (let i = 0; i < 25; i++) {
+        last = await proxySyncNames(instance.id)
+        pages += 1
+        if (last?.done) break
+      }
+      toast.success(
+        last?.done
+          ? `Sincronização de nomes concluída (${pages} lote${pages > 1 ? "s" : ""})`
+          : `Sincronização parcial — clique de novo para continuar (página ${last?.page ?? "?"})`,
+      )
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao sincronizar nomes")
     } finally {
@@ -376,64 +430,74 @@ export default function WhatsAppSettings() {
                 WhatsApp conectado. As mensagens chegam em tempo real no Chat.
               </p>
             )}
-            <Button
-              variant="secondary"
-              onClick={handleSetWebhook}
-              disabled={settingWebhook}
-            >
-              <Cable className="mr-2 h-4 w-4" />
-              {settingWebhook ? "Configurando..." : "Configurar webhook"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleSyncHistory}
-              disabled={syncingHistory}
-            >
-              <Download className="mr-2 h-4 w-4" />
-              {syncingHistory ? "Habilitando..." : "Sincronizar histórico"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleSyncContacts}
-              disabled={syncingContacts}
-            >
-              <BookUser className="mr-2 h-4 w-4" />
-              {syncingContacts ? "Sincronizando..." : "Sincronizar contatos"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleSyncMessages}
-              disabled={syncingMessages}
-            >
-              <MessagesSquare className="mr-2 h-4 w-4" />
-              {syncingMessages ? "Sincronizando..." : "Sincronizar mensagens"}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleSyncNames}
-              disabled={syncingNames}
-            >
-              <UserRound className="mr-2 h-4 w-4" />
-              {syncingNames ? "Sincronizando..." : "Sincronizar nomes"}
-            </Button>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="destructive"
-                onClick={handleLogout}
-                disabled={disconnecting}
-              >
-                <LogOut className="mr-2 h-4 w-4" />
-                {disconnecting ? "Desconectando..." : "Desconectar"}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleDelete}
-                disabled={deleting}
-              >
-                <Trash2 className="mr-2 h-4 w-4 text-destructive" />
-                {deleting ? "Excluindo..." : "Excluir conexão"}
-              </Button>
-            </div>
+            {isAdmin ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={handleSetWebhook}
+                    disabled={settingWebhook}
+                  >
+                    <Cable className="mr-2 h-4 w-4" />
+                    {settingWebhook ? "Configurando..." : "Configurar webhook"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSyncHistory}
+                    disabled={syncingHistory}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    {syncingHistory ? "Habilitando..." : "Sincronizar histórico"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSyncContacts}
+                    disabled={syncingContacts}
+                  >
+                    <BookUser className="mr-2 h-4 w-4" />
+                    {syncingContacts ? "Sincronizando..." : "Sincronizar contatos"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSyncMessages}
+                    disabled={syncingMessages}
+                  >
+                    <MessagesSquare className="mr-2 h-4 w-4" />
+                    {syncingMessages ? "Sincronizando..." : "Sincronizar mensagens"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleSyncNames}
+                    disabled={syncingNames}
+                  >
+                    <UserRound className="mr-2 h-4 w-4" />
+                    {syncingNames ? "Sincronizando..." : "Sincronizar nomes"}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="destructive"
+                    onClick={handleLogout}
+                    disabled={disconnecting}
+                  >
+                    <LogOut className="mr-2 h-4 w-4" />
+                    {disconnecting ? "Desconectando..." : "Desconectar"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleDelete}
+                    disabled={deleting}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4 text-destructive" />
+                    {deleting ? "Excluindo..." : "Excluir conexão"}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Ações de conexão e sincronização são restritas a administradores.
+              </p>
+            )}
           </CardContent>
         </Card>
       )}

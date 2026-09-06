@@ -1478,7 +1478,13 @@ async function actionLogoutInstance(
   });
   await supabase.from("whatsapp_instances").update({ status: "disconnected" }).eq("id", body.instance_id);
   if (!res.ok) {
-    return jsonResponse(res.status, { error: `evolution logout failed: ${JSON.stringify(data?.error ?? data)}` });
+    const msg = JSON.stringify(data?.error ?? data);
+    // Já desconectada / instância ausente na Evolution: a desconexão local
+    // já aconteceu (status atualizado acima) — não é erro para o usuário.
+    if (res.status === 400 || res.status === 404) {
+      return jsonResponse(200, { ok: true, warning: `evolution: ${msg}` });
+    }
+    return jsonResponse(res.status, { error: `evolution logout failed: ${msg}` });
   }
   return jsonResponse(200, { ok: true });
 }
