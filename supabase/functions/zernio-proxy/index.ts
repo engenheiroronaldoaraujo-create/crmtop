@@ -372,6 +372,66 @@ async function actionCreateTemplate(
   return jsonResponse(200, { ok: true, template: res?.template ?? null });
 }
 
+// Importa um template pré-aprovado do catálogo da Meta (sem fila de review).
+async function actionImportLibraryTemplate(
+  supabase: Supabase,
+  body: { name?: string; language?: string; button_url?: string; button_phone?: string },
+): Promise<Response> {
+  const conn = await requireConnected(supabase);
+  const name = String(body.name ?? "").trim();
+  if (!name) return jsonResponse(400, { error: "informe o nome do template da biblioteca" });
+  const language = String(body.language ?? "pt_BR").trim() || "pt_BR";
+
+  const lookup = await zernioRequest(supabase, "/whatsapp/template-library", {
+    query: { accountId: conn.account_id!, name, language },
+  });
+  const lib = lookup?.template;
+  if (!lib) {
+    return jsonResponse(404, {
+      error: `"${name}" não existe na biblioteca da Meta para ${language}`,
+    });
+  }
+
+  // Botões URL/PHONE_NUMBER da biblioteca exigem input correspondente.
+  const buttonInputs: Record<string, unknown>[] = [];
+  for (const btn of (lib.buttons ?? []) as Array<Record<string, unknown>>) {
+    const type = String(btn.type ?? "");
+    if (type === "URL") {
+      const url = String(body.button_url ?? "").trim();
+      if (!url) {
+        return jsonResponse(400, {
+          error: "este template tem botão de LINK — informe a URL do botão",
+        });
+      }
+      buttonInputs.push({ type: "URL", url: { base_url: url, url_suffix_example: url } });
+    } else if (type === "PHONE_NUMBER") {
+      const phone = String(body.button_phone ?? "").replace(/[^\d]/g, "");
+      if (!phone) {
+        return jsonResponse(400, {
+          error: "este template tem botão de TELEFONE — informe o número do botão",
+        });
+      }
+      buttonInputs.push({ type: "PHONE_NUMBER", phone_number: phone });
+    }
+  }
+
+  const res = await zernioRequest(supabase, "/whatsapp/templates", {
+    method: "POST",
+    body: {
+      accountId: conn.account_id,
+      name: String(lib.name ?? name),
+      category: String(lib.category ?? "UTILITY"),
+      language: String(lib.language ?? language),
+      library_template_name: String(lib.name ?? name),
+      ...(buttonInputs.length > 0 ? { library_template_button_inputs: buttonInputs } : {}),
+    },
+  });
+  await syncTemplates(supabase, conn.account_id!).catch((err) =>
+    console.error("sync-templates pós-import falhou", err)
+  );
+  return jsonResponse(200, { ok: true, template: res?.template ?? null });
+}
+
 // ---------------------------------------------------------------------------
 // Campanhas
 // ---------------------------------------------------------------------------
@@ -800,6 +860,7 @@ const ADMIN_ACTIONS = new Set([
   "setup-webhook",
   "sync-templates",
   "create-template",
+  "import-library-template",
   "campaign-create",
   "campaign-send",
   "campaign-schedule",
@@ -855,6 +916,10 @@ Deno.serve(async (req) => {
       case "create-template": {
         await requireAdmin(user);
         return await actionCreateTemplate(supabase, body);
+      }
+      case "import-library-template": {
+        await requireAdmin(user);
+        return await actionImportLibraryTemplate(supabase, body);
       }
       case "campaign-create": {
         await requireAdmin(user);

@@ -238,6 +238,15 @@ export function zernioCreateTemplate(input: {
   return postJson("zernio-proxy", { action: "create-template", ...input })
 }
 
+export function zernioImportLibraryTemplate(input: {
+  name: string
+  language?: string
+  button_url?: string
+  button_phone?: string
+}) {
+  return postJson("zernio-proxy", { action: "import-library-template", ...input })
+}
+
 export function zernioCampaignCreate(input: {
   name: string
   description?: string

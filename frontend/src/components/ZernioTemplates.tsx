@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react"
-import { Plus, RefreshCw } from "lucide-react"
+import { BookMarked, Plus, RefreshCw } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { zernioCreateTemplate, zernioSyncTemplates } from "@/lib/api"
+import { zernioCreateTemplate, zernioImportLibraryTemplate, zernioSyncTemplates } from "@/lib/api"
 import type { ZernioTemplate } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -57,11 +57,26 @@ type CreateForm = {
   footer_text: string
 }
 
+// Templates comuns da biblioteca da Meta (pré-aprovados; nomes exatos).
+const LIBRARY_SUGGESTIONS = [
+  "appointment_reminder",
+  "address_update",
+  "auto_pay_reminder_1",
+  "issue_resolution",
+  "payment_reminder",
+  "payment_receipt",
+  "shipping_update",
+  "order_updates",
+]
+
+type LibraryForm = { name: string; language: string; button_url: string; button_phone: string }
+
 export function ZernioTemplates() {
   const [templates, setTemplates] = useState<ZernioTemplate[]>([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [form, setForm] = useState<CreateForm | null>(null)
+  const [libForm, setLibForm] = useState<LibraryForm | null>(null)
   const [saving, setSaving] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -117,6 +132,27 @@ export function ZernioTemplates() {
     }
   }
 
+  async function handleImportLibrary(e: FormEvent) {
+    e.preventDefault()
+    if (!libForm) return
+    setSaving(true)
+    try {
+      await zernioImportLibraryTemplate({
+        name: libForm.name.trim(),
+        language: libForm.language.trim() || "pt_BR",
+        button_url: libForm.button_url.trim() || undefined,
+        button_phone: libForm.button_phone.replace(/\D/g, "") || undefined,
+      })
+      toast.success("Template importado — já está APROVADO e pronto para campanhas")
+      setLibForm(null)
+      await refresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao importar template")
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const placeholderCount = useMemo(() => {
     if (!form) return 0
     let max = 0
@@ -138,6 +174,9 @@ export function ZernioTemplates() {
           <Button variant="outline" onClick={handleSync} disabled={syncing}>
             <RefreshCw className={syncing ? "mr-2 h-4 w-4 animate-spin" : "mr-2 h-4 w-4"} />
             {syncing ? "Sincronizando..." : "Sincronizar"}
+          </Button>
+          <Button variant="secondary" onClick={() => setLibForm({ name: "", language: "pt_BR", button_url: "", button_phone: "" })}>
+            <BookMarked className="mr-2 h-4 w-4" /> Importar da biblioteca Meta
           </Button>
           <Button
             onClick={() =>
@@ -275,6 +314,90 @@ export function ZernioTemplates() {
                 </Button>
                 <Button type="submit" disabled={saving}>
                   {saving ? "Enviando..." : "Enviar para análise"}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={libForm !== null} onOpenChange={(open) => !open && setLibForm(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Importar template da biblioteca da Meta</DialogTitle>
+            <DialogDescription>
+              Templates pré-aprovados pela Meta — ficam prontos para uso imediato,
+              sem fila de revisão. Informe o nome exato (veja os disponíveis em{" "}
+              <a
+                className="underline"
+                href="https://business.facebook.com/wa/manage/message-templates/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                WhatsApp Manager
+              </a>
+              ).
+            </DialogDescription>
+          </DialogHeader>
+          {libForm && (
+            <form onSubmit={handleImportLibrary} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="lib-name">Nome na biblioteca *</Label>
+                  <Input
+                    id="lib-name"
+                    required
+                    list="lib-names"
+                    value={libForm.name}
+                    onChange={(e) => setLibForm({ ...libForm, name: e.target.value })}
+                    placeholder="appointment_reminder"
+                  />
+                  <datalist id="lib-names">
+                    {LIBRARY_SUGGESTIONS.map((n) => (
+                      <option key={n} value={n} />
+                    ))}
+                  </datalist>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="lib-lang">Idioma</Label>
+                  <Input
+                    id="lib-lang"
+                    value={libForm.language}
+                    onChange={(e) => setLibForm({ ...libForm, language: e.target.value })}
+                    placeholder="pt_BR"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="lib-url">URL do botão (se houver)</Label>
+                  <Input
+                    id="lib-url"
+                    value={libForm.button_url}
+                    onChange={(e) => setLibForm({ ...libForm, button_url: e.target.value })}
+                    placeholder="https://suaempresa.com"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="lib-phone">Telefone do botão (se houver)</Label>
+                  <Input
+                    id="lib-phone"
+                    value={libForm.button_phone}
+                    onChange={(e) => setLibForm({ ...libForm, button_phone: e.target.value })}
+                    placeholder="5515999998888"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Se o template tiver botão de link/telefone e você não preencher, a
+                Meta rejeita e o app pede o dado faltante.
+              </p>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setLibForm(null)}>
+                  Cancelar
+                </Button>
+                <Button type="submit" disabled={saving || !libForm.name.trim()}>
+                  {saving ? "Importando..." : "Importar (APPROVED imediato)"}
                 </Button>
               </DialogFooter>
             </form>

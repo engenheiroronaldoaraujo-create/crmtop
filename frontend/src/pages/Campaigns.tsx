@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowLeft,
   Megaphone,
@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Send,
   Trash2,
+  Upload,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -18,6 +19,7 @@ import {
   zernioCampaignTest,
 } from "@/lib/api"
 import type { Campaign, CampaignRecipient, ZernioTemplate } from "@/lib/types"
+import { parseContactsFile } from "@/lib/contacts-import"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -68,6 +70,7 @@ type ContactCandidate = {
   phone: string | null
   email: string | null
   contact_tags: Array<{ tag_id: string }> | null
+  imported?: boolean
 }
 
 function isValidPhone(phone: string | null): phone is string {
@@ -138,6 +141,8 @@ function NewCampaignWizard({
   const [search, setSearch] = useState("")
   const [tagFilter, setTagFilter] = useState<string>("all")
   const [tags, setTags] = useState<Array<{ id: string; name: string }>>([])
+  const [imported, setImported] = useState<ContactCandidate[]>([])
+  const fileRef = useRef<HTMLInputElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [wizard, setWizard] = useState<Wizard>({
     step: 1,
@@ -174,7 +179,48 @@ function NewCampaignWizard({
       })
   }, [])
 
-  const eligible = useMemo(() => contacts.filter((c) => isValidPhone(c.phone)), [contacts])
+  const eligible = useMemo(
+    () => [...contacts, ...imported].filter((c) => isValidPhone(c.phone)),
+    [contacts, imported],
+  )
+
+  function handleImportFile(file: File) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = String(reader.result ?? "")
+      const parsed = parseContactsFile(file.name, text)
+      if (parsed.length === 0) {
+        toast.error("Nenhum telefone reconhecido no arquivo (use CSV/TXT com \"telefone,nome\" por linha, ou .vcf)")
+        return
+      }
+      const known = new Set<string>([
+        ...contacts.map((c) => digits(c.phone ?? "")),
+        ...imported.map((c) => c.phone ?? ""),
+      ])
+      const fresh: ContactCandidate[] = []
+      for (const p of parsed) {
+        const d = p.phone ?? ""
+        if (!d || known.has(d)) continue
+        known.add(d)
+        fresh.push(p)
+      }
+      if (fresh.length === 0) {
+        toast.info("Todos os números do arquivo já estão na lista")
+        return
+      }
+      setImported((prev) => [...prev, ...fresh])
+      setSelected((prev) => {
+        const next = new Set(prev)
+        fresh.forEach((c) => next.add(c.id))
+        return next
+      })
+      const skipped = parsed.length - fresh.length
+      toast.success(
+        `${fresh.length} contato(s) importado(s)${skipped > 0 ? ` (${skipped} duplicados ignorados)` : ""}`,
+      )
+    }
+    reader.readAsText(file)
+  }
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -267,7 +313,7 @@ function NewCampaignWizard({
             ? new Date(wizard.scheduledAt).toISOString()
             : null,
         recipients: chosen.map((c) => ({
-          contact_id: c.id,
+          contact_id: c.imported ? null : c.id,
           phone: digits(c.phone as string),
           name: displayName(c) === "Sem nome" ? null : displayName(c),
           email: c.email,
@@ -348,6 +394,20 @@ function NewCampaignWizard({
                   ))}
                 </SelectContent>
               </Select>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".csv,.txt,.vcf"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) handleImportFile(f)
+                  e.target.value = ""
+                }}
+              />
+              <Button variant="outline" className="shrink-0" onClick={() => fileRef.current?.click()}>
+                <Upload className="mr-2 h-4 w-4" /> Arquivo
+              </Button>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">
@@ -393,7 +453,14 @@ function NewCampaignWizard({
                           onClick={(e) => e.stopPropagation()}
                         />
                       </TableCell>
-                      <TableCell>{displayName(c)}</TableCell>
+                      <TableCell>
+                        {displayName(c)}
+                        {c.imported && (
+                          <Badge variant="secondary" className="ml-2 text-[10px]">
+                            arquivo
+                          </Badge>
+                        )}
+                      </TableCell>
                       <TableCell className="text-muted-foreground">{c.phone}</TableCell>
                     </TableRow>
                   ))}
@@ -930,7 +997,7 @@ export default function Campaigns() {
 
   if (view === "new") {
     return (
-      <div className="p-6">
+      <div className="h-full overflow-y-auto p-6">
         <NewCampaignWizard
           contacts={contacts}
           onCancel={() => setView("list")}
@@ -945,7 +1012,7 @@ export default function Campaigns() {
 
   if (view === "detail" && selectedId) {
     return (
-      <div className="p-6">
+      <div className="h-full overflow-y-auto p-6">
         <CampaignDetail campaignId={selectedId} onBack={() => setView("list")} />
       </div>
     )
