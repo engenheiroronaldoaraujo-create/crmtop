@@ -506,6 +506,21 @@ async function actionCampaignCreate(
     return jsonResponse(400, { error: "nenhum contato com telefone válido na audiência" });
   }
 
+  // Vincula aos contatos existentes do CRM quando o telefone bate, para as
+  // respostas caírem na conversa certa no Chat.
+  const phones = recipients.map((r) => r.phone as string);
+  for (let i = 0; i < phones.length; i += 1000) {
+    const batch = phones.slice(i, i + 1000);
+    const { data: known } = await supabase
+      .from("contacts")
+      .select("id, phone")
+      .in("phone", batch);
+    const byPhone = new Map((known ?? []).map((c: { id: string; phone: string }) => [c.phone, c.id]));
+    for (const r of recipients) {
+      if (!r.contact_id && r.phone) r.contact_id = byPhone.get(r.phone) ?? null;
+    }
+  }
+
   // 1) Registro local (draft) — fica auditável mesmo se a Zernio falhar.
   const { data: campaign, error: insErr } = await supabase
     .from("campaigns")
