@@ -20,6 +20,12 @@ const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
 
+// Primeira mensagem pré-preenchida pelo anúncio click-to-WhatsApp da Meta
+// (o lead clica e a WhatsApp sugere o texto; raramente editado). Também
+// cobre variações quando o lead adiciona algo antes/depois.
+const CTWA_FIRST_MSG_PATTERN =
+  /posso ter mais informa|pelo an[uú]ncio|vi o an[uú]ncio|seu an[uú]ncio/i;
+
 // Agenda trabalho pós-inserção (transcrição, SDR, automação) sem bloquear a
 // resposta ao webhook. No runtime Deno/Supabase `EdgeRuntime.waitUntil` mantém
 // o isolate vivo após o return; fora dele (reconcile/testes) cai no await.
@@ -322,17 +328,23 @@ async function processMessage(
   const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
   console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
 
-  // Origem por anúncio: só vale para mensagem inbound e é aplicada apenas na
-  // criação da conversa (upsertConversation não sobrescreve existentes).
-  // Alguns servidores colocam `advertiser` no nível raiz, fora de `key`.
+  // Origem da conversa — aplicada apenas na CRIAÇÃO (upsertConversation não
+  // sobrescreve existentes). Dois caminhos, em ordem de confiança:
+  // 1. Atribuição oficial da Meta (key.advertiser, click-to-WhatsApp);
+  // 2. Heurística: o anúncio CTA da Meta pré-preenche a 1ª mensagem do lead
+  //    ("Olá! Posso ter mais informações sobre isso?") — padrão único, não
+  //    digita-se organicamente. Marcamos como 'ad' com detected_via.
   const advertiser = !fromMe ? raw.key?.advertiser ?? raw.advertiser : undefined;
-  const origin = advertiser?.id || advertiser?.source
+  const hasAttribution = Boolean(advertiser?.id || advertiser?.source);
+  const ctwaHeuristic = !fromMe && CTWA_FIRST_MSG_PATTERN.test(content);
+  const origin = !fromMe && (hasAttribution || ctwaHeuristic)
     ? {
         source: "ad" as const,
         meta: {
-          ad_id: advertiser.id ?? null,
-          network: advertiser.source ?? null,
-          cta_source_url: advertiser.cta_source_url ?? null,
+          ad_id: advertiser?.id ?? null,
+          network: advertiser?.source ?? null,
+          cta_source_url: advertiser?.cta_source_url ?? null,
+          detected_via: hasAttribution ? "meta_attribution" : "padrao_ctwa",
         },
       }
     : undefined;
