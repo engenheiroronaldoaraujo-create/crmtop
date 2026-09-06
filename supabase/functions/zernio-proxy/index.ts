@@ -140,11 +140,15 @@ async function finalizeConnection(
   account: any,
   fallbackProfileId: string,
 ): Promise<void> {
+  const accountProfileId =
+    account.profileId && typeof account.profileId === "object"
+      ? String(account.profileId._id ?? account.profileId.id ?? "")
+      : String(account.profileId ?? "");
   const now = new Date().toISOString();
   const { error } = await supabase.from("zernio_connections").upsert(
     {
       id: "default",
-      profile_id: String(account.profileId ?? fallbackProfileId),
+      profile_id: accountProfileId || fallbackProfileId,
       account_id: String(account._id ?? account.id),
       account_name: account.displayName ?? account.username ?? null,
       phone_number: String(account.username ?? "").replace(/[^\d]/g, "") || null,
@@ -157,7 +161,7 @@ async function finalizeConnection(
 
   // Webhook e templates: best-effort — a conexão já valeu.
   try {
-    await setupWebhook(supabase, fallbackProfileId);
+    await setupWebhook(supabase, accountProfileId || fallbackProfileId);
   } catch (err) {
     console.error("finalize-connection: setup-webhook falhou", err);
   }
@@ -190,23 +194,31 @@ async function actionConnectComplete(
   return jsonResponse(200, { ok: true });
 }
 
-// Adota a conta WhatsApp já conectada no profile (quando o callback OAuth do
-// app não chegou — ex.: conexão feita pelo dashboard da Zernio).
+// Adota a conta WhatsApp já conectada no workspace Zernio (mesmo em outro
+// profile — ex.: conexão feita pelo dashboard da Zernio no "Default").
 async function actionConnectResync(supabase: Supabase): Promise<Response> {
   const profileId = await ensureZernioProfile(supabase);
   const list = await zernioRequest(supabase, "/accounts", {
-    query: { profileId, platform: "whatsapp" },
+    query: { platform: "whatsapp" },
   });
   const accounts = (list?.accounts ?? []).filter(
     (a: any) => a.platform === "whatsapp" && a.isActive !== false && a.needsReconnection !== true,
   );
   if (accounts.length === 0) {
     return jsonResponse(404, {
-      error: "nenhuma conta WhatsApp conectada neste profile da Zernio",
+      error: "nenhuma conta WhatsApp ativa neste workspace da Zernio",
     });
   }
-  await finalizeConnection(supabase, accounts[0], profileId);
-  return jsonResponse(200, { ok: true, account_id: String(accounts[0]._id ?? accounts[0].id) });
+  // Preferência: conta que já está no profile do CRM.
+  const own = accounts.find((a: any) => {
+    const pid = typeof a.profileId === "object" ? String(a.profileId?._id ?? "") : String(a.profileId ?? "");
+    return pid === profileId;
+  });
+  await finalizeConnection(supabase, own ?? accounts[0], profileId);
+  return jsonResponse(200, {
+    ok: true,
+    account_id: String((own ?? accounts[0])._id ?? (own ?? accounts[0]).id),
+  });
 }
 
 async function actionDisconnect(supabase: Supabase): Promise<Response> {
