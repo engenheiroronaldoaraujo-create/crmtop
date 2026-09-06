@@ -58,15 +58,11 @@ type CreateForm = {
 }
 
 // Templates comuns da biblioteca da Meta (pré-aprovados; nomes exatos).
+// Lista completa: https://business.facebook.com/wa/manage/message-templates/
 const LIBRARY_SUGGESTIONS = [
   "appointment_reminder",
   "address_update",
   "auto_pay_reminder_1",
-  "issue_resolution",
-  "payment_reminder",
-  "payment_receipt",
-  "shipping_update",
-  "order_updates",
 ]
 
 type LibraryForm = { name: string; language: string; button_url: string; button_phone: string }

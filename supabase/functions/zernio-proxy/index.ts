@@ -17,6 +17,7 @@ import {
   normalizeE164,
   requireConnected,
   zernioRequest,
+  zernioRequestRetry,
   ZERNIO_API_KEY_NAME,
   ZERNIO_WEBHOOK_SECRET_NAME,
   ZERNIO_WEBHOOK_TOKEN_NAME,
@@ -298,7 +299,7 @@ async function actionSetupWebhook(supabase: Supabase): Promise<Response> {
 // ---------------------------------------------------------------------------
 
 async function syncTemplates(supabase: Supabase, accountId: string): Promise<number> {
-  const res = await zernioRequest(supabase, "/whatsapp/templates", {
+  const res = await zernioRequestRetry(supabase, "/whatsapp/templates", {
     query: { accountId },
   });
   const templates = res?.templates ?? [];
@@ -362,7 +363,7 @@ async function actionCreateTemplate(
     components.push({ type: "FOOTER", text: String(body.footer_text).trim() });
   }
 
-  const res = await zernioRequest(supabase, "/whatsapp/templates", {
+  const res = await zernioRequestRetry(supabase, "/whatsapp/templates", {
     method: "POST",
     body: { accountId: conn.account_id, name, category, language, components },
   });
@@ -382,7 +383,7 @@ async function actionImportLibraryTemplate(
   if (!name) return jsonResponse(400, { error: "informe o nome do template da biblioteca" });
   const language = String(body.language ?? "pt_BR").trim() || "pt_BR";
 
-  const lookup = await zernioRequest(supabase, "/whatsapp/template-library", {
+  const lookup = await zernioRequestRetry(supabase, "/whatsapp/template-library", {
     query: { accountId: conn.account_id!, name, language },
   });
   const lib = lookup?.template;
@@ -415,7 +416,7 @@ async function actionImportLibraryTemplate(
     }
   }
 
-  const res = await zernioRequest(supabase, "/whatsapp/templates", {
+  const res = await zernioRequestRetry(supabase, "/whatsapp/templates", {
     method: "POST",
     body: {
       accountId: conn.account_id,
@@ -691,7 +692,7 @@ async function actionCampaignSend(
   if (!campaign.zernio_broadcast_id) {
     return jsonResponse(400, { error: "campanha sem broadcast na Zernio" });
   }
-  const res = await zernioRequest(
+  const res = await zernioRequestRetry(
     supabase,
     `/broadcasts/${campaign.zernio_broadcast_id}/send`,
     { method: "POST" },

@@ -147,15 +147,50 @@ export async function zernioRequest(
   }
 
   if (!res.ok) {
-    const detail =
+    let detail =
       (typeof data?.error === "string" && data.error) ||
       (typeof data?.message === "string" && data.message) ||
       (typeof data?.error?.message === "string" && data.error.message) ||
       text.slice(0, 300) ||
       res.statusText;
+    if (/#\s*80008|too many calls/i.test(detail)) {
+      detail =
+        "Meta limitou temporariamente as chamadas desta conta (rate limit). " +
+        "Aguarde alguns minutos e tente novamente.";
+    }
     throw new ZernioApiError(`Zernio ${res.status}: ${detail}`, res.status);
   }
   return data;
+}
+
+/**
+ * zernioRequest com retentativas para erros transitórios de rate limit da
+ * Meta (#80008 / HTTP 429). Backoff: 3s, 10s, 30s.
+ */
+export async function zernioRequestRetry(
+  sb: Supabase,
+  path: string,
+  opts: {
+    method?: string;
+    query?: Record<string, string | number | undefined>;
+    body?: unknown;
+  } = {},
+  attempts = 3,
+): Promise<any> {
+  const delaysMs = [3_000, 10_000, 30_000];
+  let lastErr: unknown;
+  for (let i = 0; i <= attempts; i++) {
+    try {
+      return await zernioRequest(sb, path, opts);
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : "";
+      const transient = /#\s*80008|too many calls|rate limit|Zernio 429/i.test(msg);
+      if (!transient || i === attempts) break;
+      await new Promise((r) => setTimeout(r, delaysMs[i] ?? 30_000));
+    }
+  }
+  throw lastErr;
 }
 
 /** Garante o profile Zernio do CRM e devolve o profileId (cria se preciso). */
