@@ -129,18 +129,14 @@ type Wizard = {
 }
 
 function NewCampaignWizard({
-  contacts,
   onDone,
   onCancel,
 }: {
-  contacts: ContactCandidate[]
   onDone: (campaignId: string) => void
   onCancel: () => void
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
-  const [tagFilter, setTagFilter] = useState<string>("all")
-  const [tags, setTags] = useState<Array<{ id: string; name: string }>>([])
   const [imported, setImported] = useState<ContactCandidate[]>([])
   const fileRef = useRef<HTMLInputElement | null>(null)
   const [busy, setBusy] = useState(false)
@@ -154,15 +150,6 @@ function NewCampaignWizard({
     mode: "now",
     scheduledAt: "",
   })
-
-  useEffect(() => {
-    supabase
-      .from("tags")
-      .select("id, name")
-      .eq("is_active", true)
-      .order("name")
-      .then(({ data }) => setTags((data ?? []) as Array<{ id: string; name: string }>))
-  }, [])
 
   useEffect(() => {
     supabase
@@ -180,8 +167,8 @@ function NewCampaignWizard({
   }, [])
 
   const eligible = useMemo(
-    () => [...contacts, ...imported].filter((c) => isValidPhone(c.phone)),
-    [contacts, imported],
+    () => imported.filter((c) => isValidPhone(c.phone)),
+    [imported],
   )
 
   function handleImportFile(file: File) {
@@ -193,10 +180,7 @@ function NewCampaignWizard({
         toast.error("Nenhum telefone reconhecido no arquivo (use CSV/TXT com \"telefone,nome\" por linha, ou .vcf)")
         return
       }
-      const known = new Set<string>([
-        ...contacts.map((c) => digits(c.phone ?? "")),
-        ...imported.map((c) => c.phone ?? ""),
-      ])
+      const known = new Set<string>(imported.map((c) => c.phone ?? ""))
       const fresh: ContactCandidate[] = []
       for (const p of parsed) {
         const d = p.phone ?? ""
@@ -224,19 +208,13 @@ function NewCampaignWizard({
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return eligible.filter((c) => {
-      if (tagFilter !== "all") {
-        const tagIds = (c.contact_tags ?? []).map((t) => t.tag_id)
-        if (!tagIds.includes(tagFilter)) return false
-      }
-      if (!q) return true
-      return (
+    if (!q) return eligible
+    return eligible.filter(
+      (c) =>
         displayName(c).toLowerCase().includes(q) ||
-        (c.phone ?? "").includes(q) ||
-        (c.email ?? "").toLowerCase().includes(q)
-      )
-    })
-  }, [eligible, search, tagFilter])
+        (c.phone ?? "").includes(q),
+    )
+  }, [eligible, search])
 
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -313,10 +291,8 @@ function NewCampaignWizard({
             ? new Date(wizard.scheduledAt).toISOString()
             : null,
         recipients: chosen.map((c) => ({
-          contact_id: c.imported ? null : c.id,
           phone: digits(c.phone as string),
           name: displayName(c) === "Sem nome" ? null : displayName(c),
-          email: c.email,
         })),
       })
       const campaign = data?.campaign as Campaign | undefined
@@ -353,7 +329,9 @@ function NewCampaignWizard({
           <CardHeader>
             <CardTitle>Quem recebe?</CardTitle>
             <CardDescription>
-              Contatos com telefone válido e sem opt-out. Tags ajudam a segmentar.
+              Importe um arquivo com os destinatários. Formatos aceitos: CSV/TXT
+              (uma linha por contato — "telefone,nome", "nome,telefone" ou só o
+              telefone) e vCard (.vcf). Números sem DDI assumem 55 (Brasil).
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -375,110 +353,114 @@ function NewCampaignWizard({
                 placeholder="Interna, para o time lembrar o contexto"
               />
             </div>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Buscar nome/telefone..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Select value={tagFilter} onValueChange={setTagFilter}>
-                <SelectTrigger className="w-52 shrink-0">
-                  <SelectValue placeholder="Tag" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todas as tags</SelectItem>
-                  {tags.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".csv,.txt,.vcf"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) handleImportFile(f)
-                  e.target.value = ""
-                }}
-              />
-              <Button variant="outline" className="shrink-0" onClick={() => fileRef.current?.click()}>
-                <Upload className="mr-2 h-4 w-4" /> Arquivo
-              </Button>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">
-                {visible.length} contato(s) elegível(is) · {selected.size} selecionado(s)
+
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.txt,.vcf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) handleImportFile(f)
+                e.target.value = ""
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="flex w-full flex-col items-center gap-2 rounded-lg border-2 border-dashed p-8 text-center transition-colors hover:border-primary hover:bg-muted/40"
+            >
+              <Upload className="h-6 w-6 text-muted-foreground" />
+              <span className="text-sm font-medium">
+                {eligible.length === 0 ? "Selecionar arquivo de contatos" : "Adicionar outro arquivo"}
               </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    setSelected((prev) => {
-                      const next = new Set(prev)
-                      visible.forEach((c) => next.add(c.id))
-                      return next
-                    })
-                  }
-                >
-                  Selecionar visíveis
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => setSelected(new Set())}>
-                  Limpar
-                </Button>
-              </div>
-            </div>
-            <div className="max-h-80 overflow-auto rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10" />
-                    <TableHead>Nome</TableHead>
-                    <TableHead>Telefone</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {visible.slice(0, 300).map((c) => (
-                    <TableRow key={c.id} className="cursor-pointer" onClick={() => toggle(c.id)}>
-                      <TableCell>
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded border-input"
-                          checked={selected.has(c.id)}
-                          onChange={() => toggle(c.id)}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        {displayName(c)}
-                        {c.imported && (
-                          <Badge variant="secondary" className="ml-2 text-[10px]">
-                            arquivo
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{c.phone}</TableCell>
-                    </TableRow>
-                  ))}
-                  {visible.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={3} className="text-center text-muted-foreground">
-                        Nenhum contato elegível (precisa de telefone com DDI e opt-out desativado).
-                      </TableCell>
-                    </TableRow>
+              <span className="text-xs text-muted-foreground">
+                .csv, .txt ou .vcf — telefones duplicados são ignorados
+              </span>
+            </button>
+
+            {eligible.length > 0 && (
+              <>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Buscar na lista importada..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() =>
+                      setSelected((prev) => {
+                        const next = new Set(prev)
+                        visible.forEach((c) => next.add(c.id))
+                        return next
+                      })
+                    }
+                  >
+                    Selecionar visíveis
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => {
+                      setImported([])
+                      setSelected(new Set())
+                      setSearch("")
+                    }}
+                  >
+                    Limpar tudo
+                  </Button>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    {visible.length} contato(s) na lista · {selected.size} selecionado(s)
+                  </span>
+                </div>
+                <div className="max-h-80 overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-10" />
+                        <TableHead>Nome</TableHead>
+                        <TableHead>Telefone</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visible.slice(0, 300).map((c) => (
+                        <TableRow key={c.id} className="cursor-pointer" onClick={() => toggle(c.id)}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 rounded border-input"
+                              checked={selected.has(c.id)}
+                              onChange={() => toggle(c.id)}
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </TableCell>
+                          <TableCell>{displayName(c)}</TableCell>
+                          <TableCell className="text-muted-foreground">{c.phone}</TableCell>
+                        </TableRow>
+                      ))}
+                      {visible.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={3} className="text-center text-muted-foreground">
+                            Nenhum contato da lista corresponde à busca.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                  {visible.length > 300 && (
+                    <p className="p-2 text-center text-xs text-muted-foreground">
+                      Mostrando os primeiros 300 de {visible.length} — refine a busca.
+                    </p>
                   )}
-                </TableBody>
-              </Table>
-              {visible.length > 300 && (
-                <p className="p-2 text-center text-xs text-muted-foreground">
-                  Mostrando os primeiros 300 de {visible.length} — refine a busca ou a tag.
-                </p>
-              )}
-            </div>
+                </div>
+              </>
+            )}
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={onCancel}>
                 Cancelar
@@ -972,22 +954,15 @@ function CampaignDetail({
 export default function Campaigns() {
   const [view, setView] = useState<"list" | "new" | "detail">("list")
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
-  const [contacts, setContacts] = useState<ContactCandidate[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const loadList = useCallback(async () => {
-    const [{ data: campaignsData }, { data: contactsData }] = await Promise.all([
-      supabase.from("campaigns").select("*").order("created_at", { ascending: false }),
-      supabase
-        .from("contacts")
-        .select("id, name, push_name, phone, email, opted_out, contact_tags(tag_id)")
-        .eq("opted_out", false)
-        .not("phone", "is", null)
-        .limit(5000),
-    ])
+    const { data: campaignsData } = await supabase
+      .from("campaigns")
+      .select("*")
+      .order("created_at", { ascending: false })
     setCampaigns((campaignsData as Campaign[]) ?? [])
-    setContacts(((contactsData as unknown as ContactCandidate[]) ?? []).filter((c) => isValidPhone(c.phone)))
     setLoading(false)
   }, [])
 
@@ -999,7 +974,6 @@ export default function Campaigns() {
     return (
       <div className="h-full overflow-y-auto p-6">
         <NewCampaignWizard
-          contacts={contacts}
           onCancel={() => setView("list")}
           onDone={(id) => {
             setSelectedId(id)
