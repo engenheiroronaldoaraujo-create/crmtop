@@ -19,6 +19,7 @@ import {
   FileText,
   FlaskConical,
   Loader2,
+  Megaphone,
   Paperclip,
   Phone,
   Plus,
@@ -51,6 +52,7 @@ import {
 } from "@/lib/utils"
 import type {
   Conversation,
+  ConversationSource,
   Message,
   MessageTemplate,
   Profile,
@@ -95,6 +97,30 @@ import {
 } from "@/components/ui/dropdown-menu"
 
 type Filter = "all" | "mine" | "unassigned"
+
+type SourceFilter = "all" | ConversationSource
+
+const SOURCE_OPTIONS: [SourceFilter, string][] = [
+  ["all", "Todas as origens"],
+  ["ad", "Anúncios"],
+  ["campaign", "Campanhas"],
+  ["organic", "Orgânico"],
+  ["manual", "Manual"],
+]
+
+const SOURCE_BADGES: Partial<Record<ConversationSource, string>> = {
+  ad: "Anúncio",
+  campaign: "Campanha",
+}
+
+const SOURCE_FILTER_KEY = "chat-source-filter"
+
+function initialSourceFilter(): SourceFilter {
+  const stored = localStorage.getItem(SOURCE_FILTER_KEY)
+  return SOURCE_OPTIONS.some(([key]) => key === stored)
+    ? (stored as SourceFilter)
+    : "all"
+}
 
 const MESSAGE_PAGE_SIZE = 200
 
@@ -296,7 +322,15 @@ function ConversationItem({
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <p className={cn("truncate text-sm", selected ? "font-bold text-blue-900" : "font-medium text-slate-800")}>{name}</p>
+          <p className={cn("flex min-w-0 items-center gap-1.5 text-sm", selected ? "font-bold text-blue-900" : "font-medium text-slate-800")}>
+            <span className="truncate">{name}</span>
+            {SOURCE_BADGES[conv.source] && (
+              <Badge variant="secondary" className="h-4 shrink-0 gap-1 rounded-full bg-violet-100 px-1.5 text-[10px] font-semibold text-violet-700">
+                <Megaphone className="h-2.5 w-2.5" />
+                {SOURCE_BADGES[conv.source]}
+              </Badge>
+            )}
+          </p>
           {conv.last_message_at && (
             <span className="shrink-0 text-xs text-slate-400">
               {formatListTime(conv.last_message_at)}
@@ -344,6 +378,7 @@ export default function ChatPage() {
   const [optimisticMsgs, setOptimisticMsgs] = useState<Message[]>([])
   const [loadingConversations, setLoadingConversations] = useState(true)
   const [filter, setFilter] = useState<Filter>("all")
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(initialSourceFilter)
   const [query, setQuery] = useState("")
   const [text, setText] = useState("")
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null)
@@ -472,18 +507,24 @@ export default function ChatPage() {
   }
 
   const loadConversations = useCallback(async () => {
-    const { data, error } = await supabase
+    let req = supabase
       .from("conversations")
       .select("*, contact:contacts(*), assignee:profiles(id, full_name)")
       .order("last_message_at", { ascending: false, nullsFirst: false })
       .limit(500)
+    if (sourceFilter !== "all") req = req.eq("source", sourceFilter)
+    const { data, error } = await req
     if (error) {
       toast.error(error.message)
     } else {
       setConversations((data as unknown as Conversation[]) ?? [])
     }
     setLoadingConversations(false)
-  }, [])
+  }, [sourceFilter])
+
+  useEffect(() => {
+    localStorage.setItem(SOURCE_FILTER_KEY, sourceFilter)
+  }, [sourceFilter])
 
   const markRead = useCallback(async (id: string) => {
     await supabase.rpc("mark_conversation_read", { p_conversation_id: id })
@@ -1053,6 +1094,21 @@ export default function ChatPage() {
                 </Button>
               ))}
             </div>
+            <Select
+              value={sourceFilter}
+              onValueChange={(v) => setSourceFilter(v as SourceFilter)}
+            >
+              <SelectTrigger className="h-8 w-36 text-xs" aria-label="Filtrar por origem">
+                <SelectValue placeholder="Origem" />
+              </SelectTrigger>
+              <SelectContent>
+                {SOURCE_OPTIONS.map(([key, label]) => (
+                  <SelectItem key={key} value={key} className="text-xs">
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <Input
             placeholder="Buscar conversa..."

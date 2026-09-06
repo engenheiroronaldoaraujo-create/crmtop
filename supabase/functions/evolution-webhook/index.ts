@@ -72,11 +72,25 @@ interface RawMessage {
     id?: string;
     senderPn?: string;
     remoteJidAlt?: string;
+    // Atribuição de anúncio click-to-WhatsApp (Meta) presente na primeira
+    // mensagem de conversas vindas de anúncios no Facebook/Instagram.
+    advertiser?: {
+      id?: string;
+      source?: string;
+      cta_source_url?: string;
+      click_id?: string;
+    };
   };
   // Alguns servidores Evolution/versões colocam esses campos no nível raiz do
   // item, fora do `key` — lemos dos dois lugares.
   senderPn?: string;
   remoteJidAlt?: string;
+  advertiser?: {
+    id?: string;
+    source?: string;
+    cta_source_url?: string;
+    click_id?: string;
+  };
   pushName?: string;
   message?: Record<string, unknown>;
   messageType?: string;
@@ -307,7 +321,22 @@ async function processMessage(
 
   const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
   console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
-  const conversationId = await upsertConversation(supabase, contactId, instanceId);
+
+  // Origem por anúncio: só vale para mensagem inbound e é aplicada apenas na
+  // criação da conversa (upsertConversation não sobrescreve existentes).
+  // Alguns servidores colocam `advertiser` no nível raiz, fora de `key`.
+  const advertiser = !fromMe ? raw.key?.advertiser ?? raw.advertiser : undefined;
+  const origin = advertiser?.id || advertiser?.source
+    ? {
+        source: "ad" as const,
+        meta: {
+          ad_id: advertiser.id ?? null,
+          network: advertiser.source ?? null,
+          cta_source_url: advertiser.cta_source_url ?? null,
+        },
+      }
+    : undefined;
+  const conversationId = await upsertConversation(supabase, contactId, instanceId, origin);
 
   let mediaUrl: string | null = null;
   let audioBase64: string | null = null;
@@ -518,26 +547,63 @@ async function callSDREngine(
       const result = await res.json()
       console.info("SDR_ENGINE_RESULT", { action: result.action, hasResponse: !!result.response })
       if (result.response && result.action !== "skip" && result.action !== "error") {
-        // Save SDR response to messages table FIRST (so context is available)
-        await supabase.from("messages").insert({
+        // Save SDR response to messages table FIRST (so context is available).
+        // A linha nasce SEM evolution_message_id; após o envio anexamos o ID
+        // real da Evolution — assim o eco do webhook bate na constraint
+        // (conversation_id, evolution_message_id) e NÃO insere uma segunda
+        // bolha (antes, o eco criava a mensagem duplicada no chat).
+        const { data: sdrRow } = await supabase.from("messages").insert({
           conversation_id: conversationId,
           direction: "outbound",
           type: "text",
           content: result.response,
           sent_at: new Date().toISOString(),
           status: "sent",
-        }).then(() => {}, () => {})
+        }).select("id").maybeSingle()
 
         // Send via Evolution API
         const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
         const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
         const phone = await getContactPhone(supabase, contactId)
+        let sendOk = false
+        let sendErrorText: string | null = null
         if (phone) {
-          await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "apikey": apiKey },
-            body: JSON.stringify({ number: phone, text: result.response }),
-          })
+          try {
+            const sendRes = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "apikey": apiKey },
+              body: JSON.stringify({ number: phone, text: result.response }),
+            })
+            sendOk = sendRes.ok
+            if (sendRes.ok) {
+              const sendData = await sendRes.json().catch(() => null)
+              const echoId = sendData?.key?.id ?? null
+              if (sdrRow?.id && echoId) {
+                const { error: attachErr } = await supabase
+                  .from("messages")
+                  .update({ evolution_message_id: echoId })
+                  .eq("id", sdrRow.id)
+                if (attachErr) {
+                  // O eco do webhook chegou primeiro e criou a linha com o ID
+                  // real (violação de unique): remove a linha-fantasma sem ID.
+                  await supabase.from("messages").delete().eq("id", sdrRow.id)
+                }
+              }
+            } else {
+              sendErrorText = (await sendRes.text()).slice(0, 300)
+            }
+          } catch (sendErr) {
+            sendErrorText = String(sendErr).slice(0, 300)
+          }
+        } else {
+          sendErrorText = "contato sem telefone — envio não realizado"
+        }
+        if (sdrRow?.id && !sendOk) {
+          await supabase
+            .from("messages")
+            .update({ status: "failed", send_error: sendErrorText })
+            .eq("id", sdrRow.id)
+            .then(() => {}, () => {})
         }
 
         // Update SDR conversation state

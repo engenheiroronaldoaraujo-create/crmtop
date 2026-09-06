@@ -30,12 +30,16 @@ export type WhatsAppInstance = {
   created_at: string
 }
 
+export type ConversationSource = "organic" | "ad" | "campaign" | "manual"
+
 export type Conversation = {
   id: string
   contact_id: string
   instance_id: string
   assigned_to: string | null
   status: "open" | "closed"
+  source: ConversationSource
+  source_meta: Record<string, unknown> | null
   last_message_at: string | null
   last_message_preview: string | null
   unread_count: number

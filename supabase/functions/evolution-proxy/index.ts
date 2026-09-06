@@ -1,5 +1,6 @@
 ﻿import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import {
+  mergeContacts,
   serviceClient,
   upsertContact,
   upsertConversation,
@@ -838,7 +839,10 @@ function mapMessageRecord(rec: any): { type: string; content: string } {
 }
 
 // Merges a LID-only contact into an existing phone-based contact (the same
-// person): moves conversations/messages, transfers the LID, deletes the dup.
+// person): conversations/messages/refs move with dedup by evolution_message_id
+// and the LID contact is removed. Heavy lifting lives in the shared
+// mergeContacts (_shared/contacts.ts), also used by upsertContact on
+// phone/lid collisions.
 async function mergeLidIntoPhone(
   supabase: Supabase,
   lidKey: string,
@@ -846,66 +850,11 @@ async function mergeLidIntoPhone(
 ): Promise<void> {
   const { data: lidContact } = await supabase
     .from("contacts")
-    .select("id, push_name")
+    .select("id")
     .eq("lid", lidKey)
     .maybeSingle();
-  if (!lidContact) return;
-  const lidId = lidContact.id;
-
-  const { data: phoneConvs } = await supabase
-    .from("conversations")
-    .select("id, instance_id")
-    .eq("contact_id", phoneContactId);
-  const phoneConvByInstance = new Map<string, string>(
-    (phoneConvs ?? []).map((c: any) => [c.instance_id, c.id]),
-  );
-  const { data: lidConvs } = await supabase
-    .from("conversations")
-    .select("id, instance_id")
-    .eq("contact_id", lidId);
-
-  for (const lc of lidConvs ?? []) {
-    const pc = phoneConvByInstance.get(lc.instance_id);
-    if (pc) {
-      // Move only messages not already present in the target conversation.
-      const { data: msgs } = await supabase
-        .from("messages")
-        .select("id, evolution_message_id")
-        .eq("conversation_id", lc.id);
-      for (const m of msgs ?? []) {
-        if (!m.evolution_message_id) {
-          await supabase.from("messages").update({ conversation_id: pc }).eq("id", m.id);
-          continue;
-        }
-        const { data: dup } = await supabase
-          .from("messages")
-          .select("id")
-          .eq("conversation_id", pc)
-          .eq("evolution_message_id", m.evolution_message_id)
-          .maybeSingle();
-        if (!dup) {
-          await supabase.from("messages").update({ conversation_id: pc }).eq("id", m.id);
-        }
-      }
-      await supabase.from("conversations").delete().eq("id", lc.id);
-    } else {
-      await supabase.from("conversations").update({ contact_id: phoneContactId }).eq("id", lc.id);
-    }
-  }
-
-  const patch: Record<string, unknown> = {};
-  if (lidContact.push_name) patch.push_name = lidContact.push_name;
-  if (Object.keys(patch).length > 0) {
-    await supabase.from("contacts").update(patch).eq("id", phoneContactId);
-  }
-  // Transfer the LID (best effort — a unique violation means another contact
-  // already holds it; the webhook resolves it on the next message anyway).
-  try {
-    await supabase.from("contacts").update({ lid: lidKey }).eq("id", phoneContactId).is("lid", null);
-  } catch (err) {
-    console.error("lid transfer skipped", err instanceof Error ? err.message : err);
-  }
-  await supabase.from("contacts").delete().eq("id", lidId);
+  if (!lidContact || lidContact.id === phoneContactId) return;
+  await mergeContacts(supabase, lidContact.id, phoneContactId);
 }
 
 // A camada central de identidade (evolution-identity.ts) é a ÚNICA fonte das
