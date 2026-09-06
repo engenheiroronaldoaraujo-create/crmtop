@@ -423,6 +423,7 @@ export type Campaign = {
   zernio_broadcast_id: string | null
   template_name: string
   template_language: string
+  send_mode: "broadcast" | "direct"
   variable_mapping: Record<string, VariableMappingEntry>
   status: "draft" | "scheduled" | "sending" | "completed" | "failed" | "cancelled"
   scheduled_at: string | null

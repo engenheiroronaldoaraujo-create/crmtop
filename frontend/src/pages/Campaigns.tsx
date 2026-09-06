@@ -100,14 +100,25 @@ function placeholdersOf(components: unknown): number {
   return max
 }
 
-// Variáveis com nome ({{nome}}) não funcionam em envio em massa na Meta —
-// só as numeradas ({{1}}). Detecta para bloquear a seleção no wizard.
-function hasNamedParams(components: unknown): boolean {
+// Variáveis com nome ({{nome}}) não funcionam no broadcast da Meta — o app
+// usa envio individual por destinatário nesse caso. Retorna os slots nomeados
+// em ordem de primeira aparição (a ordem dos valores aceita pela Meta).
+function namedSlotsOf(components: unknown): string[] {
+  let text: string
   try {
-    return /\{\{\s*[a-zA-Z_]\w*\s*\}\}/.test(JSON.stringify(components ?? ""))
+    text = JSON.stringify(components ?? "")
   } catch {
-    return false
+    return []
   }
+  const out: string[] = []
+  for (const m of text.matchAll(/\{\{\s*([a-zA-Z_]\w*)\s*\}\}/g)) {
+    if (!out.includes(m[1])) out.push(m[1])
+  }
+  return out
+}
+
+function hasNamedParams(components: unknown): boolean {
+  return namedSlotsOf(components).length > 0
 }
 
 function formatDateTime(iso: string | null): string {
@@ -170,9 +181,8 @@ function NewCampaignWizard({
       .then(({ data }) => {
         const list = (data ?? []) as ZernioTemplate[]
         setWizard((w) => ({ ...w, templates: list }))
-        const usable = list.filter((t) => !hasNamedParams(t.components))
-        if (usable.length === 1) {
-          setWizard((w) => ({ ...w, templateKey: `${usable[0].name}|${usable[0].language}` }))
+        if (list.length === 1) {
+          setWizard((w) => ({ ...w, templateKey: `${list[0].name}|${list[0].language}` }))
         }
       })
   }, [])
@@ -239,10 +249,27 @@ function NewCampaignWizard({
     () => wizard.templates.find((t) => `${t.name}|${t.language}` === wizard.templateKey) ?? null,
     [wizard.templates, wizard.templateKey],
   )
-  const placeholderCount = useMemo(
-    () => (template ? placeholdersOf(template.components) : 0),
+  // Slots do template: nomeados ({{nome}}) ou numéricos ({{1}}), em ordem de
+  // aparição. Nomeados forçam envio individual (sem broadcast/agendamento).
+  const slotLabels = useMemo<string[]>(() => {
+    if (!template) return []
+    const named = namedSlotsOf(template.components)
+    if (named.length > 0) return named.map((n) => `{{${n}}}`)
+    const n = placeholdersOf(template.components)
+    return Array.from({ length: n }, (_, i) => `{{${i + 1}}}`)
+  }, [template])
+  const isDirectTemplate = useMemo(
+    () => Boolean(template) && namedSlotsOf(template?.components).length > 0,
     [template],
   )
+  const placeholderCount = slotLabels.length
+
+  // Template nomeado → envio individual: sem opção de agendar.
+  useEffect(() => {
+    if (isDirectTemplate) {
+      setWizard((w) => (w.mode === "now" ? w : { ...w, mode: "now", scheduledAt: "" }))
+    }
+  }, [isDirectTemplate])
   const templateBody = useMemo(() => {
     const comps = (template?.components ?? []) as Array<{ type?: string; text?: string }>
     return comps.find((c) => c?.type === "BODY")?.text ?? ""
@@ -280,7 +307,7 @@ function NewCampaignWizard({
     for (let i = 1; i <= placeholderCount; i++) {
       const m = wizard.mapping[String(i)]
       if (!m) {
-        toast.error(`Mapeie a variável {{${i}}}`)
+        toast.error(`Mapeie a variável ${slotLabels[i - 1] ?? `{{${i}}}`}`)
         return
       }
       variableMapping[String(i)] =
@@ -304,14 +331,30 @@ function NewCampaignWizard({
         recipients: chosen.map((c) => ({
           phone: digits(c.phone as string),
           name: displayName(c) === "Sem nome" ? null : displayName(c),
+          email: c.email,
         })),
       })
       const campaign = data?.campaign as Campaign | undefined
       if (!campaign) throw new Error("Campanha não criada")
 
       if (wizard.mode === "now") {
-        await zernioCampaignSend(campaign.id)
-        toast.success("Envio iniciado! Acompanhe o progresso na página da campanha.")
+        const direct = campaign.send_mode === "direct"
+        if (direct) {
+          // Envio individual lote-a-lote: repete até concluir (done) ou estourar
+          // o teto de segurança. Cada chamada resolve os nomes por contato.
+          let remaining = Infinity
+          let guard = 0
+          while (remaining > 0 && guard < 200) {
+            const r = await zernioCampaignSend(campaign.id)
+            remaining = Number(r?.remaining ?? 0)
+            guard += 1
+            if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
+          }
+          toast.success("Envio concluído! Acompanhe entregues/lidas na campanha.")
+        } else {
+          await zernioCampaignSend(campaign.id)
+          toast.success("Envio iniciado! Acompanhe o progresso na página da campanha.")
+        }
       } else {
         toast.success("Campanha agendada")
       }
@@ -520,10 +563,9 @@ function NewCampaignWizard({
                           <SelectItem
                             key={`${t.name}|${t.language}`}
                             value={`${t.name}|${t.language}`}
-                            disabled={named}
                           >
                             {t.name} ({t.language}) — {t.category ?? "?"}
-                            {named ? " · usa {{nome}}, incompatível com campanha" : ""}
+                            {named ? " · variáveis nomeadas → envio individual" : ""}
                           </SelectItem>
                         )
                       })}
@@ -543,7 +585,9 @@ function NewCampaignWizard({
                           const m = wizard.mapping[pos] ?? { field: "name" as MappingField, customValue: "" }
                           return (
                             <div key={pos} className="flex items-center gap-2">
-                              <code className="w-12 text-sm">{"{{" + pos + "}}"}</code>
+                              <code className="w-24 shrink-0 truncate text-sm">
+                                {slotLabels[Number(pos) - 1] ?? `{{${pos}}}`}
+                              </code>
                               <Select
                                 value={m.field}
                                 onValueChange={(v) =>
@@ -628,24 +672,33 @@ function NewCampaignWizard({
             </div>
             <div className="space-y-2">
               <Label>Quando enviar?</Label>
-              <Select
-                value={wizard.mode}
-                onValueChange={(v) => setWizard({ ...wizard, mode: v as Wizard["mode"] })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="now">Agora, ao criar a campanha</SelectItem>
-                  <SelectItem value="schedule">Agendar para data/hora</SelectItem>
-                </SelectContent>
-              </Select>
-              {wizard.mode === "schedule" && (
-                <Input
-                  type="datetime-local"
-                  value={wizard.scheduledAt}
-                  onChange={(e) => setWizard({ ...wizard, scheduledAt: e.target.value })}
-                />
+              {isDirectTemplate ? (
+                <p className="text-sm text-muted-foreground">
+                  Este template usa variáveis nomeadas — envio individual, imediato
+                  (a Meta não oferece agendamento nesse modo). Começa ao criar.
+                </p>
+              ) : (
+                <>
+                  <Select
+                    value={wizard.mode}
+                    onValueChange={(v) => setWizard({ ...wizard, mode: v as Wizard["mode"] })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="now">Agora, ao criar a campanha</SelectItem>
+                      <SelectItem value="schedule">Agendar para data/hora</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {wizard.mode === "schedule" && (
+                    <Input
+                      type="datetime-local"
+                      value={wizard.scheduledAt}
+                      onChange={(e) => setWizard({ ...wizard, scheduledAt: e.target.value })}
+                    />
+                  )}
+                </>
               )}
             </div>
             <p className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-xs text-muted-foreground">
@@ -660,7 +713,9 @@ function NewCampaignWizard({
               </Button>
               <Button disabled={busy} onClick={handleCreate}>
                 {busy
-                  ? "Criando..."
+                  ? isDirectTemplate
+                    ? "Enviando individual…"
+                    : "Criando..."
                   : wizard.mode === "now"
                     ? `Enviar para ${chosen.length} contato(s)`
                     : "Criar campanha agendada"}
@@ -763,8 +818,20 @@ function CampaignDetail({
               onClick={() =>
                 withBusy(async () => {
                   try {
-                    await zernioCampaignSend(campaign.id)
-                    toast.success("Envio iniciado")
+                    if (campaign.send_mode === "direct") {
+                      let remaining = Infinity
+                      let guard = 0
+                      while (remaining > 0 && guard < 200) {
+                        const r = await zernioCampaignSend(campaign.id)
+                        remaining = Number(r?.remaining ?? 0)
+                        guard += 1
+                        if (guard % 3 === 0) toast.info(`Enviando… faltam ${remaining}`)
+                      }
+                      toast.success("Envio concluído")
+                    } else {
+                      await zernioCampaignSend(campaign.id)
+                      toast.success("Envio iniciado")
+                    }
                     await load()
                   } catch (err) {
                     toast.error(err instanceof Error ? err.message : "Falha ao enviar")
@@ -803,6 +870,9 @@ function CampaignDetail({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-lg">
             {campaign.name} <Badge className={sm.className}>{sm.label}</Badge>
+            {campaign.send_mode === "direct" && (
+              <Badge variant="secondary">envio individual</Badge>
+            )}
           </CardTitle>
           <CardDescription>
             Template {campaign.template_name} ({campaign.template_language}) ·{" "}

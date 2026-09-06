@@ -64,10 +64,30 @@ export function countTemplatePlaceholders(components: unknown): number {
 }
 
 /**
+ * Slots nomeados do template ({{nome}}, {{empresa}}...) em ordem de primeira
+ * aparição — a ordem em que a Meta aceita os valores no envio direto
+ * (POST /v1/inbox/conversations → templateParams).
+ */
+export function listNamedTemplateSlots(components: unknown): string[] {
+  let text: string;
+  try {
+    text = typeof components === "string" ? components : JSON.stringify(components ?? "");
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const m of text.matchAll(/\{\{\s*([a-zA-Z_]\w*)\s*\}\}/g)) {
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+/**
  * True quando o template usa variáveis COM NOME ({{nome}} — parameter_format
  * NAMED, comum em templates criados no WhatsApp Manager). O engine de
  * broadcast da Zernio não resolve as nomeadas ("only numbered placeholders
- * are supported") — campanhas com esse template falham com Meta 132000.
+ * are supported") — nesses casos o app envia em modo direto (conversa por
+ * conversa) resolvendo os valores ele mesmo.
  */
 export function hasNamedTemplateParams(components: unknown): boolean {
   let text: string;

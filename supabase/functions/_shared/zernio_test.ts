@@ -4,6 +4,7 @@ import {
   chunk,
   countTemplatePlaceholders,
   hasNamedTemplateParams,
+  listNamedTemplateSlots,
   META_COOLDOWN_KEY,
   metaCooldownRemainingMinutes,
   normalizeE164,
@@ -85,6 +86,15 @@ Deno.test("hasNamedTemplateParams: numérico puro é compatível", () => {
   assertEquals(hasNamedTemplateParams(numbered), false);
   assertEquals(hasNamedTemplateParams([{ type: "BODY", text: "Fixo" }]), false);
   assertEquals(hasNamedTemplateParams(null), false);
+});
+
+Deno.test("listNamedTemplateSlots: ordem de primeira aparição, sem duplicar", () => {
+  const components = [
+    { type: "BODY", text: "{{empresa}} oferece {{nome}}, e {{empresa}} de novo" },
+  ];
+  assertEquals(listNamedTemplateSlots(components), ["empresa", "nome"]);
+  assertEquals(listNamedTemplateSlots([{ type: "BODY", text: "{{1}} e {{2}}" }]), []);
+  assertEquals(listNamedTemplateSlots(null), []);
 });
 
 Deno.test("buildBroadcastTemplate: sem variáveis omite components", () => {

@@ -14,7 +14,7 @@ import {
   ensureZernioProfile,
   getZernioConnection,
   getZernioKey,
-  hasNamedTemplateParams,
+  listNamedTemplateSlots,
   metaCooldownRemainingMinutes,
   normalizeE164,
   requireConnected,
@@ -483,27 +483,37 @@ async function actionCampaignCreate(
   if (tpl.status !== "APPROVED") {
     return jsonResponse(400, { error: `template ${tpl.status ?? "?"}: só templates aprovados podem enviar` });
   }
-  if (hasNamedTemplateParams(tpl.components)) {
+
+  // Template com variáveis nomeadas ({{nome}}) → envio DIRETO por destinatário
+  // (o broadcast da Meta só resolve numeradas). Nº de variáveis e ordem dos
+  // valores: slots nomeados em ordem de aparição no corpo aprovado.
+  const namedSlots = listNamedTemplateSlots(tpl.components);
+  const numberedCount = countTemplatePlaceholders(tpl.components);
+  if (namedSlots.length > 0 && numberedCount > 0) {
     return jsonResponse(400, {
-      error:
-        'este template usa variáveis com nome (ex.: {{nome}}), que o envio em massa da Meta não suporta. ' +
-        "Crie o template com variáveis numeradas — ex.: Olá, {{1}}! — e sincronize novamente.",
+      error: "template mistura variáveis nomeadas e numeradas — a Meta não suporta em campanhas",
     });
   }
-
-  // Nº de variáveis vem do template cacheado (fonte: Meta), não do cliente —
-  // mismatch de parâmetros é rejeitado pela Meta (código 132000).
-  const placeholderCount = countTemplatePlaceholders(tpl.components);
+  const directMode = namedSlots.length > 0;
+  const slotCount = directMode ? namedSlots.length : numberedCount;
+  const expectedKeys = Array.from({ length: slotCount }, (_, i) => String(i + 1));
   const variableMapping = body.variable_mapping && typeof body.variable_mapping === "object"
     ? body.variable_mapping
     : {};
-  if (placeholderCount > 0) {
+  if (slotCount > 0) {
     const mapped = Object.keys(variableMapping).length;
-    if (mapped !== placeholderCount) {
+    if (mapped !== slotCount) {
       return jsonResponse(400, {
-        error: `mapeie as ${placeholderCount} variáveis do template (recebi ${mapped})`,
+        error: `mapeie as ${slotCount} variáveis do template (recebi ${mapped})`,
       });
     }
+    for (const k of expectedKeys) {
+      if (!variableMapping[k]) {
+        return jsonResponse(400, { error: `falta mapear a variável ${directMode ? namedSlots[Number(k) - 1] : `{{${k}}}`}` });
+      }
+    }
+  } else if (Object.keys(variableMapping).length > 0) {
+    return jsonResponse(400, { error: "este template não tem variáveis para mapear" });
   }
 
   // Monta audiência: dedupe por dígitos, ignora quem não tem E.164 válido.
@@ -543,6 +553,7 @@ async function actionCampaignCreate(
       template_name: templateName,
       template_language: templateLanguage,
       variable_mapping: variableMapping,
+      send_mode: directMode ? "direct" : "broadcast",
       status: "draft",
       created_by: user.id,
     })
@@ -556,11 +567,34 @@ async function actionCampaignCreate(
       contact_id: r.contact_id ?? null,
       phone: r.phone,
       name: r.name ?? null,
+      email: r.email ?? null,
     })),
   );
   if (recErr) {
     await supabase.from("campaigns").delete().eq("id", campaign.id);
     throw new Error(recErr.message);
+  }
+  await supabase
+    .from("campaigns")
+    .update({ recipient_count: recipients.length })
+    .eq("id", campaign.id);
+
+  if (directMode) {
+    // Sem broadcast: os envios saem mensagem-a-mensagem via /inbox/conversations
+    // com os valores resolvidos pelo próprio app (nome/e-mail/telefone/fixo).
+    // Agendamento não existe nesse modo (a Meta não fornece fila aqui).
+    if (body.scheduled_at) {
+      await supabase.from("campaigns").delete().eq("id", campaign.id);
+      return jsonResponse(400, {
+        error: "templates com variáveis nomeadas só enviam imediatamente (sem agendamento)",
+      });
+    }
+    const { data: fresh } = await supabase
+      .from("campaigns")
+      .select("*")
+      .eq("id", campaign.id)
+      .single();
+    return jsonResponse(200, { ok: true, campaign: fresh });
   }
 
   try {
@@ -593,7 +627,7 @@ async function actionCampaignCreate(
         template: buildBroadcastTemplate(
           templateName,
           templateLanguage,
-          placeholderCount,
+          slotCount,
           variableMapping,
         ),
       },
@@ -603,7 +637,7 @@ async function actionCampaignCreate(
 
     const { error: updErr } = await supabase
       .from("campaigns")
-      .update({ zernio_broadcast_id: broadcastId, recipient_count: recipients.length })
+      .update({ zernio_broadcast_id: broadcastId })
       .eq("id", campaign.id);
     if (updErr) throw new Error(updErr.message);
 
@@ -636,19 +670,28 @@ async function actionCampaignCreate(
   }
 }
 
-async function getCampaignOr404(supabase: Supabase, campaignId: string) {
+interface CampaignRow {
+  id: string;
+  name: string;
+  status: string;
+  zernio_broadcast_id: string | null;
+  send_mode: string;
+  template_name: string;
+  template_language: string;
+  variable_mapping: Record<string, { field?: string; customValue?: string }> | null;
+}
+
+async function getCampaignOr404(
+  supabase: Supabase,
+  campaignId: string,
+): Promise<CampaignRow> {
   const { data } = await supabase
     .from("campaigns")
     .select("*")
     .eq("id", campaignId)
     .maybeSingle();
   if (!data) throw jsonResponse(404, { error: "campanha não encontrada" });
-  return data as {
-    id: string;
-    status: string;
-    zernio_broadcast_id: string | null;
-    name: string;
-  };
+  return data as CampaignRow;
 }
 
 async function scheduleBroadcast(
@@ -678,6 +721,11 @@ async function actionCampaignSchedule(
   body: { campaign_id?: string; scheduled_at?: string },
 ): Promise<Response> {
   const campaign = await getCampaignOr404(supabase, String(body.campaign_id));
+  if (campaign.send_mode === "direct") {
+    return jsonResponse(400, {
+      error: "campanhas de template nomeado (envio direto) só podem ser enviadas imediatamente",
+    });
+  }
   if (campaign.status !== "draft") {
     return jsonResponse(400, { error: `campanha ${campaign.status}: só drafts agendam` });
   }
@@ -693,6 +741,129 @@ async function actionCampaignSchedule(
   return jsonResponse(200, { ok: true });
 }
 
+// Resolve o valor de um slot nomeado para um destinatário (meta nunca aceita
+// parâmetro vazio → fallback "cliente").
+function resolveParamValue(
+  entry: { field?: string; customValue?: string } | undefined,
+  r: { phone: string; name: string | null; email: string | null },
+): string {
+  const field = String(entry?.field ?? "name");
+  if (field === "phone") return `+${r.phone}`;
+  if (field === "email") return String(r.email ?? "").trim() || "cliente";
+  if (field === "custom") return String(entry?.customValue ?? "").trim() || "cliente";
+  return String(r.name ?? "").trim() || "cliente";
+}
+
+function metaErrorCode(msg: string): number | null {
+  const m = msg.match(/\(#(\d{4,6})\)/) ?? msg.match(/Zernio 4\d\d:.*?\b(13\d{4})\b/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+interface DirectPendingRow {
+  id: string;
+  phone: string;
+  name: string | null;
+  email: string | null;
+}
+
+// Envio direto: uma chamada POST /v1/inbox/conversations por destinatário,
+// resolvendo os slots nomeados localmente. Processa um lote por invocação
+// (o frontend repete até done) respeitando ~50s de orçamento da Edge Function.
+async function campaignSendDirect(
+  supabase: Supabase,
+  conn: { account_id: string | null },
+  campaign: CampaignRow,
+): Promise<Response> {
+  const mapping = campaign.variable_mapping ?? {};
+  const slotCount = Object.keys(mapping).length;
+
+  if (campaign.status === "draft") {
+    await supabase
+      .from("campaigns")
+      .update({ status: "sending", started_at: new Date().toISOString() })
+      .eq("id", campaign.id);
+  }
+
+  const { data: pending, error: pendErr } = await supabase
+    .from("campaign_recipients")
+    .select("id, phone, name, email")
+    .eq("campaign_id", campaign.id)
+    .eq("status", "pending")
+    .order("phone")
+    .limit(400);
+  if (pendErr) throw new Error(pendErr.message);
+
+  let sent = 0;
+  let failed = 0;
+  const deadline = Date.now() + 50_000;
+
+  for (const r of (pending ?? []) as DirectPendingRow[]) {
+    if (Date.now() > deadline) break;
+    const params: string[] = [];
+    for (let i = 1; i <= slotCount; i++) {
+      params.push(resolveParamValue(mapping[String(i)], r));
+    }
+    try {
+      const res = await zernioRequest(supabase, "/inbox/conversations", {
+        method: "POST",
+        body: {
+          accountId: conn.account_id,
+          participantId: `+${r.phone}`,
+          templateName: campaign.template_name,
+          templateLanguage: campaign.template_language,
+          ...(params.length > 0 ? { templateParams: params } : {}),
+        },
+      });
+      const msgId = res?.data?.messageId ? String(res.data.messageId) : null;
+      await supabase
+        .from("campaign_recipients")
+        .update({
+          status: "sent",
+          sent_at: new Date().toISOString(),
+          zernio_message_id: msgId,
+        })
+        .eq("id", r.id);
+      sent += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Transitório: para o lote e deixa o resto pendente para a próxima chamada.
+      if (/Zernio 429|Zernio 5\d\d|Meta limitou|network|AbortError|fetch failed/i.test(msg)) {
+        break;
+      }
+      await supabase
+        .from("campaign_recipients")
+        .update({ status: "failed", error: msg.slice(0, 400), error_code: metaErrorCode(msg) })
+        .eq("id", r.id);
+      failed += 1;
+    }
+    await new Promise((res) => setTimeout(res, 150));
+  }
+
+  await supabase.rpc("recalc_campaign_stats", { p_campaign_id: campaign.id });
+
+  const { count: remainingCount } = await supabase
+    .from("campaign_recipients")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaign.id)
+    .eq("status", "pending");
+  const remaining = remainingCount ?? 0;
+  if (remaining === 0) {
+    await supabase
+      .from("campaigns")
+      .update({ status: "completed", completed_at: new Date().toISOString() })
+      .eq("id", campaign.id)
+      .eq("status", "sending");
+  }
+
+  return jsonResponse(200, {
+    ok: true,
+    sent,
+    failed,
+    remaining,
+    done: remaining === 0,
+  });
+}
+
 async function actionCampaignSend(
   supabase: Supabase,
   body: { campaign_id?: string },
@@ -701,6 +872,12 @@ async function actionCampaignSend(
   if (!["draft", "scheduled"].includes(campaign.status)) {
     return jsonResponse(400, { error: `campanha ${campaign.status}: só drafts/agendadas enviam` });
   }
+
+  if (campaign.send_mode === "direct") {
+    const conn = await requireConnected(supabase);
+    return await campaignSendDirect(supabase, conn, campaign);
+  }
+
   if (!campaign.zernio_broadcast_id) {
     return jsonResponse(400, { error: "campanha sem broadcast na Zernio" });
   }
@@ -749,6 +926,43 @@ async function actionCampaignSync(
   body: { campaign_id?: string },
 ): Promise<Response> {
   const campaign = await getCampaignOr404(supabase, String(body.campaign_id));
+
+  // Modo direto: sem broadcast na Zernio; entrega chega por webhook.
+  // Recalcula contadores e fecha a campanha quando não resta pendente.
+  if (campaign.send_mode === "direct") {
+    await supabase.rpc("recalc_campaign_stats", { p_campaign_id: campaign.id });
+    const { data: fresh } = await supabase
+      .from("campaigns")
+      .select("status, recipient_count, sent_count, failed_count, delivered_count")
+      .eq("id", campaign.id)
+      .maybeSingle();
+    if (
+      fresh &&
+      fresh.status === "sending" &&
+      fresh.recipient_count > 0 &&
+      fresh.sent_count + fresh.failed_count + fresh.delivered_count >= fresh.recipient_count
+    ) {
+      const { count: pendCount } = await supabase
+        .from("campaign_recipients")
+        .select("id", { count: "exact", head: true })
+        .eq("campaign_id", campaign.id)
+        .eq("status", "pending");
+      if ((pendCount ?? 0) === 0) {
+        await supabase
+          .from("campaigns")
+          .update({ status: "completed", completed_at: new Date().toISOString() })
+          .eq("id", campaign.id)
+          .eq("status", "sending");
+      }
+    }
+    const { data: updated } = await supabase
+      .from("campaigns")
+      .select("*")
+      .eq("id", campaign.id)
+      .single();
+    return jsonResponse(200, { ok: true, campaign: updated });
+  }
+
   if (!campaign.zernio_broadcast_id) {
     return jsonResponse(400, { error: "campanha sem broadcast na Zernio" });
   }
@@ -826,7 +1040,7 @@ async function actionCampaignSync(
   return jsonResponse(200, { ok: true, campaign: fresh });
 }
 
-// Envio de teste para um único número (broadcast descartável, não vira campanha).
+// Envio de teste para um único número (não vira campanha).
 async function actionCampaignTest(
   supabase: Supabase,
   body: { campaign_id?: string; phone?: string },
@@ -836,16 +1050,32 @@ async function actionCampaignTest(
   const e164 = normalizeE164(String(body.phone ?? ""));
   if (!e164) return jsonResponse(400, { error: "telefone de teste inválido" });
 
-  // Reusa o template e o mapeamento da campanha (variáveis resolvem do
-  // contato Zernio criado no create; no teste, caem no fallback "there").
-  const full = campaign as unknown as {
-    name: string;
-    template_name: string;
-    template_language: string;
-    variable_mapping?: Record<string, unknown>;
-  };
-  const mapping = full.variable_mapping ?? {};
-  const placeholders = Object.keys(mapping).length;
+  const mapping = campaign.variable_mapping ?? {};
+  const slots = Object.keys(mapping).length;
+
+  if (campaign.send_mode === "direct") {
+    const params: string[] = [];
+    for (let i = 1; i <= slots; i++) {
+      params.push(
+        resolveParamValue(mapping[String(i)], {
+          phone: e164.slice(1),
+          name: "teste",
+          email: null,
+        }),
+      );
+    }
+    const res = await zernioRequest(supabase, "/inbox/conversations", {
+      method: "POST",
+      body: {
+        accountId: conn.account_id,
+        participantId: e164,
+        templateName: campaign.template_name,
+        templateLanguage: campaign.template_language,
+        ...(params.length > 0 ? { templateParams: params } : {}),
+      },
+    });
+    return jsonResponse(200, { ok: true, message_id: res?.data?.messageId ?? null });
+  }
 
   const bRes = await zernioRequest(supabase, "/broadcasts", {
     method: "POST",
@@ -853,11 +1083,11 @@ async function actionCampaignTest(
       profileId: conn.profile_id,
       accountId: conn.account_id,
       platform: "whatsapp",
-      name: `TESTE ${(campaign as unknown as { name: string }).name}`.slice(0, 60),
+      name: `TESTE ${campaign.name}`.slice(0, 60),
       template: buildBroadcastTemplate(
-        (campaign as unknown as { template_name: string }).template_name,
-        (campaign as unknown as { template_language: string }).template_language,
-        placeholders,
+        campaign.template_name,
+        campaign.template_language,
+        slots,
         mapping,
       ),
     },
