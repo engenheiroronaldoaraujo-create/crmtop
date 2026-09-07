@@ -793,14 +793,60 @@ async function getInternalToken(supabase: Supabase): Promise<string> {
 async function scheduleNextHop(supabase: Supabase, campaignId: string): Promise<void> {
   const token = await getInternalToken(supabase);
   const url = `${SUPABASE_URL}/functions/v1/zernio-proxy`;
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const p = fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // apikey + Authorization são exigidos pelo gateway (Kong) mesmo com
+    // verify_jwt=false — sem eles a auto-invocação morria em 401 silencioso.
+    headers: {
+      "Content-Type": "application/json",
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+    },
     body: JSON.stringify({ action: "campaign-send-batch", campaign_id: campaignId, internal_token: token }),
   }).then(async (res) => {
-    await res.text().catch(() => {});
+    const text = await res.text().catch(() => "");
+    if (!res.ok) console.error(`campaign-send-batch hop falhou: ${res.status} ${text.slice(0, 200)}`);
   });
   keepAlive(p);
+}
+
+function isTransientError(msg: string): boolean {
+  return /Zernio 429|Zernio 5\d\d|Meta limitou|network|AbortError|fetch failed|131047|131056/i.test(msg);
+}
+
+// Um envio individual (cria conversa + template com valores resolvidos).
+async function sendOneTemplate(
+  supabase: Supabase,
+  conn: { account_id: string | null },
+  campaign: CampaignRow,
+  r: DirectPendingRow,
+  mapping: Record<string, { field?: string; customValue?: string } | undefined>,
+  slotCount: number,
+): Promise<void> {
+  const params: string[] = [];
+  for (let i = 1; i <= slotCount; i++) {
+    params.push(resolveParamValue(mapping[String(i)], r));
+  }
+  const res = await zernioRequest(supabase, "/inbox/conversations", {
+    method: "POST",
+    body: {
+      accountId: conn.account_id,
+      participantId: `+${r.phone}`,
+      templateName: campaign.template_name,
+      templateLanguage: campaign.template_language,
+      ...(params.length > 0 ? { templateParams: params } : {}),
+    },
+  });
+  const msgId = res?.data?.messageId ? String(res.data.messageId) : null;
+  await supabase
+    .from("campaign_recipients")
+    .update({
+      status: "sent",
+      sent_at: new Date().toISOString(),
+      zernio_message_id: msgId,
+    })
+    .eq("id", r.id);
 }
 
 // Envio direto: uma chamada POST /v1/inbox/conversations por destinatário,
@@ -850,47 +896,56 @@ async function campaignSendDirect(
   let sent = 0;
   let failed = 0;
   let stoppedTransient = false;
+  let cancelledMidBatch = false;
   const deadline = Date.now() + 50_000;
+  let processedThisBatch = 0;
 
   for (const r of (pending ?? []) as DirectPendingRow[]) {
     if (Date.now() > deadline) break;
-    const params: string[] = [];
-    for (let i = 1; i <= slotCount; i++) {
-      params.push(resolveParamValue(mapping[String(i)], r));
+    // Cancelamento durante a leva: sai em ≤10 envios (não espera o deadline).
+    if (processedThisBatch > 0 && processedThisBatch % 10 === 0) {
+      const { data: cur } = await supabase
+        .from("campaigns")
+        .select("status")
+        .eq("id", campaign.id)
+        .maybeSingle();
+      if (cur && !["draft", "sending"].includes(cur.status)) {
+        cancelledMidBatch = true;
+        break;
+      }
     }
+    processedThisBatch += 1;
     try {
-      const res = await zernioRequest(supabase, "/inbox/conversations", {
-        method: "POST",
-        body: {
-          accountId: conn.account_id,
-          participantId: `+${r.phone}`,
-          templateName: campaign.template_name,
-          templateLanguage: campaign.template_language,
-          ...(params.length > 0 ? { templateParams: params } : {}),
-        },
-      });
-      const msgId = res?.data?.messageId ? String(res.data.messageId) : null;
-      await supabase
-        .from("campaign_recipients")
-        .update({
-          status: "sent",
-          sent_at: new Date().toISOString(),
-          zernio_message_id: msgId,
-        })
-        .eq("id", r.id);
+      await sendOneTemplate(supabase, conn, campaign, r, mapping, slotCount);
       sent += 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Transitório: para a leva e não agenda a próxima (não martelar a Meta).
-      if (/Zernio 429|Zernio 5\d\d|Meta limitou|network|AbortError|fetch failed/i.test(msg)) {
-        stoppedTransient = true;
-        break;
+      if (isTransientError(msg)) {
+        // Uma retria imediata (erros de throughput da Meta duram ~segundos);
+        // persistindo, interrompe a leva sem matar a corrente.
+        await new Promise((res) => setTimeout(res, 10_000));
+        try {
+          await sendOneTemplate(supabase, conn, campaign, r, mapping, slotCount);
+          sent += 1;
+        } catch (err2) {
+          const msg2 = err2 instanceof Error ? err2.message : String(err2);
+          if (isTransientError(msg2)) {
+            stoppedTransient = true;
+            break;
+          }
+          await supabase
+            .from("campaign_recipients")
+            .update({ status: "failed", error: msg2.slice(0, 400), error_code: metaErrorCode(msg2) })
+            .eq("id", r.id);
+          failed += 1;
+        }
+      } else {
+        await supabase
+          .from("campaign_recipients")
+          .update({ status: "failed", error: msg.slice(0, 400), error_code: metaErrorCode(msg) })
+          .eq("id", r.id);
+        failed += 1;
       }
-      await supabase
-        .from("campaign_recipients")
-        .update({ status: "failed", error: msg.slice(0, 400), error_code: metaErrorCode(msg) })
-        .eq("id", r.id);
-      failed += 1;
     }
     await new Promise((res) => setTimeout(res, 150));
   }
@@ -909,7 +964,7 @@ async function campaignSendDirect(
       .update({ status: "completed", completed_at: new Date().toISOString() })
       .eq("id", campaign.id)
       .eq("status", "sending");
-  } else if (!stoppedTransient) {
+  } else if (!stoppedTransient && !cancelledMidBatch) {
     await scheduleNextHop(supabase, campaign.id);
   }
 
@@ -919,8 +974,9 @@ async function campaignSendDirect(
     failed,
     remaining,
     done: remaining === 0,
-    continued: remaining > 0 && !stoppedTransient,
+    continued: remaining > 0 && !stoppedTransient && !cancelledMidBatch,
     stopped_transient: stoppedTransient,
+    cancelled: cancelledMidBatch,
   });
 }
 
