@@ -4,7 +4,9 @@ import {
   LogOut,
   Menu,
   MessageCircle,
+  Moon,
   Settings,
+  Sun,
   User,
   Users,
   FlaskConical,
@@ -16,6 +18,7 @@ import {
 } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
+import { useTheme } from "@/hooks/use-theme"
 import { useGlobalSearch } from "@/hooks/use-tags"
 import { cn } from "@/lib/utils"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -31,6 +34,7 @@ const NAV_ITEMS = [
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, profile, signOut } = useAuth()
+  const { resolvedTheme, toggleTheme } = useTheme()
   const navigate = useNavigate()
   const { query, setQuery, results, loading, search } = useGlobalSearch()
   const [searchOpen, setSearchOpen] = useState(false)
@@ -197,6 +201,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <Button
               variant="ghost"
               size="icon"
+              title={resolvedTheme === "dark" ? "Modo claro" : "Modo escuro"}
+              className="text-sidebar-muted hover:bg-white/10 hover:text-white"
+              onClick={toggleTheme}
+            >
+              {resolvedTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               title="Minha conta"
               className="text-sidebar-muted hover:bg-white/10 hover:text-white"
               onClick={() => navigate("/account")}
@@ -222,6 +235,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <Menu className="h-5 w-5" />
           </Button>
           <span className="text-sm font-semibold text-white">CRM WhatsApp</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            title={resolvedTheme === "dark" ? "Modo claro" : "Modo escuro"}
+            className="ml-auto text-sidebar-muted hover:bg-white/10 hover:text-white"
+            onClick={toggleTheme}
+          >
+            {resolvedTheme === "dark" ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+          </Button>
         </div>
         {children}
       </main>

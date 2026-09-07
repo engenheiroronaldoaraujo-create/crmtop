@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { Toaster } from "sonner"
 
 import { AuthProvider, useAuth } from "@/hooks/use-auth"
+import { ThemeProvider, useTheme } from "@/hooks/use-theme"
 import { ProtectedRoute } from "@/components/ProtectedRoute"
 import { Layout } from "@/components/Layout"
 import LoginPage from "@/pages/Login"
@@ -129,15 +130,22 @@ function AppRoutes() {
   )
 }
 
+function AppToaster() {
+  const { resolvedTheme } = useTheme()
+  return <Toaster position="top-center" richColors theme={resolvedTheme} />
+}
+
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Suspense fallback={null}>
-          <AppRoutes />
-        </Suspense>
-        <Toaster position="top-center" richColors />
-      </AuthProvider>
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <Suspense fallback={null}>
+            <AppRoutes />
+          </Suspense>
+          <AppToaster />
+        </AuthProvider>
+      </BrowserRouter>
+    </ThemeProvider>
   )
 }
