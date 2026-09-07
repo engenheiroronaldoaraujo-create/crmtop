@@ -6,6 +6,7 @@ import {
   hasNamedTemplateParams,
   listNamedTemplateSlots,
   META_COOLDOWN_KEY,
+  META_RATE_LIMIT_RE,
   metaCooldownRemainingMinutes,
   normalizeE164,
 } from "./zernio.ts";
@@ -43,6 +44,22 @@ Deno.test("metaCooldownRemainingMinutes: valor inválido = livre", async () => {
 
 Deno.test("META_COOLDOWN_KEY é estável", () => {
   assertEquals(META_COOLDOWN_KEY, "zernio_meta_cooldown_until");
+});
+
+Deno.test("META_RATE_LIMIT_RE detecta as variações do erro 80008 da Meta", () => {
+  assertEquals(
+    META_RATE_LIMIT_RE.test(
+      "(#80008) There have been too many calls to this WhatsApp Business account. Wait a bit and try again.",
+    ),
+    true,
+  );
+  assertEquals(META_RATE_LIMIT_RE.test("( #80008 ) rate limit hit"), true);
+  assertEquals(
+    META_RATE_LIMIT_RE.test("There have been too many calls to this WhatsApp Business account"),
+    true,
+  );
+  assertEquals(META_RATE_LIMIT_RE.test("Zernio 500: erro interno"), false);
+  assertEquals(META_RATE_LIMIT_RE.test("template inválido"), false);
 });
 
 Deno.test("normalizeE164: dígitos BR sem '+' viram E.164", () => {

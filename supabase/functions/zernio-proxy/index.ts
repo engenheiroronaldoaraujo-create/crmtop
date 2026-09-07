@@ -16,6 +16,7 @@ import {
   getZernioKey,
   listNamedTemplateSlots,
   metaCooldownRemainingMinutes,
+  META_RATE_LIMIT_RE,
   normalizeE164,
   requireConnected,
   zernioRequest,
@@ -858,6 +859,30 @@ async function campaignSendDirect(
   campaign: CampaignRow & { updated_at?: string },
   opts: { fromUser?: boolean } = {},
 ): Promise<Response> {
+  // Gate de rate limit da Meta (#80008): durante o cooldown NÃO chamamos o
+  // gateway (cada chamada extra prolonga o bloqueio, conforme boas práticas da
+  // Meta). O watchdog (pg_cron, a cada 2 min) re-invoca esta função sem fazer
+  // chamadas externas enquanto durar o cooldown e retoma a fila quando expira.
+  const cooldownMin = await metaCooldownRemainingMinutes(supabase);
+  if (cooldownMin > 0) {
+    const { count: pendCount } = await supabase
+      .from("campaign_recipients")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .eq("status", "pending");
+    return jsonResponse(opts.fromUser ? 429 : 200, {
+      ok: false,
+      rate_limited: true,
+      cooldown_minutes: cooldownMin,
+      remaining: pendCount ?? 0,
+      done: false,
+      continued: false,
+      error:
+        `A Meta limitou os envios desta conta (rate limit). Fila pausada por ~${cooldownMin} min — ` +
+        `retomamos automaticamente quando expirar.`,
+    });
+  }
+
   // Guarda anti-corrida: retomada manual enquanto uma corrente de background
   // ainda está viva (campaigns.updated_at atualiza a cada leva) não duplica
   // envios — apenas informa que já está em andamento.
@@ -896,6 +921,7 @@ async function campaignSendDirect(
   let sent = 0;
   let failed = 0;
   let stoppedTransient = false;
+  let rateLimited = false;
   let cancelledMidBatch = false;
   const deadline = Date.now() + 50_000;
   let processedThisBatch = 0;
@@ -920,6 +946,13 @@ async function campaignSendDirect(
       sent += 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (META_RATE_LIMIT_RE.test(msg) || /Meta limitou/.test(msg)) {
+        // Rate limit da Meta: para IMEDIATAMENTE (o cooldown já foi gravado
+        // dentro de zernioRequest). Sleep/retry aqui prolongariam o bloqueio.
+        stoppedTransient = true;
+        rateLimited = true;
+        break;
+      }
       if (isTransientError(msg)) {
         // Uma retria imediata (erros de throughput da Meta duram ~segundos);
         // persistindo, interrompe a leva sem matar a corrente.
@@ -976,6 +1009,8 @@ async function campaignSendDirect(
     done: remaining === 0,
     continued: remaining > 0 && !stoppedTransient && !cancelledMidBatch,
     stopped_transient: stoppedTransient,
+    rate_limited: rateLimited,
+    cooldown_minutes: rateLimited ? await metaCooldownRemainingMinutes(supabase) : 0,
     cancelled: cancelledMidBatch,
   });
 }
@@ -995,6 +1030,19 @@ async function actionCampaignSend(
   if (campaign.send_mode === "direct") {
     const conn = await requireConnected(supabase);
     return await campaignSendDirect(supabase, conn, campaign, { fromUser: true });
+  }
+
+  // Gate de rate limit da Meta (#80008): disparar um broadcast agora só
+  // desperdiçaria a chamada — todos os envios falhariam no limite.
+  const cooldownMin = await metaCooldownRemainingMinutes(supabase);
+  if (cooldownMin > 0) {
+    return jsonResponse(429, {
+      error:
+        `A Meta limitou os envios desta conta (rate limit). Aguarde ~${cooldownMin} min e tente de novo — ` +
+        `tentar antes prolonga o bloqueio.`,
+      rate_limited: true,
+      cooldown_minutes: cooldownMin,
+    });
   }
 
   if (!campaign.zernio_broadcast_id) {

@@ -812,6 +812,8 @@ function CampaignDetail({
           toast.info("O envio já está rodando em segundo plano — aguarde atualizar")
         } else if (r?.done) {
           toast.success("Envio concluído")
+        } else if (r?.rate_limited) {
+          toast.warning(`A Meta limitou os envios desta conta (rate limit). Fila pausada por ~${r.cooldown_minutes ?? 40} min — retomamos automaticamente.`)
         } else if (r?.stopped_transient) {
           toast.warning("A Meta limitou os envios por momento; use 'Continuar envio' mais tarde")
         } else {

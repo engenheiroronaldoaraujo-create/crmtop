@@ -163,6 +163,10 @@ export const META_COOLDOWN_KEY = "zernio_meta_cooldown_until";
 export const META_COOLDOWN_MINUTES = 40;
 const META_MANAGEMENT_PATHS = ["/whatsapp/templates", "/whatsapp/template-library"];
 
+/** Erro #80008 da Meta (rate limit por WABA) — corpo repassado pelo gateway. */
+export const META_RATE_LIMIT_RE =
+  /#\s*80008|too many calls to this WhatsApp Business/i;
+
 function isMetaManagementPath(path: string): boolean {
   return META_MANAGEMENT_PATHS.some((p) => path.startsWith(p));
 }
@@ -240,11 +244,22 @@ export async function zernioRequest(
       (typeof data?.error?.message === "string" && data.error.message) ||
       text.slice(0, 300) ||
       res.statusText;
-    if (/#\s*80008|too many calls to this WhatsApp Business/i.test(detail)) {
-      const mins = isMetaManagementPath(path) ? await markMetaCooldown(sb) : META_COOLDOWN_MINUTES;
+    if (META_RATE_LIMIT_RE.test(detail)) {
+      // Grava o cooldown em QUALQUER rota (gerenciamento OU envio): enquanto a
+      // Meta mantém o bloqueio, cada chamada adicional o prolonga. Quem consome
+      // o cooldown: pré-checagem de templates abaixo e o gate das campanhas no
+      // zernio-proxy (campaignSendDirect/actionCampaignSend).
+      const mins = await markMetaCooldown(sb);
+      if (isMetaManagementPath(path)) {
+        throw new MetaRateLimitedError(
+          `A Meta limitou temporariamente as chamadas de gerenciamento desta conta (rate limit). ` +
+            `Pausamos chamadas de gerenciamento por ~${mins} min — tentar antes disso prolonga o bloqueio.`,
+        );
+      }
       throw new MetaRateLimitedError(
-        `A Meta limitou temporariamente as chamadas desta conta (rate limit). ` +
-          `Pausamos chamadas de gerenciamento por ~${mins} min — tentar antes disso prolonga o bloqueio.`,
+        `A Meta limitou temporariamente os envios desta conta (rate limit #80008). ` +
+          `Envios em massa pausados por ~${mins} min — a fila retoma automaticamente ` +
+          `(tentar antes disso prolonga o bloqueio).`,
       );
     }
     throw new ZernioApiError(`Zernio ${res.status}: ${detail}`, res.status);
