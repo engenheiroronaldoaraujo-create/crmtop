@@ -38,26 +38,26 @@
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 222 47% 6%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 222 42% 10%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 222 45% 8%;
     --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 32% 18%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
+    --muted: 217 30% 15%;
+    --muted-foreground: 215 20% 70%;
+    --accent: 217 32% 21%;
     --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 0 72% 45%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
-    --success: 142 71% 45%;
+    --border: 217 30% 24%;
+    --input: 217 30% 24%;
+    --ring: 217 91% 60%;
+    --success: 142 70% 45%;
     --success-foreground: 0 0% 100%;
     --warning: 38 92% 50%;
     --warning-foreground: 0 0% 100%;
@@ -65,7 +65,7 @@
     --info-foreground: 0 0% 100%;
     --sidebar-bg: 222 47% 11%;
     --sidebar-fg: 0 0% 100%;
-    --sidebar-muted: 215 20% 55%;
+    --sidebar-muted: 215 20% 60%;
     --sidebar-active-bg: 221 83% 53%;
     --sidebar-active-fg: 0 0% 100%;
   }
@@ -77,5 +77,20 @@
   }
   body {
     @apply bg-background text-foreground;
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+  /* Scrollbar adaptada ao tema */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-border;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/50;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }

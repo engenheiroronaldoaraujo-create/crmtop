@@ -96,7 +96,7 @@ function AutomationCard({
       <CardContent className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className={cn("flex h-8 w-8 items-center justify-center rounded-full", rule.is_active ? "bg-green-100 text-green-600" : "bg-gray-100 text-gray-400")}>
+            <div className={cn("flex h-8 w-8 items-center justify-center rounded-full", rule.is_active ? "bg-green-100 text-green-600 dark:bg-green-500/15 dark:text-green-400" : "bg-gray-100 text-gray-400 dark:bg-gray-700 dark:text-gray-500")}>
               {rule.is_active ? <Zap className="h-4 w-4" /> : <ZapOff className="h-4 w-4" />}
             </div>
             <div>
@@ -197,9 +197,9 @@ function ExecutionHistoryDialog({
   executions: AutomationExecution[]
 }) {
   const statusIcon = (status: string) => {
-    if (status === "completed") return <CheckCircle className="h-4 w-4 text-green-600" />
-    if (status === "failed") return <XCircle className="h-4 w-4 text-red-600" />
-    if (status === "skipped") return <AlertTriangle className="h-4 w-4 text-yellow-600" />
+    if (status === "completed") return <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+    if (status === "failed") return <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+    if (status === "skipped") return <AlertTriangle className="h-4 w-4 text-yellow-600 dark:text-yellow-400" />
     return <Clock className="h-4 w-4 text-muted-foreground" />
   }
 

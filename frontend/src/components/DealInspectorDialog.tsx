@@ -83,9 +83,9 @@ const PRIORITY_LABEL: Record<string, string> = {
 }
 
 const PRIORITY_COLOR: Record<string, string> = {
-  high: "text-red-600 bg-red-50 border-red-200",
-  medium: "text-yellow-600 bg-yellow-50 border-yellow-200",
-  low: "text-blue-600 bg-blue-50 border-blue-200",
+  high: "text-red-600 bg-red-50 border-red-200 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400",
+  medium: "text-yellow-600 bg-yellow-50 border-yellow-200 dark:border-yellow-500/30 dark:bg-yellow-500/10 dark:text-yellow-400",
+  low: "text-blue-600 bg-blue-50 border-blue-200 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-400",
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ export function DealInspectorDialog({
                 {highInsights.length > 0 && (
                   <InsightGroup
                     title="ALTA PRIORIDADE"
-                    titleColor="text-red-600"
+                    titleColor="text-red-600 dark:text-red-400"
                     insights={highInsights}
                     expandedId={expandedId}
                     onToggleExpand={(id) => setExpandedId(expandedId === id ? null : id)}
@@ -431,7 +431,7 @@ export function DealInspectorDialog({
                 {mediumInsights.length > 0 && (
                   <InsightGroup
                     title="MEDIA PRIORIDADE"
-                    titleColor="text-yellow-600"
+                    titleColor="text-yellow-600 dark:text-yellow-400"
                     insights={mediumInsights}
                     expandedId={expandedId}
                     onToggleExpand={(id) => setExpandedId(expandedId === id ? null : id)}
@@ -445,7 +445,7 @@ export function DealInspectorDialog({
                 {lowInsights.length > 0 && (
                   <InsightGroup
                     title="BAIXA PRIORIDADE"
-                    titleColor="text-blue-600"
+                    titleColor="text-blue-600 dark:text-blue-400"
                     insights={lowInsights}
                     expandedId={expandedId}
                     onToggleExpand={(id) => setExpandedId(expandedId === id ? null : id)}

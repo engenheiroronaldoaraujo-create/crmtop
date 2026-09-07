@@ -209,7 +209,7 @@ function MessageBubble({ msg, onRetry }: { msg: Message; onRetry?: (m: Message) 
           "max-w-[75%] space-y-1 rounded-2xl px-3 py-2 text-sm shadow-sm",
           outbound
             ? "bg-blue-600 text-white"
-            : "border border-border bg-white text-foreground",
+            : "border border-border bg-card text-foreground",
         )}
       >
         {msg.media_url && <MediaMessage msg={msg} />}
@@ -315,40 +315,40 @@ function ConversationItem({
       className={cn(
         "flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-all",
         selected
-          ? "border-blue-500 bg-blue-50 shadow-sm"
-          : "border-border bg-white hover:border-blue-200 hover:bg-blue-50/50",
+          ? "border-blue-500 bg-blue-50 shadow-sm dark:border-blue-500/70 dark:bg-blue-500/10"
+          : "border-border bg-card hover:border-blue-200 hover:bg-blue-50/50 dark:hover:border-blue-500/40 dark:hover:bg-blue-500/5",
         closed && "opacity-50",
-        hasUnread && !selected && "border-l-4 border-l-blue-500 bg-blue-50/30",
+        hasUnread && !selected && "border-l-4 border-l-blue-500 bg-blue-50/30 dark:bg-blue-500/10",
       )}
     >
       <Avatar className={cn("mt-0.5 h-10 w-10 shrink-0", selected && "ring-2 ring-blue-500")}>
         <AvatarFallback className={cn(
           "text-sm font-semibold",
-          selected ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"
+          selected ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700 dark:bg-secondary dark:text-secondary-foreground"
         )}>{name.slice(0, 2).toUpperCase()}</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <p className={cn("flex min-w-0 items-center gap-1.5 text-sm", selected ? "font-bold text-blue-900" : "font-medium text-slate-800")}>
+          <p className={cn("flex min-w-0 items-center gap-1.5 text-sm", selected ? "font-bold text-blue-900 dark:text-blue-200" : "font-medium text-slate-800 dark:text-slate-100")}>
             <span className="truncate">{name}</span>
             {SOURCE_BADGES[conv.source] && (
-              <Badge variant="secondary" className="h-4 shrink-0 gap-1 rounded-full bg-violet-100 px-1.5 text-[10px] font-semibold text-violet-700">
+              <Badge variant="secondary" className="h-4 shrink-0 gap-1 rounded-full bg-violet-100 px-1.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
                 <Megaphone className="h-2.5 w-2.5" />
                 {SOURCE_BADGES[conv.source]}
               </Badge>
             )}
           </p>
           {conv.last_message_at && (
-            <span className="shrink-0 text-xs text-slate-400">
+            <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
               {formatListTime(conv.last_message_at)}
             </span>
           )}
         </div>
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs text-slate-500">
+          <p className="truncate text-xs text-slate-500 dark:text-slate-400">
             {conv.contact && isRealPhone(conv.contact.phone) && formatPhone(conv.contact.phone)}
             {conv.assignee && (
-              <span className="ml-1 inline-flex items-center gap-1 text-blue-600">
+              <span className="ml-1 inline-flex items-center gap-1 text-blue-600 dark:text-blue-400">
                 <CheckCircle2 className="h-3 w-3" />
                 {conv.assignee.full_name ?? "?"}
               </span>
@@ -361,7 +361,7 @@ function ConversationItem({
           )}
         </div>
         {conv.last_message_preview && (
-          <p className="truncate text-xs text-slate-400">
+          <p className="truncate text-xs text-slate-400 dark:text-slate-500">
             {conv.last_message_preview}
           </p>
         )}
@@ -1093,11 +1093,11 @@ export default function ChatPage() {
       {/* Left: conversation list — no mobile ocupa tudo e some quando há thread aberta */}
       <aside
         className={cn(
-          "flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white max-md:w-full",
+          "flex w-80 shrink-0 flex-col border-r border-border bg-card max-md:w-full",
           selectedId && "max-md:hidden",
         )}
       >
-        <div className="border-b border-slate-200 bg-slate-50 p-3">
+        <div className="border-b border-border bg-muted/40 p-3">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex gap-1">
               {(
@@ -1194,7 +1194,7 @@ export default function ChatPage() {
           </div>
         ) : (
           <>
-            <header className="flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-y-2 border-b border-slate-200 bg-white px-3 py-2 md:h-16 md:flex-nowrap md:px-4 md:py-0">
+            <header className="flex min-h-16 shrink-0 flex-wrap items-center justify-between gap-y-2 border-b border-border bg-card px-3 py-2 md:h-16 md:flex-nowrap md:px-4 md:py-0">
               <div className="flex min-w-0 items-center gap-2">
                 {/* Volta pra lista no mobile */}
                 <Button
@@ -1207,7 +1207,7 @@ export default function ChatPage() {
                   <ArrowLeft className="h-5 w-5" />
                 </Button>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-900">{contactName}</p>
+                  <p className="truncate text-sm font-bold text-slate-900 dark:text-slate-100">{contactName}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {selected.contact && isRealPhone(selected.contact.phone)
                     ? formatPhone(selected.contact.phone)
@@ -1442,10 +1442,10 @@ export default function ChatPage() {
 
             {/* AI Result Panel */}
             {aiResult && (
-              <div className="border-b bg-purple-50 px-4 py-3">
+              <div className="border-b bg-purple-50 px-4 py-3 dark:bg-purple-500/10">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1">
-                    <p className="mb-1 text-xs font-semibold text-purple-700">✨ {aiTitle}</p>
+                    <p className="mb-1 text-xs font-semibold text-purple-700 dark:text-purple-300">✨ {aiTitle}</p>
                     <div className="whitespace-pre-wrap text-sm text-foreground">
                       {aiResult.split("\n").map((line, i) => {
                         if (line.startsWith("**") && line.endsWith("**")) {
@@ -1455,7 +1455,7 @@ export default function ChatPage() {
                       })}
                     </div>
                   </div>
-                  <button onClick={() => setAiResult(null)} className="text-purple-400 hover:text-purple-600">
+                  <button onClick={() => setAiResult(null)} className="text-purple-400 hover:text-purple-600 dark:text-purple-400 dark:hover:text-purple-300">
                     <X className="h-4 w-4" />
                   </button>
                 </div>
@@ -1464,8 +1464,8 @@ export default function ChatPage() {
 
             {/* Loading indicator for AI */}
             {ai.loading && (
-              <div className="border-b bg-purple-50 px-4 py-2">
-                <div className="flex items-center gap-2 text-sm text-purple-700">
+              <div className="border-b bg-purple-50 px-4 py-2 dark:bg-purple-500/10">
+                <div className="flex items-center gap-2 text-sm text-purple-700 dark:text-purple-300">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   ✨ IA analisando...
                 </div>

@@ -120,11 +120,11 @@ function ActivityDetailDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {isMeeting ? (
-              <Calendar className="h-4 w-4 text-blue-600" />
+              <Calendar className="h-4 w-4 text-blue-600 dark:text-blue-400" />
             ) : activity.type === "follow_up" ? (
-              <Clock className="h-4 w-4 text-orange-600" />
+              <Clock className="h-4 w-4 text-orange-600 dark:text-orange-400" />
             ) : (
-              <Check className="h-4 w-4 text-green-600" />
+              <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
             )}
             {activity.title}
           </DialogTitle>
@@ -661,9 +661,9 @@ export default function AgendaPage() {
   }
 
   const typeIcon = (type: string) => {
-    if (type === "meeting") return <Calendar className="h-3 w-3 text-blue-600" />
-    if (type === "follow_up") return <Clock className="h-3 w-3 text-orange-600" />
-    return <Check className="h-3 w-3 text-green-600" />
+    if (type === "meeting") return <Calendar className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+    if (type === "follow_up") return <Clock className="h-3 w-3 text-orange-600 dark:text-orange-400" />
+    return <Check className="h-3 w-3 text-green-600 dark:text-green-400" />
   }
 
   const statusColor = (s: string) => {

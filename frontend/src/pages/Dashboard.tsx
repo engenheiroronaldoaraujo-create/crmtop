@@ -123,7 +123,7 @@ function KPICard({ kpi }: { kpi: KPI }) {
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{kpi.label}</p>
             <p className="mt-1 text-2xl font-bold text-foreground">{kpi.value}</p>
             {kpi.change !== undefined && (
-              <p className={cn("mt-0.5 text-xs font-medium", kpi.change >= 0 ? "text-green-600" : "text-red-600")}>
+              <p className={cn("mt-0.5 text-xs font-medium", kpi.change >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                 {kpi.change >= 0 ? "↑" : "↓"} {Math.abs(kpi.change)}%
               </p>
             )}
@@ -199,7 +199,7 @@ function SellerTable({ sellers }: { sellers: SellerPerformance[] }) {
               <td className="px-3 py-2 font-medium">{s.name}</td>
               <td className="px-3 py-2 text-right">{s.opportunities}</td>
               <td className="px-3 py-2 text-right">{formatCurrency(s.pipeline)}</td>
-              <td className="px-3 py-2 text-right text-green-700">{s.won}</td>
+              <td className="px-3 py-2 text-right text-green-700 dark:text-green-400">{s.won}</td>
               <td className="px-3 py-2 text-right font-medium">{formatCurrency(s.wonValue)}</td>
               <td className="px-3 py-2 text-right">
                 <Badge variant={s.conversion >= 25 ? "success" : s.conversion >= 15 ? "warning" : "secondary"}>
@@ -310,13 +310,13 @@ export default function DashboardPage() {
       const newLeads = (allOpps ?? []).filter((o) => new Date(o.created_at) >= new Date(from)).length
 
       setKpis([
-        { label: "Leads no período", value: newLeads, icon: Users, color: "bg-blue-100 text-blue-600", subtitle: label },
-        { label: "Oportunidades abertas", value: openCount, icon: Target, color: "bg-indigo-100 text-indigo-600" },
-        { label: "Pipeline", value: formatCurrency(openTotal), icon: DollarSign, color: "bg-green-100 text-green-600", subtitle: `${openCount} oportunidades` },
-        { label: "Ganhos", value: wonPeriod.length, icon: Trophy, color: "bg-emerald-100 text-emerald-600", subtitle: formatCurrency(wonTotal) },
-        { label: "Perdidos", value: lostPeriod.length, icon: XCircle, color: "bg-red-100 text-red-600" },
-        { label: "Conversão", value: `${conversion}%`, icon: TrendingUp, color: "bg-amber-100 text-amber-600", subtitle: `${wonPeriod.length} ganhas / ${closedCount} encerradas` },
-        { label: "Ticket médio", value: formatCurrency(ticket), icon: BarChart3, color: "bg-purple-100 text-purple-600", subtitle: wonPeriod.length > 0 ? "Ganhos" : "Sem vendas" },
+        { label: "Leads no período", value: newLeads, icon: Users, color: "bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400", subtitle: label },
+        { label: "Oportunidades abertas", value: openCount, icon: Target, color: "bg-indigo-100 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-400" },
+        { label: "Pipeline", value: formatCurrency(openTotal), icon: DollarSign, color: "bg-green-100 text-green-600 dark:bg-green-500/15 dark:text-green-400", subtitle: `${openCount} oportunidades` },
+        { label: "Ganhos", value: wonPeriod.length, icon: Trophy, color: "bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400", subtitle: formatCurrency(wonTotal) },
+        { label: "Perdidos", value: lostPeriod.length, icon: XCircle, color: "bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400" },
+        { label: "Conversão", value: `${conversion}%`, icon: TrendingUp, color: "bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400", subtitle: `${wonPeriod.length} ganhas / ${closedCount} encerradas` },
+        { label: "Ticket médio", value: formatCurrency(ticket), icon: BarChart3, color: "bg-purple-100 text-purple-600 dark:bg-purple-500/15 dark:text-purple-400", subtitle: wonPeriod.length > 0 ? "Ganhos" : "Sem vendas" },
       ])
 
       // 6. Seller performance
@@ -349,10 +349,10 @@ export default function DashboardPage() {
 
       const newAlerts: Alert[] = []
       if (idleOpps > 0) {
-        newAlerts.push({ icon: Clock, label: "Oportunidades paradas (3+ dias)", count: idleOpps, color: "bg-amber-100 text-amber-600" })
+        newAlerts.push({ icon: Clock, label: "Oportunidades paradas (3+ dias)", count: idleOpps, color: "bg-amber-100 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400" })
       }
       if (lostPeriod.length > 0) {
-        newAlerts.push({ icon: XCircle, label: "Oportunidades perdidas no período", count: lostPeriod.length, color: "bg-red-100 text-red-600" })
+        newAlerts.push({ icon: XCircle, label: "Oportunidades perdidas no período", count: lostPeriod.length, color: "bg-red-100 text-red-600 dark:bg-red-500/15 dark:text-red-400" })
       }
       setAlerts(newAlerts)
 

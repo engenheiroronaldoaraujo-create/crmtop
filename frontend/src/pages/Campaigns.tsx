@@ -910,7 +910,7 @@ function CampaignDetail({
         </CardHeader>
         <CardContent className="space-y-4">
           {campaign.last_error && (
-            <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-600">
+            <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-600 dark:text-red-400">
               {campaign.last_error}
             </p>
           )}
@@ -1174,7 +1174,7 @@ export default function Campaigns() {
                     <TableCell className="text-right">{c.sent_count}/{c.recipient_count}</TableCell>
                     <TableCell className="text-right">{c.delivered_count}</TableCell>
                     <TableCell className="text-right">{c.read_count}</TableCell>
-                    <TableCell className={cn("text-right", c.failed_count > 0 && "text-red-600")}>
+                    <TableCell className={cn("text-right", c.failed_count > 0 && "text-red-600 dark:text-red-400")}>
                       {c.failed_count}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">

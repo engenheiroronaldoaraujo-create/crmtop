@@ -153,10 +153,10 @@ function OpportunityCard({
                     <span
                       className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
                         insight.priority === "high"
-                          ? "bg-red-100 text-red-700"
+                          ? "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400"
                           : insight.priority === "medium"
-                          ? "bg-yellow-100 text-yellow-700"
-                          : "bg-blue-100 text-blue-700"
+                          ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-400"
+                          : "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400"
                       }`}
                     >
                       <AlertTriangle className="h-3 w-3" />
@@ -185,27 +185,27 @@ function OpportunityCard({
                     <DropdownMenuSeparator />
                     {onCreateMeeting && (
                       <DropdownMenuItem onClick={() => onCreateMeeting(opportunity)}>
-                        <Calendar className="mr-2 h-3 w-3 text-blue-600" /> Agendar reunião
+                        <Calendar className="mr-2 h-3 w-3 text-blue-600 dark:text-blue-400" /> Agendar reunião
                       </DropdownMenuItem>
                     )}
                     {onCreateTask && (
                       <DropdownMenuItem onClick={() => onCreateTask(opportunity)}>
-                        <Check className="mr-2 h-3 w-3 text-green-600" /> Criar tarefa
+                        <Check className="mr-2 h-3 w-3 text-green-600 dark:text-green-400" /> Criar tarefa
                       </DropdownMenuItem>
                     )}
                     {onCreateFollowUp && (
                       <DropdownMenuItem onClick={() => onCreateFollowUp(opportunity)}>
-                        <Clock className="mr-2 h-3 w-3 text-orange-600" /> Criar follow-up
+                        <Clock className="mr-2 h-3 w-3 text-orange-600 dark:text-orange-400" /> Criar follow-up
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuSeparator />
                     {opportunity.status === "open" ? (
                       <>
                         <DropdownMenuItem onClick={() => onWin(opportunity)}>
-                          <Trophy className="mr-2 h-3 w-3 text-green-600" /> Ganhar
+                          <Trophy className="mr-2 h-3 w-3 text-green-600 dark:text-green-400" /> Ganhar
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => onLose(opportunity)}>
-                          <XCircle className="mr-2 h-3 w-3 text-red-600" /> Perder
+                          <XCircle className="mr-2 h-3 w-3 text-red-600 dark:text-red-400" /> Perder
                         </DropdownMenuItem>
                       </>
                     ) : (
@@ -226,7 +226,7 @@ function OpportunityCard({
               </div>
 
               {opportunity.value != null && (
-                <div className="mt-2 flex items-center gap-1 text-sm font-bold text-green-700">
+                <div className="mt-2 flex items-center gap-1 text-sm font-bold text-green-700 dark:text-green-400">
                   <DollarSign className="h-3.5 w-3.5" />
                   {formatCurrency(opportunity.value)}
                 </div>

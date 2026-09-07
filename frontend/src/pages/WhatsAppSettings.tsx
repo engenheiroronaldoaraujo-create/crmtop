@@ -427,7 +427,7 @@ export default function WhatsAppSettings() {
               </div>
             )}
             {instance.status === "connected" && (
-              <p className="text-sm text-green-600">
+              <p className="text-sm text-green-600 dark:text-green-400">
                 WhatsApp conectado. As mensagens chegam em tempo real no Chat.
               </p>
             )}

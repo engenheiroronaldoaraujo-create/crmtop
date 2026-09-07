@@ -105,7 +105,7 @@ function PresentationAvailability() {
                       <span className="text-xs text-muted-foreground">ate</span>
                       <Input type="time" value={slot.end_time} onChange={(e) => handleUpdateSlot(slot.id, "end_time", e.target.value)} className="h-7 w-24 text-xs" />
                       <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => handleToggleSlot(slot.id, slot.is_active)}>
-                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300" />}
+                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300 dark:bg-gray-600" />}
                       </Button>
                       <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDeleteSlot(slot.id)}>
                         <Trash2 className="h-3 w-3" />
@@ -194,7 +194,7 @@ function SDRSchedule() {
                       <span className="text-xs text-muted-foreground">ate</span>
                       <Input type="time" value={slot.end_time.slice(0, 5)} onChange={(e) => handleUpdate(slot.id, "end_time", e.target.value)} className="h-7 w-24 text-xs" />
                       <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => handleToggle(slot.id, slot.is_active)}>
-                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300" />}
+                        {slot.is_active ? <span className="h-2 w-2 rounded-full bg-green-500" /> : <span className="h-2 w-2 rounded-full bg-gray-300 dark:bg-gray-600" />}
                       </Button>
                       <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDelete(slot.id)}>
                         <Trash2 className="h-3 w-3" />
