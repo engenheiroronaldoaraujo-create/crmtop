@@ -435,6 +435,9 @@ export type Campaign = {
   read_count: number
   failed_count: number
   last_error: string | null
+  pacing_batch_size: number | null
+  pacing_interval_seconds: number | null
+  next_hop_at: string | null
   created_by: string | null
   created_at: string
   updated_at: string

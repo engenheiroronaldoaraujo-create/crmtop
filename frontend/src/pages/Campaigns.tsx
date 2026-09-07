@@ -147,6 +147,8 @@ type Wizard = {
   mapping: Record<string, { field: MappingField; customValue: string }>
   mode: "now" | "schedule"
   scheduledAt: string
+  pacingBatch: string // mensagens por leva (anti rate-limit #80008)
+  pacingMinutes: string // pausa entre levas, em minutos
 }
 
 function NewCampaignWizard({
@@ -170,6 +172,8 @@ function NewCampaignWizard({
     mapping: {},
     mode: "now",
     scheduledAt: "",
+    pacingBatch: "5",
+    pacingMinutes: "2",
   })
 
   useEffect(() => {
@@ -333,6 +337,14 @@ function NewCampaignWizard({
           wizard.mode === "schedule" && wizard.scheduledAt
             ? new Date(wizard.scheduledAt).toISOString()
             : null,
+        pacing_batch_size:
+          wizard.pacingBatch.trim() !== "" && Number(wizard.pacingBatch) > 0
+            ? Number(wizard.pacingBatch)
+            : undefined,
+        pacing_interval_seconds:
+          wizard.pacingMinutes.trim() !== "" && Number(wizard.pacingMinutes) >= 0
+            ? Math.round(Number(wizard.pacingMinutes) * 60)
+            : undefined,
         recipients: chosen.map((c) => ({
           phone: digits(c.phone as string),
           name: displayName(c) === "Sem nome" ? null : displayName(c),
@@ -346,10 +358,11 @@ function NewCampaignWizard({
         const direct = campaign.send_mode === "direct"
         if (direct) {
           const r = await zernioCampaignSend(campaign.id)
+          const p = r?.pacing as { batch_size?: number; interval_seconds?: number } | undefined
           toast.success(
             r?.done
               ? "Envio concluído!"
-              : "Envio em andamento — continua em segundo plano mesmo se você sair desta página.",
+              : `Envio em andamento — ${p?.batch_size ?? 5} mensagens por leva, pausa de ~${Math.max(1, Math.round((p?.interval_seconds ?? 120) / 60))} min. Continua sozinho em segundo plano.`,
           )
         } else {
           await zernioCampaignSend(campaign.id)
@@ -709,6 +722,35 @@ function NewCampaignWizard({
                 </>
               )}
             </div>
+            {isDirectTemplate && (
+              <div className="space-y-2">
+                <Label>Ritmo anti bloqueio (rate limit da Meta)</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    className="w-20"
+                    value={wizard.pacingBatch}
+                    onChange={(e) => setWizard({ ...wizard, pacingBatch: e.target.value })}
+                  />
+                  <span className="text-sm text-muted-foreground">mensagens, pausa de</span>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={60}
+                    className="w-16"
+                    value={wizard.pacingMinutes}
+                    onChange={(e) => setWizard({ ...wizard, pacingMinutes: e.target.value })}
+                  />
+                  <span className="text-sm text-muted-foreground">min</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Envia em levas e continua sozinho até acabar. Ritmo baixo (ex.: 5 a cada 2 min)
+                  evita o bloqueio #80008 da Meta.
+                </p>
+              </div>
+            )}
             <p className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-xs text-muted-foreground">
               A Meta cobra por mensagem de template. Contas novas estão no tier
               inicial (~250 contatos únicos/dia) — acima disso o excedente falha e
@@ -817,7 +859,12 @@ function CampaignDetail({
         } else if (r?.stopped_transient) {
           toast.warning("A Meta limitou os envios por momento; use 'Continuar envio' mais tarde")
         } else {
-          toast.success("Envio em andamento — continua em segundo plano mesmo se sair da página")
+          const p = r?.pacing as { batch_size?: number; interval_seconds?: number } | undefined
+          toast.success(
+            p
+              ? `Envio em andamento — ${p.batch_size ?? 5} por leva, pausa de ~${Math.max(1, Math.round((p.interval_seconds ?? 120) / 60))} min. Continua sozinho em segundo plano.`
+              : "Envio em andamento — continua em segundo plano mesmo se sair da página",
+          )
         }
       } else {
         await zernioCampaignSend(campaign.id)
@@ -911,6 +958,15 @@ function CampaignDetail({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {campaign.send_mode === "direct" && campaign.pacing_batch_size != null && (
+            <p className="rounded-lg border border-blue-500/40 bg-blue-500/10 p-2 text-sm text-muted-foreground dark:text-slate-300">
+              Ritmo: {campaign.pacing_batch_size} mensagens por leva, pausa de ~
+              {Math.round((campaign.pacing_interval_seconds ?? 120) / 60)} min entre levas
+              {campaign.status === "sending" && campaign.next_hop_at && (
+                <> — próxima leva ~{formatDateTime(campaign.next_hop_at)}</>
+              )}
+            </p>
+          )}
           {campaign.last_error && (
             <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-600 dark:text-red-400">
               {campaign.last_error}

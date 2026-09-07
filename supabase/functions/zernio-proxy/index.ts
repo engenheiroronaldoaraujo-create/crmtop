@@ -461,6 +461,8 @@ async function actionCampaignCreate(
     template_language?: string;
     variable_mapping?: Record<string, unknown>;
     scheduled_at?: string | null;
+    pacing_batch_size?: number;
+    pacing_interval_seconds?: number;
     recipients?: CampaignRecipientInput[];
   },
 ): Promise<Response> {
@@ -547,6 +549,15 @@ async function actionCampaignCreate(
   }
 
   // 1) Registro local (draft) — fica auditável mesmo se a Zernio falhar.
+  // Ritmo anti rate-limit (#80008): N mensagens por leva com pausa entre elas.
+  const pacingBatch = Number(body.pacing_batch_size);
+  const pacingInterval = Number(body.pacing_interval_seconds);
+  const pacingBatchSize = Number.isFinite(pacingBatch)
+    ? Math.min(100, Math.max(1, Math.round(pacingBatch)))
+    : 5;
+  const pacingIntervalSeconds = Number.isFinite(pacingInterval)
+    ? Math.min(3600, Math.max(0, Math.round(pacingInterval)))
+    : 120;
   const { data: campaign, error: insErr } = await supabase
     .from("campaigns")
     .insert({
@@ -557,6 +568,8 @@ async function actionCampaignCreate(
       variable_mapping: variableMapping,
       send_mode: directMode ? "direct" : "broadcast",
       status: "draft",
+      pacing_batch_size: pacingBatchSize,
+      pacing_interval_seconds: pacingIntervalSeconds,
       created_by: user.id,
     })
     .select("*")
@@ -681,6 +694,10 @@ interface CampaignRow {
   template_name: string;
   template_language: string;
   updated_at?: string;
+  // Ritmo anti rate-limit (#80008): mensagens por leva e pausa entre levas.
+  pacing_batch_size?: number | null;
+  pacing_interval_seconds?: number | null;
+  next_hop_at?: string | null;
   variable_mapping: Record<string, { field?: string; customValue?: string }> | null;
 }
 
@@ -769,48 +786,9 @@ interface DirectPendingRow {
   email: string | null;
 }
 
-function keepAlive(promise: Promise<unknown>): void {
-  const g = globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } };
-  if (g.EdgeRuntime?.waitUntil) {
-    g.EdgeRuntime.waitUntil(promise);
-  } else {
-    promise.catch((e) => console.error("keepAlive task failed", String(e)));
-  }
-}
-
-async function getInternalToken(supabase: Supabase): Promise<string> {
-  let token = await getSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME);
-  if (!token) {
-    token = randomToken();
-    await setSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME, token);
-  }
-  return token;
-}
-
-// Marca a próxima leva como background: a função se auto-invoca (token
-// interno), então o envio continua mesmo com o navegador fechado. Cada leva
-// tem ~50s de orçamento; a fila anda sozinha até terminar ou esbarrar em
-// erro transitório.
-async function scheduleNextHop(supabase: Supabase, campaignId: string): Promise<void> {
-  const token = await getInternalToken(supabase);
-  const url = `${SUPABASE_URL}/functions/v1/zernio-proxy`;
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  const p = fetch(url, {
-    method: "POST",
-    // apikey + Authorization são exigidos pelo gateway (Kong) mesmo com
-    // verify_jwt=false — sem eles a auto-invocação morria em 401 silencioso.
-    headers: {
-      "Content-Type": "application/json",
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-    },
-    body: JSON.stringify({ action: "campaign-send-batch", campaign_id: campaignId, internal_token: token }),
-  }).then(async (res) => {
-    const text = await res.text().catch(() => "");
-    if (!res.ok) console.error(`campaign-send-batch hop falhou: ${res.status} ${text.slice(0, 200)}`);
-  });
-  keepAlive(p);
-}
+// Marca a próxima leva no banco (campaigns.next_hop_at): o watchdog pg_cron
+// (1 min) re-invoca o lote quando a pausa expira. A pausa NÃO dorme dentro
+// da Edge Function — evita estourar o wall-clock e mantém o navegador livre.
 
 function isTransientError(msg: string): boolean {
   return /Zernio 429|Zernio 5\d\d|Meta limitou|network|AbortError|fetch failed|131047|131056/i.test(msg);
@@ -899,8 +877,20 @@ async function campaignSendDirect(
     }
   }
 
+  // Ritmo anti rate-limit (#80008): N mensagens por leva, pausa, próxima leva.
+  // A pausa não dorme aqui — a leva grava campaigns.next_hop_at =
+  // now() + pacing_interval_seconds e o watchdog (pg_cron, 1 min) re-invoca
+  // quando a hora chega. Defaults: 5 a cada 2 min.
+  const batchLimit = Math.min(400, Math.max(1, campaign.pacing_batch_size ?? 5));
+  const intervalSec = Math.max(0, Math.min(3600, campaign.pacing_interval_seconds ?? 120));
+
   const mapping = campaign.variable_mapping ?? {};
   const slotCount = Object.keys(mapping).length;
+
+  // Claim manual ("Continuar envio"): zera next_hop_at para o watchdog não
+  // re-disparar durante esta leva (o cooldown gate acima já retornou antes
+  // se a Meta estiver bloqueando).
+  await supabase.from("campaigns").update({ next_hop_at: null }).eq("id", campaign.id);
 
   if (campaign.status === "draft") {
     await supabase
@@ -915,7 +905,7 @@ async function campaignSendDirect(
     .eq("campaign_id", campaign.id)
     .eq("status", "pending")
     .order("phone")
-    .limit(400);
+    .limit(batchLimit);
   if (pendErr) throw new Error(pendErr.message);
 
   let sent = 0;
@@ -991,14 +981,23 @@ async function campaignSendDirect(
     .eq("campaign_id", campaign.id)
     .eq("status", "pending");
   const remaining = remainingCount ?? 0;
+  let nextHopAt: string | null = null;
   if (remaining === 0) {
     await supabase
       .from("campaigns")
-      .update({ status: "completed", completed_at: new Date().toISOString() })
+      .update({ status: "completed", completed_at: new Date().toISOString(), next_hop_at: null })
       .eq("id", campaign.id)
       .eq("status", "sending");
-  } else if (!stoppedTransient && !cancelledMidBatch) {
-    await scheduleNextHop(supabase, campaign.id);
+  } else if (!cancelledMidBatch) {
+    // Pausa entre levas: o watchdog (pg_cron, 1 min) re-invoca quando expira.
+    // Vale inclusive após erro transitório — a leva seguinte re-tenta e o
+    // cooldown de 80008 protege se a Meta ainda estiver bloqueando.
+    nextHopAt = new Date(Date.now() + intervalSec * 1000).toISOString();
+    await supabase
+      .from("campaigns")
+      .update({ next_hop_at: nextHopAt })
+      .eq("id", campaign.id)
+      .eq("status", "sending");
   }
 
   return jsonResponse(200, {
@@ -1007,11 +1006,12 @@ async function campaignSendDirect(
     failed,
     remaining,
     done: remaining === 0,
-    continued: remaining > 0 && !stoppedTransient && !cancelledMidBatch,
+    continued: remaining > 0 && !cancelledMidBatch,
     stopped_transient: stoppedTransient,
     rate_limited: rateLimited,
     cooldown_minutes: rateLimited ? await metaCooldownRemainingMinutes(supabase) : 0,
     cancelled: cancelledMidBatch,
+    pacing: { batch_size: batchLimit, interval_seconds: intervalSec, next_hop_at: nextHopAt },
   });
 }
 

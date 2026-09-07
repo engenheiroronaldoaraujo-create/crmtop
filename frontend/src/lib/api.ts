@@ -254,6 +254,8 @@ export function zernioCampaignCreate(input: {
   template_language: string
   variable_mapping: Record<string, unknown>
   scheduled_at?: string | null
+  pacing_batch_size?: number
+  pacing_interval_seconds?: number
   recipients: Array<{ contact_id?: string | null; phone: string; name?: string | null; email?: string | null }>
 }) {
   return postJson("zernio-proxy", { action: "campaign-create", ...input })
