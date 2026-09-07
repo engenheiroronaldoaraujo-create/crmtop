@@ -19,7 +19,7 @@ import {
   zernioCampaignTest,
 } from "@/lib/api"
 import type { Campaign, CampaignRecipient, ZernioTemplate } from "@/lib/types"
-import { parseContactsFile } from "@/lib/contacts-import"
+import { parseContactsFromFiles } from "@/lib/contacts-import"
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -192,13 +192,15 @@ function NewCampaignWizard({
     [imported],
   )
 
-  function handleImportFile(file: File) {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const text = String(reader.result ?? "")
-      const parsed = parseContactsFile(file.name, text)
+  const [importing, setImporting] = useState(false)
+
+  async function handleImportFiles(files: File[]) {
+    if (files.length === 0) return
+    setImporting(true)
+    try {
+      const parsed = await parseContactsFromFiles(files)
       if (parsed.length === 0) {
-        toast.error("Nenhum telefone reconhecido no arquivo (use CSV/TXT com \"telefone,nome\" por linha, ou .vcf)")
+        toast.error('Nenhum telefone reconhecido. Aceita Excel (.xlsx/.xls), CSV/TXT ("telefone,nome" por linha) ou .vcf.')
         return
       }
       const known = new Set<string>(imported.map((c) => c.phone ?? ""))
@@ -223,8 +225,11 @@ function NewCampaignWizard({
       toast.success(
         `${fresh.length} contato(s) importado(s)${skipped > 0 ? ` (${skipped} duplicados ignorados)` : ""}`,
       )
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao ler o arquivo")
+    } finally {
+      setImporting(false)
     }
-    reader.readAsText(file)
   }
 
   const visible = useMemo(() => {
@@ -378,9 +383,11 @@ function NewCampaignWizard({
           <CardHeader>
             <CardTitle>Quem recebe?</CardTitle>
             <CardDescription>
-              Importe um arquivo com os destinatários. Formatos aceitos: CSV/TXT
-              (uma linha por contato — "telefone,nome", "nome,telefone" ou só o
-              telefone) e vCard (.vcf). Números sem DDI assumem 55 (Brasil).
+              Importe uma planilha ou arquivo com os destinatários. Excel
+              (.xlsx/.xls): cada linha é um contato (a célula com número vira o
+              telefone; as demais fornecem nome/e-mail — cabeçalhos são
+              ignorados). Também aceita CSV/TXT ("telefone,nome" por linha) e
+              vCard (.vcf). Números sem DDI assumem 55 (Brasil).
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -406,25 +413,31 @@ function NewCampaignWizard({
             <input
               ref={fileRef}
               type="file"
-              accept=".csv,.txt,.vcf"
+              multiple
+              accept=".csv,.txt,.vcf,.xlsx,.xls"
               className="hidden"
               onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) handleImportFile(f)
+                const fs = e.target.files
+                if (fs && fs.length) handleImportFiles(Array.from(fs))
                 e.target.value = ""
               }}
             />
             <button
               type="button"
+              disabled={importing}
               onClick={() => fileRef.current?.click()}
-              className="flex w-full flex-col items-center gap-2 rounded-lg border-2 border-dashed p-8 text-center transition-colors hover:border-primary hover:bg-muted/40"
+              className="flex w-full flex-col items-center gap-2 rounded-lg border-2 border-dashed p-8 text-center transition-colors hover:border-primary hover:bg-muted/40 disabled:opacity-60"
             >
               <Upload className="h-6 w-6 text-muted-foreground" />
               <span className="text-sm font-medium">
-                {eligible.length === 0 ? "Selecionar arquivo de contatos" : "Adicionar outro arquivo"}
+                {importing
+                  ? "Lendo arquivo..."
+                  : eligible.length === 0
+                    ? "Selecionar planilha/arquivo de contatos"
+                    : "Adicionar outro arquivo"}
               </span>
               <span className="text-xs text-muted-foreground">
-                .csv, .txt ou .vcf — telefones duplicados são ignorados
+                Excel (.xlsx/.xls), .csv, .txt ou .vcf — uma linha por contato; duplicados são ignorados
               </span>
             </button>
 
