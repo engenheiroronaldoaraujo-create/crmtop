@@ -805,7 +805,11 @@ export default function AgendaPage() {
       <CreateMeetingDialog
         open={meetingOpen}
         onOpenChange={setMeetingOpen}
-        onSave={async (data) => { await supabase.from("meetings").insert(data); loadData() }}
+        onSave={async (data) => {
+          const { error } = await supabase.from("meetings").insert(data)
+          if (error) throw new Error(error.message)
+          loadData()
+        }}
         profiles={profiles}
         opportunities={opportunities}
       />
@@ -813,7 +817,11 @@ export default function AgendaPage() {
       <CreateTaskDialog
         open={taskOpen}
         onOpenChange={setTaskOpen}
-        onSave={async (data) => { await supabase.from("opportunity_tasks").insert(data); loadData() }}
+        onSave={async (data) => {
+          const { error } = await supabase.from("opportunity_tasks").insert(data)
+          if (error) throw new Error(error.message)
+          loadData()
+        }}
         profiles={profiles}
         opportunities={opportunities}
         taskType={taskType}

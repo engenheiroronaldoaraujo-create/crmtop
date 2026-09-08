@@ -1434,7 +1434,11 @@ export default function PipelinePage() {
             profiles={profiles}
             onSave={async (data) => {
               const table = actType === "meeting" ? "meetings" : "opportunity_tasks"
-              await supabase.from(table).insert(data)
+              const { error } = await supabase.from(table).insert(data)
+              if (error) {
+                toast.error(error.message)
+                return
+              }
               setActOpen(false)
               toast.success(actType === "meeting" ? "Reunião agendada" : actType === "follow_up" ? "Follow-up criado" : "Tarefa criada")
             }}
