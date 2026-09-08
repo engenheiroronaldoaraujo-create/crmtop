@@ -177,11 +177,9 @@ function OpportunityCard({
                     <DropdownMenuItem onClick={() => onAssign(opportunity)}>
                       <User className="mr-2 h-3 w-3" /> Atribuir
                     </DropdownMenuItem>
-                    {opportunity.conversation_id && (
-                      <DropdownMenuItem onClick={() => onChat(opportunity)}>
-                        <MessageCircle className="mr-2 h-3 w-3" /> Abrir Chat
-                      </DropdownMenuItem>
-                    )}
+                    <DropdownMenuItem onClick={() => onChat(opportunity)}>
+                      <MessageCircle className="mr-2 h-3 w-3" /> Abrir Chat
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     {onCreateMeeting && (
                       <DropdownMenuItem onClick={() => onCreateMeeting(opportunity)}>
@@ -1252,7 +1250,13 @@ export default function PipelinePage() {
   const handleChat = (opp: Opportunity) => {
     if (opp.conversation_id) {
       window.location.href = `/?conversation=${opp.conversation_id}`
+      return
     }
+    if (opp.contact_id) {
+      window.location.href = `/?contactId=${opp.contact_id}`
+      return
+    }
+    toast.error("Este lead ainda não possui contato vinculado")
   }
 
   const loading = loadingPipelines || loadingStages || loadingOpps

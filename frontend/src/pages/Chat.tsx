@@ -571,6 +571,7 @@ export default function ChatPage() {
         // Open by contact ID
         const match = conversations.find((c) => c.contact_id === contactIdParam)
         if (match) setSelectedId(match.id)
+        else toast.info("Este contato ainda não possui conversa no inbox")
         setSearchParams({}, { replace: true })
       } else if (contactPhone) {
         // Open by contact phone (legacy)
@@ -578,6 +579,7 @@ export default function ChatPage() {
           (c) => c.contact && c.contact.phone === contactPhone,
         )
         if (match) setSelectedId(match.id)
+        else toast.info("Este contato ainda não possui conversa no inbox")
         setSearchParams({}, { replace: true })
       }
     }
