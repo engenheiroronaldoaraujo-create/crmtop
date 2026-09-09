@@ -19,6 +19,8 @@ import {
   Trash2,
   Settings,
   AlertTriangle,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
@@ -909,17 +911,55 @@ function StageManagerDialog({
   const [editingStage, setEditingStage] = useState<any>(null)
   const [name, setName] = useState("")
   const [color, setColor] = useState("#6b7280")
+  const [posChoice, setPosChoice] = useState("end")
   const [saving, setSaving] = useState(false)
+  const [reordering, setReordering] = useState<string | null>(null)
+
+  const sortedStages = useMemo(
+    () => [...stages].sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
+    [stages]
+  )
+
+  const choiceFor = (stage: any) => {
+    const idx = sortedStages.findIndex((s) => s.id === stage.id)
+    return idx <= 0 ? "start" : `after:${sortedStages[idx - 1].id}`
+  }
 
   useEffect(() => {
     if (editingStage) {
       setName(editingStage.name)
       setColor(editingStage.color ?? "#6b7280")
+      setPosChoice(choiceFor(editingStage))
     } else {
       setName("")
       setColor("#6b7280")
+      setPosChoice("end")
     }
-  }, [editingStage])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingStage, stages])
+
+  // Persiste a ordem: posições normalizadas 0..n-1, uma única request atômica
+  const applyOrder = async (orderedIds: string[]) => {
+    const current = new Map<string, number>(stages.map((s) => [s.id, s.position ?? 0]))
+    const updates = orderedIds
+      .map((id, i) => ({ id, position: i }))
+      .filter((u) => current.get(u.id) !== u.position)
+    if (updates.length === 0) return
+    const { data, error } = await supabase.from("pipeline_stages").upsert(updates).select("id")
+    if (error) throw error
+    if (!data || data.length !== updates.length) {
+      throw new Error("Sem permissão: apenas administradores podem reordenar estágios")
+    }
+  }
+
+  const targetIndex = (choice: string, orderedIds: string[]) => {
+    if (choice === "start") return 0
+    if (choice.startsWith("after:")) {
+      const idx = orderedIds.indexOf(choice.replace("after:", ""))
+      if (idx !== -1) return idx + 1
+    }
+    return orderedIds.length
+  }
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -927,28 +967,62 @@ function StageManagerDialog({
     setSaving(true)
     try {
       if (editingStage) {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from("pipeline_stages")
           .update({ name: name.trim(), color })
           .eq("id", editingStage.id)
+          .select("id")
         if (error) throw error
+        if (!data || data.length === 0) {
+          throw new Error("Sem permissão: apenas administradores podem editar estágios")
+        }
+        if (posChoice !== choiceFor(editingStage)) {
+          const rest = sortedStages.filter((s) => s.id !== editingStage.id).map((s) => s.id)
+          rest.splice(targetIndex(posChoice, rest), 0, editingStage.id)
+          await applyOrder(rest)
+        }
         toast.success("Estágio atualizado")
       } else {
-        const maxPos = Math.max(...stages.map((s) => s.position), 0)
-        const { error } = await supabase
+        const maxPos = stages.length > 0 ? Math.max(...stages.map((s) => s.position ?? 0)) : -1
+        const { data: created, error } = await supabase
           .from("pipeline_stages")
           .insert({ pipeline_id: pipelineId, name: name.trim(), color, position: maxPos + 1 })
+          .select("id")
+          .single()
         if (error) throw error
+        const order = sortedStages.map((s) => s.id)
+        order.splice(targetIndex(posChoice, order), 0, created.id)
+        await applyOrder(order)
         toast.success("Estágio criado")
       }
       setEditingStage(null)
       setName("")
       setColor("#6b7280")
+      setPosChoice("end")
       onRefresh()
     } catch (err: any) {
       toast.error(err.message ?? "Erro ao salvar")
+      onRefresh()
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleMove = async (stage: any, dir: -1 | 1) => {
+    const idx = sortedStages.findIndex((s) => s.id === stage.id)
+    const target = idx + dir
+    if (idx === -1 || target < 0 || target >= sortedStages.length) return
+    const ids = sortedStages.map((s) => s.id)
+    ;[ids[idx], ids[target]] = [ids[target], ids[idx]]
+    setReordering(stage.id)
+    try {
+      await applyOrder(ids)
+      toast.success("Ordem atualizada")
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao reordenar")
+    } finally {
+      setReordering(null)
+      onRefresh()
     }
   }
 
@@ -982,11 +1056,33 @@ function StageManagerDialog({
 
         {/* List of stages */}
         <div className="space-y-2 max-h-60 overflow-auto">
-          {stages.map((stage) => (
+          {sortedStages.map((stage, idx) => (
             <div key={stage.id} className="flex items-center gap-2 rounded border p-2">
               <div className="h-4 w-4 rounded" style={{ backgroundColor: stage.color ?? "#6b7280" }} />
               <span className="flex-1 text-sm">{stage.name}</span>
-              <span className="text-xs text-muted-foreground">{stage.position}</span>
+              <span className="text-xs text-muted-foreground">{idx + 1}</span>
+              <div className="flex items-center">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  disabled={idx === 0 || reordering !== null || saving}
+                  onClick={() => handleMove(stage, -1)}
+                  title="Mover para cima"
+                >
+                  {reordering === stage.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronUp className="h-3 w-3" />}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  disabled={idx === sortedStages.length - 1 || reordering !== null || saving}
+                  onClick={() => handleMove(stage, 1)}
+                  title="Mover para baixo"
+                >
+                  <ChevronDown className="h-3 w-3" />
+                </Button>
+              </div>
               <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setEditingStage(stage)}>
                 <Pencil className="h-3 w-3" />
               </Button>
@@ -1015,6 +1111,23 @@ function StageManagerDialog({
               onChange={(e) => setColor(e.target.value)}
               className="h-10 cursor-pointer p-1"
             />
+          </div>
+          <div className="space-y-2">
+            <Label>Posição</Label>
+            <Select value={posChoice} onValueChange={setPosChoice}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="start">No início</SelectItem>
+                {sortedStages
+                  .filter((s) => s.id !== editingStage?.id)
+                  .map((s) => (
+                    <SelectItem key={s.id} value={`after:${s.id}`}>
+                      Depois de {s.name}
+                    </SelectItem>
+                  ))}
+                <SelectItem value="end">No final</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <div className="flex gap-2">
             <Button type="submit" disabled={saving || !name.trim()}>
