@@ -938,17 +938,23 @@ function StageManagerDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingStage, stages])
 
-  // Persiste a ordem: posições normalizadas 0..n-1, uma única request atômica
+  // Persiste a ordem: posições normalizadas 0..n-1.
+  // Updates por linha (sem positions na tabela; upsert em array dispara
+  // 400 PGRST/22P02 no PostgREST via ?columns="id","position" - supabase#27575)
   const applyOrder = async (orderedIds: string[]) => {
     const current = new Map<string, number>(stages.map((s) => [s.id, s.position ?? 0]))
-    const updates = orderedIds
-      .map((id, i) => ({ id, position: i }))
-      .filter((u) => current.get(u.id) !== u.position)
-    if (updates.length === 0) return
-    const { data, error } = await supabase.from("pipeline_stages").upsert(updates).select("id")
-    if (error) throw error
-    if (!data || data.length !== updates.length) {
-      throw new Error("Sem permissão: apenas administradores podem reordenar estágios")
+    for (let i = 0; i < orderedIds.length; i++) {
+      const id = orderedIds[i]
+      if (current.get(id) === i) continue
+      const { data, error } = await supabase
+        .from("pipeline_stages")
+        .update({ position: i })
+        .eq("id", id)
+        .select("id")
+      if (error) throw error
+      if (!data || data.length === 0) {
+        throw new Error("Sem permissão: apenas administradores podem reordenar estágios")
+      }
     }
   }
 
