@@ -183,7 +183,7 @@ export type OpportunityStageHistory = {
   id: string
   opportunity_id: string
   old_stage_id: string | null
-  new_stage_id: string
+  new_stage_id: string | null
   changed_by: string | null
   changed_at: string
 }

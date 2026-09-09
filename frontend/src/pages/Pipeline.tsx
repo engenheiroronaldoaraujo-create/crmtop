@@ -963,8 +963,12 @@ function StageManagerDialog({
       return
     }
     if (!window.confirm(`Excluir o estágio "${stage.name}"?`)) return
-    const { error } = await supabase.from("pipeline_stages").delete().eq("id", stage.id)
+    const { data, error } = await supabase.from("pipeline_stages").delete().eq("id", stage.id).select("id")
     if (error) { toast.error(error.message); return }
+    if (!data || data.length === 0) {
+      toast.error("Sem permissão: apenas administradores podem excluir estágios")
+      return
+    }
     toast.success("Estágio excluído")
     onRefresh()
   }
@@ -1196,10 +1200,10 @@ export default function PipelinePage() {
 
       try {
         await moveStage(draggableId, newStageId)
-      } catch {
+      } catch (err: any) {
         // Revert on error
         updateOpp(draggableId, { stage_id: oldStageId })
-        toast.error("Erro ao mover oportunidade")
+        toast.error(err?.message ?? "Erro ao mover oportunidade")
       }
     },
     [opportunities, moveStage, updateOpp]
@@ -1229,22 +1233,36 @@ export default function PipelinePage() {
   }
 
   const handleReopen = async (opp: Opportunity) => {
-    await updateOpp(opp.id, { status: "open", closed_at: null })
-    await refreshOpps()
-    toast.success("Oportunidade reaberta")
+    try {
+      await updateOpp(opp.id, { status: "open", closed_at: null })
+      await refreshOpps()
+      toast.success("Oportunidade reaberta")
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao reabrir")
+    }
   }
 
   const handleDeleteOpp = async (opp: Opportunity) => {
     if (!window.confirm(`Excluir a oportunidade "${opp.title}"? O contato será mantido.`)) return
-    await supabase.from("opportunities").delete().eq("id", opp.id)
+    const { data, error } = await supabase.from("opportunities").delete().eq("id", opp.id).select("id")
+    if (error) { toast.error(error.message); return }
+    if (!data || data.length === 0) {
+      toast.error("Sem permissão: apenas administradores podem excluir oportunidades")
+      return
+    }
     await refreshOpps()
     toast.success("Oportunidade excluída")
   }
 
   const handleAssign = async (userId: string | null) => {
     if (!assignOpp) return
-    await updateOpp(assignOpp.id, { assigned_to: userId })
-    await refreshOpps()
+    try {
+      await updateOpp(assignOpp.id, { assigned_to: userId })
+      await refreshOpps()
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao atribuir responsável")
+      throw err
+    }
   }
 
   const handleChat = (opp: Opportunity) => {
