@@ -836,6 +836,160 @@ Responda a última mensagem do CLIENTE.`
 }
 
 // ---------------------------------------------------------------------------
+// Requalify: batch extraction from recent chat history (no messages sent)
+// ---------------------------------------------------------------------------
+
+const REQUALIFY_PROMPT = `Voce e um extrator de dados para um CRM.
+A partir da conversa de WhatsApp abaixo, extraia os dados de QUALIFICACAO do CLIENTE (a parte "CLIENTE:").
+Responda APENAS com JSON valido, sem markdown:
+{
+  "extracted_info": {
+    "service_type": "ramo de atividade do lead (servico que ele presta) ou null",
+    "team_size": "numero de tecnicos/equipes mencionado, ou null",
+    "additional_info": "resumo curto das informacoes adicionais relevantes passadas pelo lead, ou null",
+    "current_tool": "como ele controla a operacao hoje, ou null",
+    "main_need": "dor/necessidade principal, ou null"
+  },
+  "temperature": "cold|warm|hot",
+  "confidence": 0.0
+}
+Nao invente dados. Se o valor nao estiver na conversa, use null. team_size somente numero.`
+
+async function requalifyRecent(
+  supabase: Supabase,
+  days: number,
+  limit: number,
+): Promise<{ analyzed: number; qualified: number; partial: number; skipped: number; errors: number }> {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString()
+  const { data: settings } = await supabase
+    .from("sdr_settings")
+    .select("primary_model")
+    .limit(1)
+    .single()
+  const result = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
+
+  const { data: convs, error: convErr } = await supabase
+    .from("conversations")
+    .select("id, contact_id")
+    .gte("last_message_at", since)
+    .order("last_message_at", { ascending: false })
+    .limit(300)
+  if (convErr) {
+    console.error("SDR_REQUAL_CONV_ERROR", convErr)
+    return { ...result, errors: result.errors + 1 }
+  }
+
+  // Prefer contacts still missing qualification data
+  const contactIds = [...new Set((convs ?? []).map((c: any) => c.contact_id))].filter(Boolean).slice(0, 400)
+  const { data: contacts } = await supabase
+    .from("contacts")
+    .select("id, name, push_name, business_type, team_size, extra_info")
+    .in("id", contactIds)
+  const contactMap = new Map<string, any>((contacts ?? []).map((c: any) => [c.id, c]))
+
+  // Prioritize contacts with missing fields
+  const candidates: { conversationId: string; contactId: string }[] = []
+  for (const conv of convs ?? []) {
+    const contact = contactMap.get(conv.contact_id)
+    if (!contact) continue
+    if (contact.business_type && contact.team_size != null && contact.extra_info) {
+      result.skipped++
+      continue
+    }
+    candidates.push({ conversationId: conv.id, contactId: conv.contact_id })
+  }
+
+  for (const { conversationId, contactId } of candidates.slice(0, limit)) {
+    result.analyzed++
+    try {
+      const { data: msgs } = await supabase
+        .from("messages")
+        .select("direction, content, type, transcription, sent_at")
+        .eq("conversation_id", conversationId)
+        .order("sent_at", { ascending: false })
+        .limit(30)
+
+      const context = (msgs ?? []).reverse().map((m: any) => {
+        const label = m.direction === "inbound" ? "CLIENTE" : "EMPRESA"
+        if (m.content) return `${label}: ${m.content}`
+        if (m.type === "audio" && m.transcription) return `${label} (audio): ${m.transcription}`
+        return `${label}: [${m.type}]`
+      }).join("\n")
+
+      if (!context.trim()) {
+        result.errors++
+        continue
+      }
+
+      const contact = contactMap.get(contactId)
+      const aiRes = await callAI(supabase, [
+        { role: "system", content: REQUALIFY_PROMPT },
+        {
+          role: "user",
+          content: `Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}\n\nConversa:\n${context}\n\nExtraia os dados de qualificacao.`,
+        },
+      ], { temperature: 0.2, max_tokens: 500 })
+
+      const parsed = parseResponse<{
+        extracted_info: Record<string, string | null>
+        temperature: string
+        confidence: number
+      }>(aiRes.content)
+
+      const info = parsed?.extracted_info
+      if (!info || (!info.service_type && info.team_size == null && !info.additional_info)) {
+        result.errors++
+        await supabase.from("sdr_logs").insert({
+          conversation_id: conversationId,
+          contact_id: contactId,
+          status: "failed",
+          action: "requalify",
+          error: "no_extractable_data",
+          metadata: { raw: (aiRes.content || "").slice(0, 300) },
+        }).then(() => {}, () => {})
+        continue
+      }
+
+      await saveQualification(supabase, contactId, info, parsed.temperature ?? "cold")
+
+      const mergedInfo = {
+        service_type: info.service_type ?? contact?.business_type ?? null,
+        team_size: info.team_size ? (parseTeamSize(info.team_size) ?? contact?.team_size ?? null) : contact?.team_size ?? null,
+        additional_info: info.additional_info ?? contact?.extra_info ?? null,
+      }
+      const complete = isQualificationComplete({
+        business_type: mergedInfo.service_type,
+        team_size: mergedInfo.team_size,
+        extra_info: mergedInfo.additional_info,
+      })
+      if (complete) result.qualified++
+      else result.partial++
+
+      await supabase.from("sdr_logs").insert({
+        conversation_id: conversationId,
+        contact_id: contactId,
+        status: "completed",
+        action: "requalify",
+        model: settings?.primary_model,
+        metadata: { ...info, temperature: parsed.temperature, complete },
+      }).then(() => {}, () => {})
+    } catch (err) {
+      result.errors++
+      console.error("SDR_REQUAL_ERROR", err)
+      await supabase.from("sdr_logs").insert({
+        conversation_id: conversationId,
+        contact_id: contactId,
+        status: "failed",
+        action: "requalify",
+        error: String(err).slice(0, 500),
+      }).then(() => {}, () => {})
+    }
+  }
+
+  return result
+}
+
+// ---------------------------------------------------------------------------
 // Edge Function entry point
 // ---------------------------------------------------------------------------
 
@@ -855,6 +1009,15 @@ Deno.serve(async (req) => {
         const result = await processMessage(supabase, conversation_id, contact_id, message_content, instance_name, message_id)
         // NOTE: message sending is handled by the webhook (callSDREngine)
         return jsonResponse(200, { ok: true, ...result })
+      }
+
+      case "requalify_recent": {
+        const daysRaw = Number(data?.days ?? 30)
+        const days = Number.isFinite(daysRaw) && daysRaw >= 1 ? Math.min(daysRaw, 180) : 30
+        const limitRaw = Number(data?.limit ?? 40)
+        const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 100) : 40
+        const stats = await requalifyRecent(supabase, days, limit)
+        return jsonResponse(200, { ok: true, days, ...stats })
       }
 
       case "get_settings": {

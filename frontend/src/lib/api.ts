@@ -188,6 +188,10 @@ export function sdrTestSDR(message: string) {
   return postJson("sdr-engine", { action: "test_sdr", data: { message } })
 }
 
+export function sdrRequalifyRecent(days = 30) {
+  return postJson("sdr-engine", { action: "requalify_recent", data: { days } })
+}
+
 // ---------------------------------------------------------------------------
 // Zernio (WhatsApp oficial / Meta Cloud API)
 // ---------------------------------------------------------------------------

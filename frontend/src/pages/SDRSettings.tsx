@@ -10,8 +10,9 @@ import {
   Calendar,
   Plus,
   Trash2,
+  RefreshCw,
 } from "lucide-react"
-import { sdrGetSettings, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR } from "@/lib/api"
+import { sdrGetSettings, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR, sdrRequalifyRecent } from "@/lib/api"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -221,6 +222,8 @@ export default function SDRSettings() {
   const [metrics, setMetrics] = useState<any>(null)
   const [testMessage, setTestMessage] = useState("")
   const [testResult, setTestResult] = useState<any>(null)
+  const [requalifying, setRequalifying] = useState(false)
+  const [requalifyStats, setRequalifyStats] = useState<{ analyzed: number; qualified: number; partial: number; skipped: number; errors: number } | null>(null)
   const [testing, setTesting] = useState(false)
 
   const loadSettings = useCallback(async () => {
@@ -260,6 +263,17 @@ export default function SDRSettings() {
       setTestResult(res)
     } catch (e: any) { toast.error(e.message) }
     finally { setTesting(false) }
+  }
+
+  const handleRequalify = async () => {
+    setRequalifying(true)
+    setRequalifyStats(null)
+    try {
+      const res = await sdrRequalifyRecent(30)
+      setRequalifyStats(res)
+      toast.success(`Requalificação concluída: ${res.qualified ?? 0} completo(s), ${res.partial ?? 0} parcial(is)`)
+    } catch (e: any) { toast.error(e.message) }
+    finally { setRequalifying(false) }
   }
 
   if (loading) return <div className="py-8 text-center text-muted-foreground">Carregando...</div>
@@ -335,6 +349,31 @@ export default function SDRSettings() {
         </Card>
 
         <PresentationAvailability />
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><RefreshCw className="h-4 w-4" /> Requalificar contatos</CardTitle>
+            <CardDescription>Analisa os chats dos últimos 30 dias e preenche ramo, equipe e info adicional. Nenhuma mensagem é enviada ao lead.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Button onClick={handleRequalify} disabled={requalifying}>
+              {requalifying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              Requalificar últimos 30 dias
+            </Button>
+            {requalifying && (
+              <p className="text-xs text-muted-foreground">Analisando até 40 conversas por rodada sem dados completos. Rode novamente para processar mais...</p>
+            )}
+            {requalifyStats && (
+              <div className="rounded-lg border p-3 text-sm">
+                <p><span className="font-medium">Analisados:</span> {requalifyStats.analyzed}</p>
+                <p><span className="font-medium">Qualificação completa:</span> {requalifyStats.qualified}</p>
+                <p><span className="font-medium">Qualificação parcial:</span> {requalifyStats.partial}</p>
+                {requalifyStats.skipped > 0 && <p className="text-muted-foreground">Já completos (ignorados): {requalifyStats.skipped}</p>}
+                {requalifyStats.errors > 0 && <p className="text-destructive">Sem dados extraíveis/erros: {requalifyStats.errors}</p>}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
