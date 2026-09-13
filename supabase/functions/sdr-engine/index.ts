@@ -946,15 +946,20 @@ async function requalifyRecent(
     .single()
   const result: Record<string, unknown> & { analyzed: number; qualified: number; partial: number; skipped: number; errors: number } = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
 
-  const { data: convs, error: convErr } = await supabase
-    .from("conversations")
-    .select("id, contact_id")
-    .gte("last_message_at", since)
-    .order("last_message_at", { ascending: false })
-    .range(0, 1999)
-  if (convErr) {
-    console.error("SDR_REQUAL_CONV_ERROR", convErr)
-    return { ...result, errors: result.errors + 1 }
+  const convs: any[] = []
+  for (let page = 0; page < 10; page++) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("id, contact_id")
+      .gte("last_message_at", since)
+      .order("last_message_at", { ascending: false })
+      .range(page * 1000, page * 1000 + 999)
+    if (error) {
+      console.error("SDR_REQUAL_CONV_ERROR", error)
+      return { ...result, errors: result.errors + 1 }
+    }
+    if (!data || data.length === 0) break
+    convs.push(...data)
   }
 
   // Prefer contacts still missing qualification data
@@ -969,12 +974,27 @@ async function requalifyRecent(
     for (const c of contacts ?? []) contactMap.set(c.id, c)
   }
 
-  // Prioritize contacts with missing fields
+  // Prioritize contacts with missing fields; skip conversations already requalified (any status)
+  const attempted = new Set<string>()
+  for (let page = 0; page < 5; page++) {
+    const { data: logs } = await supabase
+      .from("sdr_logs")
+      .select("conversation_id")
+      .eq("action", "requalify")
+      .range(page * 1000, page * 1000 + 999)
+    if (!logs || logs.length === 0) break
+    for (const l of logs) attempted.add(l.conversation_id)
+  }
+
   const candidates: { conversationId: string; contactId: string }[] = []
-  for (const conv of convs ?? []) {
+  for (const conv of convs) {
     const contact = contactMap.get(conv.contact_id)
     if (!contact) continue
     if (contact.business_type && contact.team_size != null && contact.extra_info) {
+      result.skipped++
+      continue
+    }
+    if (attempted.has(conv.id)) {
       result.skipped++
       continue
     }
@@ -1087,18 +1107,23 @@ async function requalifyRecent(
 async function requalifyStats(supabase: Supabase, days: number) {
   const since = new Date(Date.now() - days * 86_400_000).toISOString()
 
-  const { data: convs, error } = await supabase
-    .from("conversations")
-    .select("contact_id")
-    .gte("last_message_at", since)
-    .order("last_message_at", { ascending: true })
-    .range(0, 9999)
-  if (error) {
-    return { error: error.message }
+  const convs: any[] = []
+  for (let page = 0; page < 10; page++) {
+    const { data, error } = await supabase
+      .from("conversations")
+      .select("contact_id")
+      .gte("last_message_at", since)
+      .order("last_message_at", { ascending: false })
+      .range(page * 1000, page * 1000 + 999)
+    if (error) {
+      return { error: error.message }
+    }
+    if (!data || data.length === 0) break
+    convs.push(...data)
   }
 
   const contactIds = [...new Set((convs ?? []).map((c: any) => c.contact_id))].filter(Boolean)
-  const stats = { conversations: convs?.length ?? 0, contacts: contactIds.length as number, complete: 0, partial: 0, missing: 0 }
+  const stats = { conversations: convs.length, contacts: contactIds.length, complete: 0, partial: 0, missing: 0 }
 
   // Count in chunks to avoid oversized .in() filters
   for (let i = 0; i < contactIds.length; i += 200) {
@@ -1151,8 +1176,8 @@ Deno.serve(async (req) => {
       case "requalify_recent": {
         const daysRaw = Number(data?.days ?? 30)
         const days = Number.isFinite(daysRaw) && daysRaw >= 1 ? Math.min(daysRaw, 180) : 30
-        const limitRaw = Number(data?.limit ?? 150)
-        const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 200) : 150
+        const limitRaw = Number(data?.limit ?? 100)
+        const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 150) : 100
         const stats = await requalifyRecent(supabase, days, limit)
         return jsonResponse(200, { ok: true, days, ...stats })
       }
