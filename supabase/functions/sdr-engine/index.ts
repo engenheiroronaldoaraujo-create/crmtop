@@ -466,23 +466,25 @@ async function saveQualification(
         null,
       )
       if (!oppId) return
-      if (complete) {
-        const { data: created } = await supabase
-          .from("opportunities")
-          .select("pipeline_id, stage_id")
-          .eq("id", oppId)
+      const { data: created } = await supabase
+        .from("opportunities")
+        .select("pipeline_id, stage_id")
+        .eq("id", oppId)
+        .maybeSingle()
+      const patch: Record<string, unknown> = {}
+      if (created) {
+        const wanted = complete ? "Qualificado" : "Novo Lead"
+        const { data: stage } = await supabase
+          .from("pipeline_stages")
+          .select("id")
+          .eq("pipeline_id", created.pipeline_id)
+          .eq("name", wanted)
+          .limit(1)
           .maybeSingle()
-        const patch: Record<string, unknown> = { qualified_at: new Date().toISOString() }
-        if (created) {
-          const { data: qualStage } = await supabase
-            .from("pipeline_stages")
-            .select("id")
-            .eq("pipeline_id", created.pipeline_id)
-            .eq("name", "Qualificado")
-            .limit(1)
-            .maybeSingle()
-          if (qualStage && qualStage.id !== created.stage_id) patch.stage_id = qualStage.id
-        }
+        if (stage && stage.id !== created.stage_id) patch.stage_id = stage.id
+      }
+      if (complete) patch.qualified_at = new Date().toISOString()
+      if (Object.keys(patch).length > 0) {
         await supabase.from("opportunities").update(patch).eq("id", oppId).then(() => {}, () => {})
       }
       return
