@@ -177,6 +177,9 @@ function OpportunityCard({
                     {contact ? contactDisplayName(contact) : "Sem contato"}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
+                    {contact ? contactPhone(contact) : "Sem contato"}
+                  </p>
+                  <p className="truncate text-[10px] text-muted-foreground">
                     {opportunity.title}
                   </p>
                   {(idle || (contact?.business_type || opportunity.temperature) && true) && (
