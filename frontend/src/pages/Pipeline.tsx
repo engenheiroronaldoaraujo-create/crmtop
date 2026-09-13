@@ -1423,17 +1423,40 @@ export default function PipelinePage() {
     return map
   }, [filteredOpps, stages])
 
-  // Load tags for visible opportunities
+  // Load tags for visible opportunities (opportunity tags + contact tags)
   const [oppTagsMap, setOppTagsMap] = useState<Map<string, any[]>>(new Map())
   useEffect(() => {
     if (filteredOpps.length === 0) { setOppTagsMap(new Map()); return }
-    const ids = filteredOpps.map((o) => o.id)
-    supabase.from("opportunity_tags").select("opportunity_id, tag:tags(name, color)").in("opportunity_id", ids).then(({ data }) => {
-      const map = new Map<string, any[]>()
-      for (const row of data ?? []) {
-        const arr = map.get(row.opportunity_id) ?? []
+    const oppIds = filteredOpps.map((o) => o.id)
+    const contactIds = [...new Set(filteredOpps.map((o) => o.contact_id).filter(Boolean))]
+    Promise.all([
+      supabase.from("opportunity_tags").select("opportunity_id, tag_id, tag:tags(name, color)").in("opportunity_id", oppIds),
+      supabase.from("contact_tags").select("contact_id, tag_id, tag:tags(name, color)").in("contact_id", contactIds),
+    ]).then(([oppRes, ctRes]) => {
+      // contact title -> tags
+      const ctByContact = new Map<string, any[]>()
+      for (const row of ctRes.data ?? []) {
+        const arr = ctByContact.get(row.contact_id) ?? []
         arr.push(row)
+        ctByContact.set(row.contact_id, arr)
+      }
+      const map = new Map<string, any[]>()
+      for (const row of oppRes.data ?? []) {
+        const arr = map.get(row.opportunity_id) ?? []
+        arr.push({ tag_id: row.tag_id, tag: row.tag })
         map.set(row.opportunity_id, arr)
+      }
+      for (const o of filteredOpps) {
+        const ctArr = ctByContact.get(o.contact_id)
+        if (!ctArr?.length) continue
+        const existing = map.get(o.id) ?? []
+        const seen = new Set(existing.map((t) => t.tag_id))
+        for (const row of ctArr) {
+          if (seen.has(row.tag_id)) continue
+          seen.add(row.tag_id)
+          existing.push({ tag_id: row.tag_id, tag: row.tag })
+        }
+        map.set(o.id, existing)
       }
       setOppTagsMap(map)
     })
