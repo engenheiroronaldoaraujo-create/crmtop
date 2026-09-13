@@ -901,22 +901,33 @@ function parseQualification(text: string): {
   try {
     if (!text || text.trim().length < 5) return null
     let cleaned = text
-      .replace(/<\/think>/gi, "")
+      .replace(/<\/?think>|<\/?thinking>/gi, "")
+      .replace(/<<[\s\S]*?>>/g, "")
+      .replace(/\[\[\w+\]\]|<<\w+>>/gi, "")
       .replace(/\[REASONING\][\s\S]*?\[\/REASONING\]/gi, "")
       .replace(/^```json\s*/i, "")
       .replace(/^```\s*/i, "")
       .replace(/```\s*$/i, "")
       .trim()
-    const jsonStr = extractJson(cleaned)
-    if (!jsonStr) return null
-    const parsed = JSON.parse(jsonStr)
-    const info = parsed?.extracted_info ?? parsed?.extracted ?? parsed?.data
-    if (!info || typeof info !== "object") return null
-    return {
-      extracted_info: info as Record<string, string | null>,
-      temperature: typeof parsed.temperature === "string" ? parsed.temperature : "cold",
-      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+    // Could be reasoning before/after the JSON: find a valid object containing extracted_info
+    for (let start = cleaned.indexOf("{"); start !== -1; ) {
+      const jsonStr = extractJson(cleaned.slice(start))
+      if (jsonStr) {
+        try {
+          const parsed = JSON.parse(jsonStr)
+          const info = parsed?.extracted_info ?? parsed?.extracted ?? parsed?.data
+          if (info && typeof info === "object") {
+            return {
+              extracted_info: info as Record<string, string | null>,
+              temperature: typeof parsed.temperature === "string" ? parsed.temperature : "cold",
+              confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+            }
+          }
+        } catch { /* permissive: try-ahead next */ }
+        start = cleaned.indexOf("{", start + jsonStr.length)
+      } else break
     }
+    return null
   } catch {
     return null
   }
@@ -933,14 +944,14 @@ async function requalifyRecent(
     .select("primary_model")
     .limit(1)
     .single()
-  const result = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
+  const result: Record<string, unknown> & { analyzed: number; qualified: number; partial: number; skipped: number; errors: number } = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
 
   const { data: convs, error: convErr } = await supabase
     .from("conversations")
     .select("id, contact_id")
     .gte("last_message_at", since)
     .order("last_message_at", { ascending: false })
-    .limit(2000)
+    .range(0, 1999)
   if (convErr) {
     console.error("SDR_REQUAL_CONV_ERROR", convErr)
     return { ...result, errors: result.errors + 1 }
@@ -996,7 +1007,7 @@ async function requalifyRecent(
           role: "user",
           content: `Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}\n\nConversa:\n${context}\n\nExtraia os dados de qualificacao.`,
         },
-      ], { temperature: 0.2, max_tokens: 500 })
+      ], { temperature: 0.2, max_tokens: 2000 })
 
       const parsed = parseQualification(aiRes.content)
 
@@ -1008,7 +1019,7 @@ async function requalifyRecent(
           status: "failed",
           action: "requalify",
           error: "no_extractable_data",
-          metadata: { raw: (aiRes.content || "").slice(0, 300) },
+          metadata: { raw: (aiRes.content || "").slice(0, 1200), len: (aiRes.content || "").length },
         }).then(() => {}, () => {})
         return "error"
       }
@@ -1050,15 +1061,20 @@ async function requalifyRecent(
 
   const batch = candidates.slice(0, limit)
   const CONCURRENCY = 4
-  for (let i = 0; i < batch.length; i += CONCURRENCY) {
-    const slice = batch.slice(i, i + CONCURRENCY)
-    const outcomes = await Promise.all(slice.map(processOne))
-    for (const outcome of outcomes) {
-      result.analyzed++
-      if (outcome === "qualified") result.qualified++
-      else if (outcome === "partial") result.partial++
-      else result.errors++
+  try {
+    for (let i = 0; i < batch.length; i += CONCURRENCY) {
+      const slice = batch.slice(i, i + CONCURRENCY)
+      const outcomes = await Promise.all(slice.map(processOne))
+      for (const outcome of outcomes) {
+        result.analyzed++
+        if (outcome === "qualified") result.qualified++
+        else if (outcome === "partial") result.partial++
+        else result.errors++
+      }
     }
+  } catch (err) {
+    console.error("SDR_REQUAL_BATCH_FATAL", err)
+    result.fatal = String(err).slice(0, 300)
   }
 
   return result
@@ -1076,6 +1092,7 @@ async function requalifyStats(supabase: Supabase, days: number) {
     .select("contact_id")
     .gte("last_message_at", since)
     .order("last_message_at", { ascending: true })
+    .range(0, 9999)
   if (error) {
     return { error: error.message }
   }
@@ -1128,7 +1145,7 @@ Deno.serve(async (req) => {
         const daysRaw = Number(data?.days ?? 30)
         const days = Number.isFinite(daysRaw) && daysRaw >= 1 ? Math.min(daysRaw, 180) : 30
         const stats = await requalifyStats(supabase, days)
-        return jsonResponse(200, { ok: true, days, ...stats })
+        return jsonResponse(200, { ok: true, v: 3, days, ...stats })
       }
 
       case "requalify_recent": {
