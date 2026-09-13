@@ -1053,6 +1053,44 @@ async function requalifyRecent(
 }
 
 // ---------------------------------------------------------------------------
+// Requalify pre-flight stats
+// ---------------------------------------------------------------------------
+
+async function requalifyStats(supabase: Supabase, days: number) {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString()
+
+  const { data: convs, error } = await supabase
+    .from("conversations")
+    .select("contact_id")
+    .gte("last_message_at", since)
+    .order("last_message_at", { ascending: true })
+  if (error) {
+    return { error: error.message }
+  }
+
+  const contactIds = [...new Set((convs ?? []).map((c: any) => c.contact_id))].filter(Boolean)
+  const stats = { conversations: convs?.length ?? 0, contacts: contactIds.length as number, complete: 0, partial: 0, missing: 0 }
+
+  // Count in chunks to avoid oversized .in() filters
+  for (let i = 0; i < contactIds.length; i += 200) {
+    const chunk = contactIds.slice(i, i + 200)
+    const { data: contacts } = await supabase
+      .from("contacts")
+      .select("business_type, team_size, extra_info")
+      .in("id", chunk)
+    for (const c of contacts ?? []) {
+      const hasSome = c.business_type || c.team_size != null || c.extra_info
+      const all = c.business_type && c.team_size != null && c.extra_info
+      if (all) stats.complete++
+      else if (hasSome) stats.partial++
+      else stats.missing++
+    }
+  }
+
+  return stats
+}
+
+// ---------------------------------------------------------------------------
 // Edge Function entry point
 // ---------------------------------------------------------------------------
 
@@ -1072,6 +1110,13 @@ Deno.serve(async (req) => {
         const result = await processMessage(supabase, conversation_id, contact_id, message_content, instance_name, message_id)
         // NOTE: message sending is handled by the webhook (callSDREngine)
         return jsonResponse(200, { ok: true, ...result })
+      }
+
+      case "requalify_stats": {
+        const daysRaw = Number(data?.days ?? 30)
+        const days = Number.isFinite(daysRaw) && daysRaw >= 1 ? Math.min(daysRaw, 180) : 30
+        const stats = await requalifyStats(supabase, days)
+        return jsonResponse(200, { ok: true, days, ...stats })
       }
 
       case "requalify_recent": {
