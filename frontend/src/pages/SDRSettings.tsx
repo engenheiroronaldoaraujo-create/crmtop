@@ -223,6 +223,7 @@ export default function SDRSettings() {
   const [testMessage, setTestMessage] = useState("")
   const [testResult, setTestResult] = useState<any>(null)
   const [requalifying, setRequalifying] = useState(false)
+  const [progress, setProgress] = useState<string | null>(null)
   const [requalifyStats, setRequalifyStats] = useState<{ analyzed: number; qualified: number; partial: number; skipped: number; errors: number } | null>(null)
   const [qualStats, setQualStats] = useState<{ conversations?: number; contacts?: number; complete?: number; partial?: number; missing?: number; error?: string } | null>(null)
   const [testing, setTesting] = useState(false)
@@ -280,13 +281,30 @@ export default function SDRSettings() {
   const handleRequalify = async () => {
     setRequalifying(true)
     setRequalifyStats(null)
+    setProgress("Iniciando...")
     try {
-      const res = await sdrRequalifyRecent(30)
-      setRequalifyStats(res)
-      toast.success(`Requalificação concluída: ${res.qualified ?? 0} completo(s), ${res.partial ?? 0} parcial(is)`)
+      let totals = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
+      for (let round = 1; round <= 50; round++) {
+        const res = await sdrRequalifyRecent(30)
+        totals = {
+          analyzed: totals.analyzed + (res.analyzed ?? 0),
+          qualified: totals.qualified + (res.qualified ?? 0),
+          partial: totals.partial + (res.partial ?? 0),
+          skipped: totals.skipped + (res.skipped ?? 0),
+          errors: totals.errors + (res.errors ?? 0),
+        }
+        setRequalifyStats({ ...totals })
+        setProgress(`Rodada ${round}: ${totals.analyzed} contatos analisados...`)
+        if ((res.analyzed ?? 0) === 0) break
+        await loadQualStats()
+      }
       await loadQualStats()
+      toast.success(`Requalificação concluída: ${totals.qualified} completo(s), ${totals.partial} parcial(is)`)
     } catch (e: any) { toast.error(e.message) }
-    finally { setRequalifying(false) }
+    finally {
+      setRequalifying(false)
+      setProgress(null)
+    }
   }
 
   if (loading) return <div className="py-8 text-center text-muted-foreground">Carregando...</div>
@@ -381,10 +399,10 @@ export default function SDRSettings() {
             )}
             <Button onClick={handleRequalify} disabled={requalifying}>
               {requalifying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              Requalificar últimos 30 dias
+              Processar todos
             </Button>
-            {requalifying && (
-              <p className="text-xs text-muted-foreground">Analisando até 40 conversas por rodada sem dados completos. Rode novamente para processar mais...</p>
+            {progress && (
+              <p className="text-xs text-muted-foreground">{progress}</p>
             )}
             {requalifyStats && (
               <div className="rounded-lg border p-3 text-sm">

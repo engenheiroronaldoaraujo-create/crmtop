@@ -940,19 +940,23 @@ async function requalifyRecent(
     .select("id, contact_id")
     .gte("last_message_at", since)
     .order("last_message_at", { ascending: false })
-    .limit(300)
+    .limit(2000)
   if (convErr) {
     console.error("SDR_REQUAL_CONV_ERROR", convErr)
     return { ...result, errors: result.errors + 1 }
   }
 
   // Prefer contacts still missing qualification data
-  const contactIds = [...new Set((convs ?? []).map((c: any) => c.contact_id))].filter(Boolean).slice(0, 400)
-  const { data: contacts } = await supabase
-    .from("contacts")
-    .select("id, name, push_name, business_type, team_size, extra_info")
-    .in("id", contactIds)
-  const contactMap = new Map<string, any>((contacts ?? []).map((c: any) => [c.id, c]))
+  const contactIds = [...new Set((convs ?? []).map((c: any) => c.contact_id))].filter(Boolean)
+  const contactMap = new Map<string, any>()
+  for (let i = 0; i < contactIds.length && i < 2000; i += 200) {
+    const chunk = contactIds.slice(i, i + 200)
+    const { data: contacts } = await supabase
+      .from("contacts")
+      .select("id, name, push_name, business_type, team_size, extra_info")
+      .in("id", chunk)
+    for (const c of contacts ?? []) contactMap.set(c.id, c)
+  }
 
   // Prioritize contacts with missing fields
   const candidates: { conversationId: string; contactId: string }[] = []
@@ -966,8 +970,8 @@ async function requalifyRecent(
     candidates.push({ conversationId: conv.id, contactId: conv.contact_id })
   }
 
-  for (const { conversationId, contactId } of candidates.slice(0, limit)) {
-    result.analyzed++
+  // Processa candidatos em paralelo (4 por vez)
+  const processOne = async ({ conversationId, contactId }: { conversationId: string; contactId: string }): Promise<"qualified" | "partial" | "error" | "empty"> => {
     try {
       const { data: msgs } = await supabase
         .from("messages")
@@ -983,10 +987,7 @@ async function requalifyRecent(
         return `${label}: [${m.type}]`
       }).join("\n")
 
-      if (!context.trim()) {
-        result.errors++
-        continue
-      }
+      if (!context.trim()) return "error"
 
       const contact = contactMap.get(contactId)
       const aiRes = await callAI(supabase, [
@@ -1001,7 +1002,6 @@ async function requalifyRecent(
 
       const info = parsed?.extracted_info
       if (!info || (!info.service_type && info.team_size == null && !info.additional_info)) {
-        result.errors++
         await supabase.from("sdr_logs").insert({
           conversation_id: conversationId,
           contact_id: contactId,
@@ -1010,7 +1010,7 @@ async function requalifyRecent(
           error: "no_extractable_data",
           metadata: { raw: (aiRes.content || "").slice(0, 300) },
         }).then(() => {}, () => {})
-        continue
+        return "error"
       }
 
       await saveQualification(supabase, contactId, conversationId, info, parsed.temperature ?? "cold")
@@ -1025,8 +1025,6 @@ async function requalifyRecent(
         team_size: mergedInfo.team_size,
         extra_info: mergedInfo.additional_info,
       })
-      if (complete) result.qualified++
-      else result.partial++
 
       await supabase.from("sdr_logs").insert({
         conversation_id: conversationId,
@@ -1036,8 +1034,8 @@ async function requalifyRecent(
         model: settings?.primary_model,
         metadata: { ...info, temperature: parsed.temperature, complete },
       }).then(() => {}, () => {})
+      return complete ? "qualified" : "partial"
     } catch (err) {
-      result.errors++
       console.error("SDR_REQUAL_ERROR", err)
       await supabase.from("sdr_logs").insert({
         conversation_id: conversationId,
@@ -1046,6 +1044,20 @@ async function requalifyRecent(
         action: "requalify",
         error: String(err).slice(0, 500),
       }).then(() => {}, () => {})
+      return "error"
+    }
+  }
+
+  const batch = candidates.slice(0, limit)
+  const CONCURRENCY = 4
+  for (let i = 0; i < batch.length; i += CONCURRENCY) {
+    const slice = batch.slice(i, i + CONCURRENCY)
+    const outcomes = await Promise.all(slice.map(processOne))
+    for (const outcome of outcomes) {
+      result.analyzed++
+      if (outcome === "qualified") result.qualified++
+      else if (outcome === "partial") result.partial++
+      else result.errors++
     }
   }
 
@@ -1122,8 +1134,8 @@ Deno.serve(async (req) => {
       case "requalify_recent": {
         const daysRaw = Number(data?.days ?? 30)
         const days = Number.isFinite(daysRaw) && daysRaw >= 1 ? Math.min(daysRaw, 180) : 30
-        const limitRaw = Number(data?.limit ?? 40)
-        const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 100) : 40
+        const limitRaw = Number(data?.limit ?? 150)
+        const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 200) : 150
         const stats = await requalifyRecent(supabase, days, limit)
         return jsonResponse(200, { ok: true, days, ...stats })
       }
