@@ -1296,11 +1296,11 @@ function QualifiedLeadsPanel({
 
 function handleChatFromPanel(opp: Opportunity) {
   if (opp.conversation_id) {
-    window.location.href = `/?conversation=${opp.conversation_id}`
+    window.open(`/?conversation=${opp.conversation_id}`, "_blank")
     return
   }
   if (opp.contact_id) {
-    window.location.href = `/?contactId=${opp.contact_id}`
+    window.open(`/?contactId=${opp.contact_id}`, "_blank")
     return
   }
   toast.error("Este lead ainda não possui contato vinculado")
@@ -1564,11 +1564,11 @@ export default function PipelinePage() {
 
   const handleChat = (opp: Opportunity) => {
     if (opp.conversation_id) {
-      window.location.href = `/?conversation=${opp.conversation_id}`
+      window.open(`/?conversation=${opp.conversation_id}`, "_blank")
       return
     }
     if (opp.contact_id) {
-      window.location.href = `/?contactId=${opp.contact_id}`
+      window.open(`/?contactId=${opp.contact_id}`, "_blank")
       return
     }
     toast.error("Este lead ainda não possui contato vinculado")
