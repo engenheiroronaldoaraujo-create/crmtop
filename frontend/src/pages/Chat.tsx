@@ -563,9 +563,10 @@ export default function ChatPage() {
 
     if (conversations.length > 0 && !selectedId) {
       if (conversationId) {
-        // Open by conversation ID
+        // Open by conversation ID — always select; messages load independently
         const match = conversations.find((c) => c.id === conversationId)
-        if (match) setSelectedId(match.id)
+        setSelectedId(match?.id ?? conversationId)
+        if (!match) toast.info("Conversa encontrada — carregando por ID")
         setSearchParams({}, { replace: true })
       } else if (contactIdParam) {
         // Open by contact ID
