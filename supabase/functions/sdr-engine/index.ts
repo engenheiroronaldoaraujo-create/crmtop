@@ -840,7 +840,7 @@ Responda a última mensagem do CLIENTE.`
 // ---------------------------------------------------------------------------
 
 const REQUALIFY_PROMPT = `Voce e um extrator de dados para um CRM.
-A partir da conversa de WhatsApp abaixo, extraia os dados de QUALIFICACAO do CLIENTE (a parte "CLIENTE:").
+A partir da conversa de WhatsApp abaixo, extraia os dados de QUALIFICACAO do lead (a parte "CLIENTE:").
 Responda APENAS com JSON valido, sem markdown:
 {
   "extracted_info": {
@@ -854,6 +854,35 @@ Responda APENAS com JSON valido, sem markdown:
   "confidence": 0.0
 }
 Nao invente dados. Se o valor nao estiver na conversa, use null. team_size somente numero.`
+
+function parseQualification(text: string): {
+  extracted_info: Record<string, string | null> | null
+  temperature: string
+  confidence: number
+} | null {
+  try {
+    if (!text || text.trim().length < 5) return null
+    let cleaned = text
+      .replace(/<\/think>/gi, "")
+      .replace(/\[REASONING\][\s\S]*?\[\/REASONING\]/gi, "")
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim()
+    const jsonStr = extractJson(cleaned)
+    if (!jsonStr) return null
+    const parsed = JSON.parse(jsonStr)
+    const info = parsed?.extracted_info ?? parsed?.extracted ?? parsed?.data
+    if (!info || typeof info !== "object") return null
+    return {
+      extracted_info: info as Record<string, string | null>,
+      temperature: typeof parsed.temperature === "string" ? parsed.temperature : "cold",
+      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+    }
+  } catch {
+    return null
+  }
+}
 
 async function requalifyRecent(
   supabase: Supabase,
@@ -930,11 +959,7 @@ async function requalifyRecent(
         },
       ], { temperature: 0.2, max_tokens: 500 })
 
-      const parsed = parseResponse<{
-        extracted_info: Record<string, string | null>
-        temperature: string
-        confidence: number
-      }>(aiRes.content)
+      const parsed = parseQualification(aiRes.content)
 
       const info = parsed?.extracted_info
       if (!info || (!info.service_type && info.team_size == null && !info.additional_info)) {
