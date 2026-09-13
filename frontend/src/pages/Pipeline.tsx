@@ -1459,25 +1459,24 @@ export default function PipelinePage() {
       })
   }, [filteredOpps])
 
-  // Load last contact (inbound/outbound message) per conversation for visible opps
+  // Load last contact date per conversation (uses conversations.last_message_at)
   useEffect(() => {
     const convIds = filteredOpps
       .map((o) => o.conversation_id)
       .filter((id): id is string => !!id)
     if (convIds.length === 0) { setLastContactMap(new Map()); return }
-    supabase
-      .from("messages")
-      .select("conversation_id, sent_at")
-      .in("conversation_id", convIds)
-      .order("sent_at", { ascending: false })
-      .limit(1000)
-      .then(({ data }) => {
-        const map = new Map<string, string>()
-        for (const row of data ?? []) {
-          if (!map.has(row.conversation_id)) map.set(row.conversation_id, row.sent_at)
-        }
-        setLastContactMap(map)
-      })
+    const map = new Map<string, string>()
+    for (let i = 0; i < convIds.length; i += 200) {
+      const chunk = convIds.slice(i, i + 200)
+      supabase
+        .from("conversations")
+        .select("id, last_message_at")
+        .in("id", chunk)
+        .then(({ data }) => {
+          for (const row of data ?? []) map.set(row.id, row.last_message_at)
+          setLastContactMap(new Map(map))
+        })
+    }
   }, [filteredOpps])
 
   // Drag & drop
