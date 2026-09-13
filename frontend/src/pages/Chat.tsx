@@ -19,9 +19,10 @@ import {
   FileText,
   FlaskConical,
   Loader2,
-  Megaphone,
-  Paperclip,
-  Phone,
+   Megaphone,
+   Paperclip,
+   Pencil,
+   Phone,
   Plus,
   Send,
   UserPlus,
@@ -78,6 +79,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog"
+import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -130,6 +132,102 @@ function initialSourceFilter(): SourceFilter {
 }
 
 const MESSAGE_PAGE_SIZE = 200
+
+// ---------------------------------------------------------------------------
+// Tag Manager (edit list of tags)
+// ---------------------------------------------------------------------------
+
+function TagManagerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+  const { tags, loading, refresh, create, update, deactivate } = useTags()
+  const [newName, setNewName] = useState("")
+  const [newColor, setNewColor] = useState("#3b82f6")
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState("")
+  const [editColor, setEditColor] = useState("#3b82f6")
+  const [saving, setSaving] = useState(false)
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return
+    setSaving(true)
+    try {
+      await create({ name: newName.trim(), color: newColor })
+      setNewName("")
+      toast.success("Etiqueta criada")
+    } catch (e: any) { toast.error(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const handleSaveEdit = async (id: string) => {
+    if (!editName.trim()) return
+    setSaving(true)
+    try {
+      await update(id, { name: editName.trim(), color: editColor })
+      setEditingId(null)
+      toast.success("Etiqueta atualizada")
+    } catch (e: any) { toast.error(e.message) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Gerenciar etiquetas</DialogTitle>
+          <DialogDescription>Criar, renomear, mudar cor ou desativar. Desativar não apaga o histórico de usos.</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[50vh] space-y-1 overflow-auto">
+          {loading && <p className="py-4 text-center text-sm text-muted-foreground">Carregando...</p>}
+          {!loading && tags.length === 0 && (
+            <p className="py-4 text-center text-sm text-muted-foreground">Nenhuma etiqueta ativa</p>
+          )}
+          {tags.map((tag) => (
+            <div key={tag.id} className="flex items-center gap-2 rounded border p-2">
+              {editingId === tag.id ? (
+                <>
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="h-8 flex-1" />
+                  <input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} className="h-8 w-10 cursor-pointer rounded p-0.5" />
+                  <Button size="sm" className="h-8" disabled={saving} onClick={() => handleSaveEdit(tag.id)}>Salvar</Button>
+                  <Button size="sm" variant="outline" className="h-8" onClick={() => setEditingId(null)}>Cancelar</Button>
+                </>
+              ) : (
+                <>
+                  <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: tag.color }} />
+                  <span className="min-w-0 flex-1 truncate text-sm">{tag.name}</span>
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => { setEditingId(tag.id); setEditName(tag.name); setEditColor(tag.color ?? "#3b82f6") }}>
+                    Editar
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs text-destructive"
+                    onClick={async () => {
+                      if (!window.confirm(`Desativar a etiqueta "${tag.name}"?`)) return
+                      await deactivate(tag.id)
+                      toast.success("Etiqueta desativada")
+                    }}
+                  >
+                    Desativar
+                  </Button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        <Separator />
+        <div className="flex items-center gap-2">
+          <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Nova etiqueta..." className="h-8 flex-1" />
+          <input type="color" value={newColor} onChange={(e) => setNewColor(e.target.value)} className="h-8 w-10 cursor-pointer rounded p-0.5" title="Cor" />
+          <Button size="sm" className="h-8" disabled={saving || !newName.trim()} onClick={handleCreate}>
+            <Plus className="mr-1 h-3 w-3" /> Criar
+          </Button>
+        </div>
+        <Button variant="outline" size="sm" className="w-full" onClick={() => refresh()}>
+          Atualizar lista
+        </Button>
+      </DialogContent>
+    </Dialog>
+  )
+}
 
 function MediaMessage({ msg }: { msg: Message }) {
   const [url, setUrl] = useState<string | null>(null)
@@ -423,6 +521,7 @@ export default function ChatPage() {
   const { contactTags, addTag: addContactTag, removeTag: removeContactTag } = useContactTags(selected?.contact_id ?? null)
   const [tagSearch, setTagSearch] = useState("")
   const [tagMenuOpen, setTagMenuOpen] = useState(false)
+  const [tagsManagerOpen, setTagsManagerOpen] = useState(false)
 
   // --- Templates de resposta ---
   const { templates: allTemplates } = useTemplates()
@@ -1406,6 +1505,15 @@ export default function ChatPage() {
                     )}
                   </DropdownMenuContent>
                 </DropdownMenu>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-1.5 text-xs"
+                  title="Gerenciar etiquetas"
+                  onClick={() => setTagsManagerOpen(true)}
+                >
+                  <Pencil className="h-3 w-3" /> Editar lista
+                </Button>
               </div>
             )}
 
@@ -1719,6 +1827,8 @@ export default function ChatPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TagManagerDialog open={tagsManagerOpen} onOpenChange={setTagsManagerOpen} />
     </div>
     </>
   )
