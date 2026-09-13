@@ -18,6 +18,9 @@ export type Contact = {
   opted_out: boolean
   source: "whatsapp" | "manual"
   jid: string | null
+  business_type?: string | null
+  team_size?: number | null
+  extra_info?: string | null
   created_at: string
   updated_at: string
 }
@@ -138,6 +141,8 @@ export type Opportunity = {
   updated_at: string
   closed_at: string | null
   metadata: Record<string, string | null> | null
+  temperature?: "cold" | "warm" | "hot" | null
+  qualified_at?: string | null
   // Joined fields
   contact?: Contact | null
   pipeline?: Pipeline | null

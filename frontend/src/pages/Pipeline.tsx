@@ -78,17 +78,42 @@ function contactPhone(c: { phone?: string | null; lid?: string | null; jid?: str
   return "Telefone não identificado"
 }
 
+function daysIdleLastContact(opp: Opportunity, lastContactMap: Map<string, string> | undefined): number {
+  const last = (opp.conversation_id ? lastContactMap?.get(opp.conversation_id) : undefined) ?? opp.created_at
+  if (!last) return 0
+  const diff = Date.now() - new Date(last).getTime()
+  return Math.max(0, Math.floor(diff / 86_400_000))
+}
+
+function idleBadge(days: number): { className: string; label: string } | null {
+  if (days < 1) return null
+  if (days <= 2) return { className: "bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-400", label: `${days}d sem contato` }
+  if (days <= 7) return { className: "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/15 dark:text-yellow-400", label: `${days}d sem contato` }
+  return { className: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400", label: `${days}d sem contato` }
+}
+
+const TEMP_BADGE: Record<string, { className: string; label: string }> = {
+  hot: { className: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400", label: "🔥 Quente" },
+  warm: { className: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400", label: "Morno" },
+  cold: { className: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400", label: "Frio" },
+}
+
 // ---------------------------------------------------------------------------
 // Opportunity Card
 // ---------------------------------------------------------------------------
 
-function sdrMetadataTooltip(meta: Record<string, string | null> | null | undefined): string | undefined {
-  if (!meta) return undefined
+function sdrMetadataTooltip(
+  meta: Record<string, string | null> | null | undefined,
+  contact?: { business_type?: string | null; team_size?: number | null; extra_info?: string | null } | null,
+): string | undefined {
   const lines: string[] = []
-  if (meta.service_type) lines.push(`Tipo de servico: ${meta.service_type}`)
-  if (meta.current_tool) lines.push(`Ferramenta atual: ${meta.current_tool}`)
-  if (meta.main_need) lines.push(`Necessidade: ${meta.main_need}`)
-  if (meta.team_size) lines.push(`Equipe: ${meta.team_size}`)
+  if (contact?.business_type) lines.push(`Ramo de atividade: ${contact.business_type}`)
+  if (contact?.team_size != null) lines.push(`Técnicos/equipes: ${contact.team_size}`)
+  if (meta?.service_type) lines.push(`Tipo de servico: ${meta.service_type}`)
+  if (meta?.current_tool) lines.push(`Ferramenta atual: ${meta.current_tool}`)
+  if (meta?.main_need) lines.push(`Necessidade: ${meta.main_need}`)
+  if (meta?.additional_info) lines.push(`Info adicional: ${meta.additional_info}`)
+  if (contact?.extra_info && contact.extra_info !== meta?.additional_info) lines.push(`Info adicional: ${contact.extra_info}`)
   return lines.length > 0 ? lines.join("\n") : undefined
 }
 
@@ -104,6 +129,7 @@ function OpportunityCard({
   onDelete,
   tags,
   insight,
+  lastContactMap,
   onCreateMeeting,
   onCreateTask,
   onCreateFollowUp,
@@ -119,12 +145,14 @@ function OpportunityCard({
   onDelete?: (o: Opportunity) => void
   tags?: { tag_id: string; tag?: { name: string; color: string } }[]
   insight?: { priority: string; days_stalled: number } | null
+  lastContactMap?: Map<string, string>
   onCreateMeeting?: (o: Opportunity) => void
   onCreateTask?: (o: Opportunity) => void
   onCreateFollowUp?: (o: Opportunity) => void
 }) {
   const contact = opportunity.contact
   const assignee = opportunity.assignee
+  const idle = idleBadge(daysIdleLastContact(opportunity, lastContactMap))
 
   return (
     <Draggable draggableId={opportunity.id} index={index}>
@@ -140,7 +168,7 @@ function OpportunityCard({
         >
           <Card
             className="cursor-grab border-border/60 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
-            title={sdrMetadataTooltip(opportunity.metadata)}
+            title={sdrMetadataTooltip(opportunity.metadata, contact)}
           >
             <CardContent className="p-3">
               <div className="flex items-start justify-between gap-2">
@@ -151,6 +179,35 @@ function OpportunityCard({
                   <p className="truncate text-xs text-muted-foreground">
                     {opportunity.title}
                   </p>
+                  {(idle || (contact?.business_type || opportunity.temperature) && true) && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                      {idle && (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${idle.className}`}
+                        >
+                          <AlertTriangle className="h-3 w-3" />
+                          {idle.label}
+                        </span>
+                      )}
+                      {opportunity.temperature && TEMP_BADGE[opportunity.temperature] && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${TEMP_BADGE[opportunity.temperature].className}`}
+                        >
+                          {TEMP_BADGE[opportunity.temperature].label}
+                        </span>
+                      )}
+                      {contact?.business_type && (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          {contact.business_type}
+                        </span>
+                      )}
+                      {contact?.team_size != null && (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          {contact.team_size} {contact.team_size === 1 ? "técnico" : "técnicos"}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {insight && (
                     <span
                       className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
@@ -283,6 +340,7 @@ function KanbanColumn({
   opportunities,
   oppTagsMap,
   oppInsightsMap,
+  lastContactMap,
   onEdit,
   onWin,
   onLose,
@@ -298,6 +356,7 @@ function KanbanColumn({
   opportunities: Opportunity[]
   oppTagsMap: Map<string, any[]>
   oppInsightsMap: Map<string, { priority: string; days_stalled: number }>
+  lastContactMap?: Map<string, string>
   onEdit: (o: Opportunity) => void
   onWin: (o: Opportunity) => void
   onLose: (o: Opportunity) => void
@@ -359,6 +418,7 @@ function KanbanColumn({
                 index={idx}
                 tags={oppTagsMap.get(opp.id)}
                 insight={oppInsightsMap.get(opp.id) ?? null}
+                lastContactMap={lastContactMap}
                 onEdit={onEdit}
                 onWin={onWin}
                 onLose={onLose}
@@ -1153,6 +1213,100 @@ function StageManagerDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Qualified Leads Panel (resumo de qualificação da IA / handoff)
+// ---------------------------------------------------------------------------
+
+const TEMP_ORDER: Record<string, number> = { hot: 0, warm: 1, cold: 2 }
+
+function QualifiedLeadsPanel({
+  open,
+  onOpenChange,
+  opportunities,
+  lastContactMap,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  opportunities: Opportunity[]
+  lastContactMap?: Map<string, string>
+}) {
+  const qualified = useMemo(() => {
+    return opportunities
+      .filter((o) => o.status === "open" && o.qualified_at)
+      .sort((a, b) => {
+        const t = (TEMP_ORDER[a.temperature ?? "cold"] ?? 3) - (TEMP_ORDER[b.temperature ?? "cold"] ?? 3)
+        if (t !== 0) return t
+        return (a.qualified_at ?? "").localeCompare(b.qualified_at ?? "")
+      })
+  }, [opportunities])
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Leads Qualificados pela IA</DialogTitle>
+          <DialogDescription>
+            {qualified.length > 0
+              ? "Leads com qualificação completa, ordenados por temperatura. Use o resumo para assumir o contato."
+              : "Nenhum lead com qualificação completa ainda. A Sofia preenche Ramo, Equipe e Info adicional durante a conversa."}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] space-y-2 overflow-auto">
+          {qualified.length === 0 && (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              Aguardando leads qualificados...
+            </p>
+          )}
+          {qualified.map((o) => {
+            const meta = o.metadata ?? {}
+            const c = o.contact
+            const idle = idleBadge(daysIdleLastContact(o, lastContactMap))
+            return (
+              <div key={o.id} className="rounded-lg border p-3">
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">
+                    {c ? contactDisplayName(c) : o.title}
+                  </span>
+                  {o.temperature && TEMP_BADGE[o.temperature] && (
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${TEMP_BADGE[o.temperature].className}`}>
+                      {TEMP_BADGE[o.temperature].label}
+                    </span>
+                  )}
+                  {idle && (
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${idle.className}`}>
+                      {idle.label}
+                    </span>
+                  )}
+                  <Button size="sm" variant="outline" onClick={() => { onOpenChange(false); handleChatFromPanel(o) }}>
+                    <MessageCircle className="mr-1 h-3 w-3" /> Assumir
+                  </Button>
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  <p><span className="font-medium text-foreground">Ramo:</span> {c?.business_type ?? meta.service_type ?? "—"}</p>
+                  <p><span className="font-medium text-foreground">Técnicos/equipes:</span> {c?.team_size ?? meta.team_size ?? "—"}</p>
+                  <p><span className="font-medium text-foreground">Info adicional:</span> {c?.extra_info ?? meta.additional_info ?? meta.main_need ?? "—"}</p>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function handleChatFromPanel(opp: Opportunity) {
+  if (opp.conversation_id) {
+    window.location.href = `/?conversation=${opp.conversation_id}`
+    return
+  }
+  if (opp.contact_id) {
+    window.location.href = `/?contactId=${opp.contact_id}`
+    return
+  }
+  toast.error("Este lead ainda não possui contato vinculado")
+}
+
+// ---------------------------------------------------------------------------
 // Main Pipeline Page
 // ---------------------------------------------------------------------------
 
@@ -1204,6 +1358,10 @@ export default function PipelinePage() {
   // Deal Inspector
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [oppInsightsMap, setOppInsightsMap] = useState<Map<string, { priority: string; days_stalled: number }>>(new Map())
+  // Qualified leads panel
+  const [qualifiedOpen, setQualifiedOpen] = useState(false)
+  // Last contact (message) date per conversation
+  const [lastContactMap, setLastContactMap] = useState<Map<string, string>>(new Map())
 
   // Load contacts and profiles
   useEffect(() => {
@@ -1298,6 +1456,27 @@ export default function PipelinePage() {
           }
         }
         setOppInsightsMap(map)
+      })
+  }, [filteredOpps])
+
+  // Load last contact (inbound/outbound message) per conversation for visible opps
+  useEffect(() => {
+    const convIds = filteredOpps
+      .map((o) => o.conversation_id)
+      .filter((id): id is string => !!id)
+    if (convIds.length === 0) { setLastContactMap(new Map()); return }
+    supabase
+      .from("messages")
+      .select("conversation_id, sent_at")
+      .in("conversation_id", convIds)
+      .order("sent_at", { ascending: false })
+      .limit(1000)
+      .then(({ data }) => {
+        const map = new Map<string, string>()
+        for (const row of data ?? []) {
+          if (!map.has(row.conversation_id)) map.set(row.conversation_id, row.sent_at)
+        }
+        setLastContactMap(map)
       })
   }, [filteredOpps])
 
@@ -1460,6 +1639,9 @@ export default function PipelinePage() {
           <Button variant="outline" onClick={() => setStageDialogOpen(true)}>
             <Settings className="mr-2 h-4 w-4" /> Etapas
           </Button>
+          <Button variant="outline" onClick={() => setQualifiedOpen(true)}>
+            <Check className="mr-2 h-4 w-4" /> Qualificados
+          </Button>
           <Button variant="outline" onClick={() => setInspectorOpen(true)}>
             <Search className="mr-2 h-4 w-4" /> Vasculhar
           </Button>
@@ -1495,6 +1677,7 @@ export default function PipelinePage() {
                   opportunities={oppsByStage.get(stage.id) ?? []}
                   oppTagsMap={oppTagsMap}
                   oppInsightsMap={oppInsightsMap}
+                  lastContactMap={lastContactMap}
                   onEdit={(o) => { setEditOpp(o); setEditOpen(true) }}
                   onWin={(o) => { setWinTarget(o); setWinOpen(true) }}
                   onLose={(o) => { setLoseTarget(o); setLoseOpen(true) }}
@@ -1595,6 +1778,13 @@ export default function PipelinePage() {
         open={inspectorOpen}
         onOpenChange={setInspectorOpen}
         stages={stages}
+      />
+
+      <QualifiedLeadsPanel
+        open={qualifiedOpen}
+        onOpenChange={setQualifiedOpen}
+        opportunities={opportunities}
+        lastContactMap={lastContactMap}
       />
     </div>
     </>

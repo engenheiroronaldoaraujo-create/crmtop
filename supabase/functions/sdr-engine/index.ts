@@ -24,7 +24,8 @@ O JSON deve ter EXATAMENTE estes campos:
     "service_type": null,
     "team_size": null,
     "current_tool": null,
-    "main_need": null
+    "main_need": null,
+    "additional_info": null
   }
 }
 Nao adicione explicacoes fora do JSON.
@@ -38,6 +39,21 @@ Seu papel:
 - Identificar uma ou duas necessidades relevantes
 - Apresentar SOMENTE funcionalidades que facam sentido
 - Informar que um especialista ira entrar em contato
+
+MISSAO DE QUALIFICACAO (obrigatoria):
+Antes de transferir para o especialista, colete estes 3 pontos:
+1. RAMO DE ATIVIDADE: qual servico o lead presta (ex: empresa de ar-condicionado, eletricista, dedetizacao...)
+2. QUANTIDADE: quantos tecnicos/equipes ele tem na operacao (numero; pergunte com naturalidade, ex: "quantos tecnicos voce tem na equipe?")
+3. INFORMACOES ADICIONAIS: qualquer detalhe relevante que o lead passar (como opera hoje, dores, volume, expectativa)
+
+Preencha extracted_info em CADA resposta (use os valores ja coletados antes; null do que ainda nao sabe).
+- team_size deve ser numero (se "so eu mesmo", use 1; se "umas 5", use 5)
+- additional_info = resumo curto das informacoes extras passadas (nao duplicando main_need)
+Somente use suggested_action transfer_human quando:
+- o lead pedir humano/preco explicitamente, OU
+- tiver interesse claro e os 3 pontos estiverem coletados, OU
+- o lead já respondeu tudo mesmo sem você insistir (nao insista mais de 2 vezes pelo mesmo dado)
+Se pedir transferencia e faltar dado essencial, colete ou aceite o que tiver e informe a transferencia de qualquer forma.
 
 Regras:
 - Uma pergunta por vez, sempre
@@ -349,6 +365,7 @@ async function createOpportunityIfNotExists(
         conversation_id: conversationId,
         description: extractedInfo.main_need ?? null,
         metadata: extractedInfo,
+        temperature,
       })
       .select("id")
       .single()
@@ -362,6 +379,114 @@ async function createOpportunityIfNotExists(
   } catch (err) {
     console.error("SDR_OPP_CREATE_ERROR", err)
     return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Qualification persistence: structured fields on contact + opportunity
+// ---------------------------------------------------------------------------
+
+function parseTeamSize(raw: unknown): number | null {
+  if (raw == null) return null
+  const m = String(raw).match(/\d+/)
+  if (!m) return null
+  const n = parseInt(m[0], 10)
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
+
+export function isQualificationComplete(info: {
+  business_type?: string | null
+  team_size?: number | null
+  extra_info?: string | null
+}): boolean {
+  return Boolean(
+    info.business_type?.trim() &&
+    (info.team_size ?? 0) > 0 &&
+    info.extra_info?.trim()
+  )
+}
+
+async function saveQualification(
+  supabase: Supabase,
+  contactId: string,
+  extractedInfo: Record<string, string | null> | undefined,
+  temperature: string,
+): Promise<void> {
+  if (!extractedInfo || typeof extractedInfo !== "object") return
+
+  // 1. Persist structured fields on contact
+  const contactUpdate: Record<string, unknown> = {}
+  if (extractedInfo.service_type) contactUpdate.business_type = extractedInfo.service_type.slice(0, 120)
+  const teamSize = parseTeamSize(extractedInfo.team_size)
+  if (teamSize != null) contactUpdate.team_size = teamSize
+  const extraInfo = extractedInfo.additional_info ?? extractedInfo.main_need
+  if (extraInfo) contactUpdate.extra_info = extraInfo.slice(0, 2000)
+
+  if (Object.keys(contactUpdate).length > 0) {
+    await supabase
+      .from("contacts")
+      .update(contactUpdate)
+      .eq("id", contactId)
+      .then(() => {}, () => {})
+  }
+
+  // 2. Update open opportunity: metadata + temperature + auto-stage
+  try {
+    const { data: opps } = await supabase
+      .from("opportunities")
+      .select("id, metadata, stage_id, pipeline_id, description")
+      .eq("contact_id", contactId)
+      .eq("status", "open")
+      .limit(1)
+    const opp = opps?.[0]
+    if (!opp) return
+
+    const mergedMeta: Record<string, string | null> = {}
+    for (const k of ["service_type", "team_size", "current_tool", "main_need", "additional_info"] as const) {
+      mergedMeta[k] = extractedInfo[k] ?? opp.metadata?.[k] ?? null
+    }
+    mergedMeta.team_size = teamSize != null ? String(teamSize) : mergedMeta.team_size
+
+    const oppUpdate: Record<string, unknown> = {
+      metadata: mergedMeta,
+      temperature: temperature || opp.temperature || null,
+    }
+    if (mergedMeta.main_need && !opp.description) oppUpdate.description = mergedMeta.main_need
+
+    // Qualification complete -> mark + move "Novo Lead" -> "Qualificado"
+    const complete = isQualificationComplete({
+      business_type: mergedMeta.service_type,
+      team_size: teamSize,
+      extra_info: mergedMeta.additional_info ?? mergedMeta.main_need,
+    })
+    if (complete) {
+      oppUpdate.qualified_at = new Date().toISOString()
+      const { data: stage } = await supabase
+        .from("pipeline_stages")
+        .select("id")
+        .eq("pipeline_id", opp.pipeline_id)
+        .eq("name", "Novo Lead")
+        .limit(1)
+        .maybeSingle()
+      if (stage && opp.stage_id === stage.id) {
+        const { data: qualStage } = await supabase
+          .from("pipeline_stages")
+          .select("id")
+          .eq("pipeline_id", opp.pipeline_id)
+          .eq("name", "Qualificado")
+          .limit(1)
+          .maybeSingle()
+        if (qualStage) oppUpdate.stage_id = qualStage.id
+      }
+    }
+
+    await supabase
+      .from("opportunities")
+      .update(oppUpdate)
+      .eq("id", opp.id)
+      .then(() => {}, (e: unknown) => console.error("SDR_QUAL_OPP_ERROR", e))
+  } catch (err) {
+    console.error("SDR_QUAL_ERROR", err)
   }
 }
 
@@ -599,7 +724,10 @@ Responda a última mensagem do CLIENTE.`
     return { action: "continue", response: fallback.response }
   }
 
-  // 13. Handle actions based on suggested_action
+  // 13. Persist qualification data (structured fields + auto-stage)
+  await saveQualification(supabase, contactId, parsed.extracted_info, parsed.temperature)
+
+  // 14. Handle actions based on suggested_action
   if (parsed.suggested_action === "transfer_human") {
     // Create opportunity before transferring
     const oppId = await createOpportunityIfNotExists(
