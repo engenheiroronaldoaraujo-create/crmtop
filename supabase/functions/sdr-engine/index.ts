@@ -83,13 +83,13 @@ Apenas o JSON.`;
 async function callAI(
   supabase: Supabase,
   messages: Array<{ role: string; content: string }>,
-  options: { temperature?: number; max_tokens?: number } = {},
+  options: { temperature?: number; max_tokens?: number; model?: string } = {},
 ): Promise<{ content: string; usage?: any }> {
   // Get API key
   const apiKey = await getOpenRouterKey(supabase);
   if (!apiKey) throw new Error("API Key não configurada");
 
-  // Get model from settings (cached)
+  // Get model from settings (cached) or explicit override
   if (!cachedModel) {
     const { data: sdrConfig } = await supabase
       .from("sdr_settings")
@@ -98,7 +98,7 @@ async function callAI(
       .single();
     cachedModel = sdrConfig?.primary_model ?? "google/gemini-2.5-flash";
   }
-  const model = cachedModel;
+  const model = options.model || cachedModel;
 
   const body = {
     model,
@@ -941,9 +941,10 @@ async function requalifyRecent(
   const since = new Date(Date.now() - days * 86_400_000).toISOString()
   const { data: settings } = await supabase
     .from("sdr_settings")
-    .select("primary_model")
+    .select("primary_model, extraction_model")
     .limit(1)
     .single()
+  const extractModel = (settings as any)?.extraction_model || (settings as any)?.primary_model || undefined
   const result: Record<string, unknown> & { analyzed: number; qualified: number; partial: number; skipped: number; errors: number } = { analyzed: 0, qualified: 0, partial: 0, skipped: 0, errors: 0 }
 
   const convs: any[] = []
@@ -1027,7 +1028,7 @@ async function requalifyRecent(
           role: "user",
           content: `Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}\n\nConversa:\n${context}\n\nExtraia os dados de qualificacao.`,
         },
-      ], { temperature: 0.2, max_tokens: 2000 })
+      ], { temperature: 0.2, max_tokens: 2000, model: extractModel })
 
       const parsed = parseQualification(aiRes.content)
 
@@ -1062,7 +1063,7 @@ async function requalifyRecent(
         contact_id: contactId,
         status: "completed",
         action: "requalify",
-        model: settings?.primary_model,
+        model: extractModel,
         metadata: { ...info, temperature: parsed.temperature, complete },
       }).then(() => {}, () => {})
       return complete ? "qualified" : "partial"
@@ -1199,7 +1200,7 @@ Deno.serve(async (req) => {
           "silence_start", "silence_end",
           "meeting_duration_minutes", "meeting_buffer_minutes",
           "max_messages_per_conversation", "cooldown_seconds",
-          "tone", "system_prompt", "primary_model", "fallback_model",
+          "tone", "system_prompt", "primary_model", "fallback_model", "extraction_model",
         ]
         const filtered: Record<string, unknown> = {}
         for (const key of allowedFields) {

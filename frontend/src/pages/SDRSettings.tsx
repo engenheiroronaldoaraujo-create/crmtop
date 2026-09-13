@@ -375,6 +375,7 @@ export default function SDRSettings() {
               </Select>
             </div>
             <div className="space-y-2"><Label className="text-sm">Modelo</Label><Input className="h-8" value={settings.primary_model ?? ""} onChange={(e) => handleSave({ primary_model: e.target.value })} placeholder="openrouter/free" /></div>
+            <div className="space-y-2"><Label className="text-sm">Modelo requalificação</Label><Input className="h-8" value={settings.extraction_model ?? ""} onChange={(e) => handleSave({ extraction_model: e.target.value })} placeholder="Vazio = usa o mesmo modelo" /></div>
             <div className="space-y-2"><Label className="text-sm">Prompt adicional</Label><Textarea className="min-h-[80px]" value={settings.system_prompt ?? ""} onChange={(e) => handleSave({ system_prompt: e.target.value })} placeholder="Instrucoes adicionais para o SDR..." /></div>
           </CardContent>
         </Card>

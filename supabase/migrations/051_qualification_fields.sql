@@ -17,6 +17,10 @@ alter table public.opportunities
 create index if not exists opportunities_temperature_idx
   on public.opportunities (temperature) where temperature is not null;
 
+-- Separate LLM model for batch extraction (requalifier)
+alter table public.sdr_settings
+  add column if not exists extraction_model text;
+
 -- RPC referenced by evolution-webhook (was missing)
 create or replace function public.increment_sdr_count(p_conversation_id uuid)
 returns void
