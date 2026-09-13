@@ -293,7 +293,7 @@ function extractJson(text: string): string | null {
 async function createOpportunityIfNotExists(
   supabase: Supabase,
   contactId: string,
-  conversationId: string,
+  conversationId: string | null,
   temperature: string,
   extractedInfo: Record<string, string | null>,
   pushName: string | null,
@@ -362,7 +362,7 @@ async function createOpportunityIfNotExists(
         stage_id: stageId,
         title,
         created_by: null,
-        conversation_id: conversationId,
+        conversation_id: conversationId || null,
         description: extractedInfo.main_need ?? null,
         metadata: extractedInfo,
         temperature,
@@ -409,6 +409,7 @@ export function isQualificationComplete(info: {
 async function saveQualification(
   supabase: Supabase,
   contactId: string,
+  conversationId: string | null,
   extractedInfo: Record<string, string | null> | undefined,
   temperature: string,
 ): Promise<void> {
@@ -430,22 +431,62 @@ async function saveQualification(
       .then(() => {}, () => {})
   }
 
-  // 2. Update open opportunity: metadata + temperature + auto-stage
+  // 2. Update (or create) open opportunity: metadata + temperature + auto-stage
   try {
     const { data: opps } = await supabase
       .from("opportunities")
-      .select("id, metadata, stage_id, pipeline_id, description")
+      .select("id, metadata, stage_id, pipeline_id, description, temperature")
       .eq("contact_id", contactId)
       .eq("status", "open")
       .limit(1)
     const opp = opps?.[0]
-    if (!opp) return
 
     const mergedMeta: Record<string, string | null> = {}
     for (const k of ["service_type", "team_size", "current_tool", "main_need", "additional_info"] as const) {
-      mergedMeta[k] = extractedInfo[k] ?? opp.metadata?.[k] ?? null
+      mergedMeta[k] = (opp ? (extractedInfo[k] ?? opp.metadata?.[k] ?? null) : extractedInfo[k] ?? null) as string | null
+      if (k === "team_size" && teamSize != null) mergedMeta[k] = String(teamSize)
     }
     mergedMeta.team_size = teamSize != null ? String(teamSize) : mergedMeta.team_size
+
+    const complete = isQualificationComplete({
+      business_type: mergedMeta.service_type,
+      team_size: teamSize,
+      extra_info: mergedMeta.additional_info ?? mergedMeta.main_need,
+    })
+
+    if (!opp) {
+      // Contact without opportunity -> create one in the funnel
+      const oppId = await createOpportunityIfNotExists(
+        supabase,
+        contactId,
+        conversationId ?? null,
+        temperature || "cold",
+        mergedMeta,
+        null,
+        null,
+      )
+      if (!oppId) return
+      if (complete) {
+        const { data: created } = await supabase
+          .from("opportunities")
+          .select("pipeline_id, stage_id")
+          .eq("id", oppId)
+          .maybeSingle()
+        const patch: Record<string, unknown> = { qualified_at: new Date().toISOString() }
+        if (created) {
+          const { data: qualStage } = await supabase
+            .from("pipeline_stages")
+            .select("id")
+            .eq("pipeline_id", created.pipeline_id)
+            .eq("name", "Qualificado")
+            .limit(1)
+            .maybeSingle()
+          if (qualStage && qualStage.id !== created.stage_id) patch.stage_id = qualStage.id
+        }
+        await supabase.from("opportunities").update(patch).eq("id", oppId).then(() => {}, () => {})
+      }
+      return
+    }
 
     const oppUpdate: Record<string, unknown> = {
       metadata: mergedMeta,
@@ -454,11 +495,6 @@ async function saveQualification(
     if (mergedMeta.main_need && !opp.description) oppUpdate.description = mergedMeta.main_need
 
     // Qualification complete -> mark + move "Novo Lead" -> "Qualificado"
-    const complete = isQualificationComplete({
-      business_type: mergedMeta.service_type,
-      team_size: teamSize,
-      extra_info: mergedMeta.additional_info ?? mergedMeta.main_need,
-    })
     if (complete) {
       oppUpdate.qualified_at = new Date().toISOString()
       const { data: stage } = await supabase
@@ -725,7 +761,7 @@ Responda a última mensagem do CLIENTE.`
   }
 
   // 13. Persist qualification data (structured fields + auto-stage)
-  await saveQualification(supabase, contactId, parsed.extracted_info, parsed.temperature)
+  await saveQualification(supabase, contactId, conversationId, parsed.extracted_info, parsed.temperature)
 
   // 14. Handle actions based on suggested_action
   if (parsed.suggested_action === "transfer_human") {
@@ -975,7 +1011,7 @@ async function requalifyRecent(
         continue
       }
 
-      await saveQualification(supabase, contactId, info, parsed.temperature ?? "cold")
+      await saveQualification(supabase, contactId, conversationId, info, parsed.temperature ?? "cold")
 
       const mergedInfo = {
         service_type: info.service_type ?? contact?.business_type ?? null,
