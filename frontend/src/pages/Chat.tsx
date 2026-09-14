@@ -57,6 +57,7 @@ import type {
   Message,
   MessageTemplate,
   Profile,
+  Tag,
   WhatsAppInstance,
   Opportunity,
   Pipeline,
@@ -398,10 +399,12 @@ function ConversationItem({
   conv,
   selected,
   onSelect,
+  tags = [],
 }: {
   conv: Conversation
   selected: boolean
   onSelect: (id: string) => void
+  tags?: Tag[]
 }) {
   const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
   const closed = conv.status === "closed"
@@ -463,6 +466,20 @@ function ConversationItem({
             {conv.last_message_preview}
           </p>
         )}
+        {tags.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {tags.map((t) => (
+              <span
+                key={t.id}
+                className="inline-flex max-w-full items-center gap-1 truncate rounded-full px-1.5 py-px text-[10px] font-semibold"
+                style={{ backgroundColor: `${t.color ?? "#3b82f6"}22`, color: t.color ?? "#3b82f6" }}
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: t.color ?? "#3b82f6" }} />
+                <span className="truncate">{t.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </button>
   )
@@ -522,6 +539,38 @@ export default function ChatPage() {
   const [tagSearch, setTagSearch] = useState("")
   const [tagMenuOpen, setTagMenuOpen] = useState(false)
   const [tagsManagerOpen, setTagsManagerOpen] = useState(false)
+
+  // Mapa contact_id -> tags (para exibir no card da conversa)
+  const [convTagsMap, setConvTagsMap] = useState<Record<string, Tag[] | undefined>>({})
+
+  useEffect(() => {
+    const ids = [...new Set(conversations.map((c) => c.contact_id).filter(Boolean))] as string[]
+    if (ids.length === 0) return
+    supabase
+      .from("contact_tags")
+      .select("contact_id, tag:tags(id, name, color, is_active)")
+      .in("contact_id", ids)
+      .then(({ data }) => {
+        const map: Record<string, Tag[]> = {}
+        for (const row of data as any[] ?? []) {
+          if (row.tag?.is_active) {
+            if (!map[row.contact_id]) map[row.contact_id] = []
+            if (!map[row.contact_id].some((t) => t.id === row.tag.id)) map[row.contact_id].push(row.tag as Tag)
+          }
+        }
+        setConvTagsMap((prev) => ({ ...prev, ...map }))
+      })
+  }, [conversations])
+
+  // Reflete mudanças de etiquetas do contato selecionado no mapa dos cards
+  useEffect(() => {
+    const contactId = selected?.contact_id
+    if (!contactId) return
+    const tags = (contactTags as any[])
+      .map((ct) => ct.tag)
+      .filter((t) => t?.is_active)
+    setConvTagsMap((prev) => ({ ...prev, [contactId]: tags }))
+  }, [contactTags, selected?.contact_id])
 
   // --- Templates de resposta ---
   const { templates: allTemplates } = useTemplates()
@@ -1261,6 +1310,7 @@ export default function ChatPage() {
                 conv={c}
                 selected={c.id === selectedId}
                 onSelect={handleSelect}
+                tags={convTagsMap[c.contact_id ?? ""] ?? []}
               />
             ))
           )}
