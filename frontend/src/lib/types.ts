@@ -45,6 +45,7 @@ export type Conversation = {
   source_meta: Record<string, unknown> | null
   last_message_at: string | null
   last_message_preview: string | null
+  last_message_inbound?: boolean | null
   unread_count: number
   created_at: string
   contact: Contact | null

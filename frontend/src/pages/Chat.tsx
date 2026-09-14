@@ -409,6 +409,8 @@ function ConversationItem({
   const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
   const closed = conv.status === "closed"
   const hasUnread = conv.unread_count > 0
+  // Última mensagem foi do contato (sem resposta nossa) → moldura verde
+  const awaitingReply = conv.last_message_inbound === true
 
   return (
     <button
@@ -420,6 +422,7 @@ function ConversationItem({
           : "border-border bg-card hover:border-blue-200 hover:bg-blue-50/50 dark:hover:border-blue-500/40 dark:hover:bg-blue-500/5",
         closed && "opacity-50",
         hasUnread && !selected && "border-l-4 border-l-blue-500 bg-blue-50/30 dark:bg-blue-500/10",
+        awaitingReply && !selected && "border-2 border-green-500 bg-green-50/40 shadow-sm dark:bg-green-500/10",
       )}
     >
       <Avatar className={cn("mt-0.5 h-10 w-10 shrink-0", selected && "ring-2 ring-blue-500")}>
@@ -1170,6 +1173,10 @@ export default function ChatPage() {
           prev.map((m) => (m.id === tempId ? { ...m, status: "sent" as const } : m)),
         )
       }
+      // Nossa resposta remove a moldura verde do card
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selected.id ? { ...c, last_message_inbound: false } : c)),
+      )
     } catch (err) {
       setOptimisticMsgs((prev) =>
         prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
@@ -1193,6 +1200,9 @@ export default function ChatPage() {
       await proxySendText(selected.instance_id, selected.contact?.phone ?? "", text, instance.instance_name)
       setOptimisticMsgs((prev) =>
         prev.map((m) => (m.id === msg.id ? { ...m, status: "sent" as const } : m)),
+      )
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selected.id ? { ...c, last_message_inbound: false } : c)),
       )
     } catch (err) {
       setOptimisticMsgs((prev) =>
