@@ -404,6 +404,7 @@ export type SDRSettings = {
   cooldown_seconds: number
   tone: string
   system_prompt: string | null
+  code_prompt: string | null
   primary_model: string | null
   fallback_model: string | null
   created_at: string

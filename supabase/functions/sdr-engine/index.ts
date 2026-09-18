@@ -700,10 +700,15 @@ async function processMessage(
     })
     .join("\n")
 
-  // 11. Build prompt - use custom system_prompt if provided, fallback to default
-  const systemMsg = settings.system_prompt?.trim()
-    ? settings.system_prompt
+  // 11. Build prompt - prompt principal (code_prompt se preenchido, senão o
+  // padrão do código) + prompt adicional (system_prompt) concatenado no final.
+  const basePrompt = settings.code_prompt?.trim()
+    ? settings.code_prompt
     : SYSTEM_PROMPT
+  const extraPrompt = settings.system_prompt?.trim() ?? ""
+  const systemMsg = extraPrompt
+    ? `${basePrompt}\n\nINSTRUÇÕES ADICIONAIS:\n${extraPrompt}`
+    : basePrompt
 
   // Use the conversation as the user message (includes the new message naturally)
   const userMsg = `Conversa até agora:
@@ -1209,7 +1214,7 @@ Deno.serve(async (req) => {
           "silence_start", "silence_end",
           "meeting_duration_minutes", "meeting_buffer_minutes",
           "max_messages_per_conversation", "cooldown_seconds",
-          "tone", "system_prompt", "primary_model", "fallback_model", "extraction_model",
+          "tone", "system_prompt", "code_prompt", "primary_model", "fallback_model", "extraction_model",
         ]
         const filtered: Record<string, unknown> = {}
         for (const key of allowedFields) {
