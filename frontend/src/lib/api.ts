@@ -176,6 +176,10 @@ export function sdrGetSettings() {
   return postJson("sdr-engine", { action: "get_settings", data: {} })
 }
 
+export function sdrGetDefaultPrompt() {
+  return postJson("sdr-engine", { action: "get_default_prompt", data: {} })
+}
+
 export function sdrUpdateSettings(settings: Record<string, unknown>) {
   return postJson("sdr-engine", { action: "update_settings", data: settings })
 }

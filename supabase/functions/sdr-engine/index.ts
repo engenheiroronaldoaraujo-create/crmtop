@@ -1188,6 +1188,10 @@ Deno.serve(async (req) => {
         return jsonResponse(200, { ok: true, days, ...stats })
       }
 
+      case "get_default_prompt": {
+        return jsonResponse(200, { ok: true, prompt: SYSTEM_PROMPT })
+      }
+
       case "get_settings": {
         const { data } = await supabase.from("sdr_settings").select("*").limit(1).single()
         return jsonResponse(200, { ok: true, settings: data })

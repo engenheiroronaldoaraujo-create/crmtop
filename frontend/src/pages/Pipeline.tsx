@@ -21,6 +21,10 @@ import {
   AlertTriangle,
   ChevronUp,
   ChevronDown,
+  Repeat,
+  Pause,
+  Play,
+  Ban,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase"
@@ -30,8 +34,9 @@ import {
   usePipelineStages,
   useOpportunities,
 } from "@/hooks/use-commercial"
+import { useCadenceEnrollments } from "@/hooks/use-cadences"
 import { contactDisplayName, cn, formatPhone, isRealPhone } from "@/lib/utils"
-import type { Opportunity, PipelineStage, Profile } from "@/lib/types"
+import type { Opportunity, PipelineStage, Profile, CadenceEnrollment } from "@/lib/types"
 import { DealInspectorDialog } from "@/components/DealInspectorDialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -133,6 +138,8 @@ function OpportunityCard({
   onCreateMeeting,
   onCreateTask,
   onCreateFollowUp,
+  cadenceEnrollment,
+  onCadenceAction,
 }: {
   opportunity: Opportunity
   index: number
@@ -149,10 +156,18 @@ function OpportunityCard({
   onCreateMeeting?: (o: Opportunity) => void
   onCreateTask?: (o: Opportunity) => void
   onCreateFollowUp?: (o: Opportunity) => void
+  cadenceEnrollment?: CadenceEnrollment | null
+  onCadenceAction?: (o: Opportunity, action: "pause" | "resume" | "cancel") => void
 }) {
   const contact = opportunity.contact
   const assignee = opportunity.assignee
   const idle = idleBadge(daysIdleLastContact(opportunity, lastContactMap))
+  const nextRun = cadenceEnrollment?.next_run_at
+    ? new Date(cadenceEnrollment.next_run_at)
+    : null
+  const nextRunLabel = nextRun && !isNaN(nextRun.getTime())
+    ? nextRun.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+    : null
 
   return (
     <Draggable draggableId={opportunity.id} index={index}>
@@ -225,6 +240,25 @@ function OpportunityCard({
                       {insight.days_stalled}d parado
                     </span>
                   )}
+                  {opportunity.status === "open" && cadenceEnrollment && (
+                    <span
+                      className={cn(
+                        "mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                        cadenceEnrollment.status === "paused"
+                          ? "bg-muted text-muted-foreground"
+                          : "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-400"
+                      )}
+                      title={`Cadência: ${cadenceEnrollment.cadence?.name ?? ""}${nextRunLabel ? ` · próxima etapa em ${nextRunLabel}` : ""}`}
+                    >
+                      <Repeat className="h-3 w-3" />
+                      {cadenceEnrollment.cadence?.name ?? "Cadência"}
+                      {cadenceEnrollment.status === "paused"
+                        ? " (pausada)"
+                        : nextRunLabel
+                        ? ` · ${nextRunLabel}`
+                        : ""}
+                    </span>
+                  )}
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -257,6 +291,23 @@ function OpportunityCard({
                       <DropdownMenuItem onClick={() => onCreateFollowUp(opportunity)}>
                         <Clock className="mr-2 h-3 w-3 text-orange-600 dark:text-orange-400" /> Criar follow-up
                       </DropdownMenuItem>
+                    )}
+                    {cadenceEnrollment && opportunity.status === "open" && (
+                      <>
+                        <DropdownMenuSeparator />
+                        {cadenceEnrollment.status === "active" ? (
+                          <DropdownMenuItem onClick={() => onCadenceAction?.(opportunity, "pause")}>
+                            <Pause className="mr-2 h-3 w-3 text-violet-600 dark:text-violet-400" /> Pausar cadência
+                          </DropdownMenuItem>
+                        ) : (
+                          <DropdownMenuItem onClick={() => onCadenceAction?.(opportunity, "resume")}>
+                            <Play className="mr-2 h-3 w-3 text-violet-600 dark:text-violet-400" /> Retomar cadência
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem onClick={() => onCadenceAction?.(opportunity, "cancel")}>
+                          <Ban className="mr-2 h-3 w-3" /> Remover da cadência
+                        </DropdownMenuItem>
+                      </>
                     )}
                     <DropdownMenuSeparator />
                     {opportunity.status === "open" ? (
@@ -344,6 +395,7 @@ function KanbanColumn({
   oppTagsMap,
   oppInsightsMap,
   lastContactMap,
+  cadenceMap,
   onEdit,
   onWin,
   onLose,
@@ -354,12 +406,14 @@ function KanbanColumn({
   onCreateMeeting,
   onCreateTask,
   onCreateFollowUp,
+  onCadenceAction,
 }: {
   stage: PipelineStage
   opportunities: Opportunity[]
   oppTagsMap: Map<string, any[]>
   oppInsightsMap: Map<string, { priority: string; days_stalled: number }>
   lastContactMap?: Map<string, string>
+  cadenceMap?: Map<string, CadenceEnrollment>
   onEdit: (o: Opportunity) => void
   onWin: (o: Opportunity) => void
   onLose: (o: Opportunity) => void
@@ -370,6 +424,7 @@ function KanbanColumn({
   onCreateMeeting?: (o: Opportunity) => void
   onCreateTask?: (o: Opportunity) => void
   onCreateFollowUp?: (o: Opportunity) => void
+  onCadenceAction?: (o: Opportunity, action: "pause" | "resume" | "cancel") => void
 }) {
   const totalValue = useMemo(
     () => opportunities.reduce((sum, o) => sum + (o.value ?? 0), 0),
@@ -422,6 +477,8 @@ function KanbanColumn({
                 tags={oppTagsMap.get(opp.id)}
                 insight={oppInsightsMap.get(opp.id) ?? null}
                 lastContactMap={lastContactMap}
+                cadenceEnrollment={cadenceMap?.get(opp.id) ?? null}
+                onCadenceAction={onCadenceAction}
                 onEdit={onEdit}
                 onWin={onWin}
                 onLose={onLose}
@@ -1365,6 +1422,34 @@ export default function PipelinePage() {
   const [qualifiedOpen, setQualifiedOpen] = useState(false)
   // Last contact (message) date per conversation
   const [lastContactMap, setLastContactMap] = useState<Map<string, string>>(new Map())
+  // Cadências
+  const { byOpportunity: cadenceByOpp, update: updateCadenceEnrollment } = useCadenceEnrollments()
+
+  const handleCadenceAction = useCallback(
+    async (opp: Opportunity, action: "pause" | "resume" | "cancel") => {
+      const enrollment = cadenceByOpp.get(opp.id)
+      if (!enrollment) return
+      try {
+        if (action === "pause") {
+          await updateCadenceEnrollment(enrollment.id, { status: "paused", next_run_at: null })
+          toast.success("Cadência pausada")
+        } else if (action === "resume") {
+          await updateCadenceEnrollment(enrollment.id, { status: "active", next_run_at: new Date().toISOString() })
+          toast.success("Cadência retomada")
+        } else {
+          await updateCadenceEnrollment(enrollment.id, {
+            status: "cancelled",
+            cancelled_at: new Date().toISOString(),
+            next_run_at: null,
+          })
+          toast.success("Lead removido da cadência")
+        }
+      } catch (err: any) {
+        toast.error(err?.message ?? "Erro na cadência")
+      }
+    },
+    [cadenceByOpp, updateCadenceEnrollment]
+  )
 
   // Load contacts and profiles
   useEffect(() => {
@@ -1703,6 +1788,7 @@ export default function PipelinePage() {
                   oppTagsMap={oppTagsMap}
                   oppInsightsMap={oppInsightsMap}
                   lastContactMap={lastContactMap}
+                  cadenceMap={cadenceByOpp}
                   onEdit={(o) => { setEditOpp(o); setEditOpen(true) }}
                   onWin={(o) => { setWinTarget(o); setWinOpen(true) }}
                   onLose={(o) => { setLoseTarget(o); setLoseOpen(true) }}
@@ -1713,6 +1799,7 @@ export default function PipelinePage() {
                   onCreateMeeting={(o) => { setActOpp(o); setActType("meeting"); setActOpen(true) }}
                   onCreateTask={(o) => { setActOpp(o); setActType("task"); setActOpen(true) }}
                   onCreateFollowUp={(o) => { setActOpp(o); setActType("follow_up"); setActOpen(true) }}
+                  onCadenceAction={handleCadenceAction}
                 />
               ))}
             </div>

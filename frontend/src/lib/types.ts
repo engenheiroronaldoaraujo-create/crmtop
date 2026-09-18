@@ -206,6 +206,59 @@ export type ActivityLog = {
 }
 
 // ---------------------------------------------------------------------------
+// Cadências
+// ---------------------------------------------------------------------------
+
+export type Cadence = {
+  id: string
+  name: string
+  description: string | null
+  pipeline_id: string
+  trigger_stage_id: string
+  skip_weekends: boolean
+  is_active: boolean
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  // Joined fields
+  pipeline?: Pipeline | null
+  trigger_stage?: PipelineStage | null
+  steps?: CadenceStep[]
+}
+
+export type CadenceStep = {
+  id: string
+  cadence_id: string
+  step_order: number
+  stage_id: string
+  delay_days: number
+  send_message: boolean
+  template_id: string | null
+  message_text: string | null
+  created_at: string
+  // Joined fields
+  stage?: PipelineStage | null
+  template?: MessageTemplate | null
+}
+
+export type CadenceEnrollment = {
+  id: string
+  cadence_id: string
+  opportunity_id: string
+  current_step: number
+  status: "active" | "paused" | "completed" | "cancelled"
+  next_run_at: string | null
+  completed_at: string | null
+  cancelled_at: string | null
+  started_at: string
+  assigned_to: string | null
+  created_at: string
+  updated_at: string
+  // Joined fields
+  cadence?: Cadence | null
+}
+
+// ---------------------------------------------------------------------------
 // Tags
 // ---------------------------------------------------------------------------
 

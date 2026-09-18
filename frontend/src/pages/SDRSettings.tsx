@@ -12,7 +12,7 @@ import {
   Trash2,
   RefreshCw,
 } from "lucide-react"
-import { sdrGetSettings, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR, sdrRequalifyRecent, sdrRequalifyStats } from "@/lib/api"
+import { sdrGetSettings, sdrGetDefaultPrompt, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR, sdrRequalifyRecent, sdrRequalifyStats } from "@/lib/api"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -376,7 +376,54 @@ export default function SDRSettings() {
             </div>
             <div className="space-y-2"><Label className="text-sm">Modelo</Label><Input className="h-8" value={settings.primary_model ?? ""} onChange={(e) => handleSave({ primary_model: e.target.value })} placeholder="openrouter/free" /></div>
             <div className="space-y-2"><Label className="text-sm">Modelo requalificação</Label><Input className="h-8" value={settings.extraction_model ?? ""} onChange={(e) => handleSave({ extraction_model: e.target.value })} placeholder="Vazio = usa o mesmo modelo" /></div>
-            <div className="space-y-2"><Label className="text-sm">Prompt adicional</Label><Textarea className="min-h-[80px]" value={settings.system_prompt ?? ""} onChange={(e) => handleSave({ system_prompt: e.target.value })} placeholder="Instrucoes adicionais para o SDR..." /></div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-sm">Prompt do SDR</Label>
+                <div className="flex items-center gap-1">
+                  {(settings.system_prompt ?? "").trim() === "" ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={async () => {
+                        try {
+                          const res = await sdrGetDefaultPrompt()
+                          if (res.prompt) {
+                            handleSave({ system_prompt: res.prompt })
+                            toast.success("Prompt padrão carregado para edição")
+                          }
+                        } catch (e: any) { toast.error(e.message) }
+                      }}
+                    >
+                      Carregar prompt padrão
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        handleSave({ system_prompt: "" })
+                        toast.success("Prompt limpo — volta a usar o padrão do código")
+                      }}
+                    >
+                      Voltar ao padrão
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {(settings.system_prompt ?? "").trim() === "" && (
+                <p className="text-xs text-muted-foreground">
+                  Vazio = usa o prompt padrão do código (carregue-o acima para editar o texto).
+                </p>
+              )}
+              <Textarea
+                className="min-h-[180px] font-mono text-xs"
+                value={settings.system_prompt ?? ""}
+                onChange={(e) => handleSave({ system_prompt: e.target.value })}
+                placeholder="Instruções para o SDR. Em branco = prompt padrão da Sofia (pode carregá-lo aqui para editar)."
+              />
+            </div>
           </CardContent>
         </Card>
 
