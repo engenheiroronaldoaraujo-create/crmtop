@@ -227,6 +227,8 @@ export default function SDRSettings() {
   const [requalifyStats, setRequalifyStats] = useState<{ analyzed: number; qualified: number; partial: number; skipped: number; errors: number } | null>(null)
   const [qualStats, setQualStats] = useState<{ conversations?: number; contacts?: number; complete?: number; partial?: number; missing?: number; error?: string } | null>(null)
   const [testing, setTesting] = useState(false)
+  const [defaultPrompt, setDefaultPrompt] = useState<string | null>(null)
+  const [knowledgeFile, setKnowledgeFile] = useState<File | null>(null)
 
   const loadSettings = useCallback(async () => {
     setLoading(true)
@@ -248,11 +250,46 @@ export default function SDRSettings() {
 
   useEffect(() => { loadSettings(); loadMetrics() }, [loadSettings, loadMetrics])
 
+  // Busca o prompt padrão do código uma vez, para exibição no campo vazio.
+  const loadDefaultPrompt = useCallback(async () => {
+    try {
+      const res = await sdrGetDefaultPrompt()
+      setDefaultPrompt(res.prompt ?? null)
+    } catch {
+      // silencioso
+    }
+  }, [])
+  useEffect(() => { loadDefaultPrompt() }, [loadDefaultPrompt])
+
   const handleSave = async (patch: Record<string, unknown>) => {
     try {
       await sdrUpdateSettings(patch)
       setSettings({ ...settings, ...patch })
       toast.success("Configuracoes salvas")
+    } catch (e: any) { toast.error(e.message) }
+  }
+
+  const handleKnowledgeFile = async (file: File | null) => {
+    if (!file) return
+    if (file.size > 512 * 1024) {
+      toast.error("Arquivo muito grande (maximo 512 KB)")
+      return
+    }
+    try {
+      const text = await file.text()
+      await sdrUpdateSettings({ knowledge_base: text })
+      setSettings({ ...settings, knowledge_base: text })
+      setKnowledgeFile(file)
+      toast.success(`Base de conhecimento "${file.name}" anexada`)
+    } catch (e: any) { toast.error(e.message) }
+  }
+
+  const handleRemoveKnowledge = async () => {
+    try {
+      await sdrUpdateSettings({ knowledge_base: "" })
+      setSettings({ ...settings, knowledge_base: "" })
+      setKnowledgeFile(null)
+      toast.success("Base de conhecimento removida")
     } catch (e: any) { toast.error(e.message) }
   }
 
@@ -379,36 +416,34 @@ export default function SDRSettings() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <Label className="text-sm">Prompt principal</Label>
-                {(settings.code_prompt ?? "").trim() === "" && (
+                <div className="flex items-center gap-1">
                   <Button
                     variant="outline"
                     size="sm"
                     className="h-7 text-xs"
+                    disabled={defaultPrompt === null || (settings.code_prompt ?? "") === (defaultPrompt ?? "")}
                     onClick={async () => {
+                      if (defaultPrompt == null) return
                       try {
-                        const res = await sdrGetDefaultPrompt()
-                        if (res.prompt) {
-                          handleSave({ code_prompt: res.prompt })
-                          toast.success("Prompt padrão carregado para edição")
-                        }
+                        await sdrUpdateSettings({ code_prompt: defaultPrompt })
+                        setSettings({ ...settings, code_prompt: defaultPrompt })
+                        toast.success("Prompt padrão restaurado no campo")
                       } catch (e: any) { toast.error(e.message) }
                     }}
                   >
-                    Carregar prompt padrão
+                    Restaurar padrão do código
                   </Button>
-                )}
+                </div>
               </div>
-              {(settings.code_prompt ?? "").trim() === "" && (
-                <p className="text-xs text-muted-foreground">
-                  Vazio = usa o prompt da Sofia do código (carregue-o acima para editar o texto).
-                </p>
-              )}
               <Textarea
                 className="min-h-[180px] font-mono text-xs"
-                value={settings.code_prompt ?? ""}
+                value={settings.code_prompt ?? defaultPrompt ?? ""}
                 onChange={(e) => handleSave({ code_prompt: e.target.value })}
-                placeholder="Prompt da Sofia. Em branco = prompt padrão do código (pode carregá-lo aqui para editar)."
+                placeholder={defaultPrompt ?? "Carregando prompt do código..."}
               />
+              <p className="text-xs text-muted-foreground">
+                Vazio = usa o prompt da Sofia do código. O texto acima é o padrão carregado do código.
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-sm">Prompt adicional</Label>
@@ -420,6 +455,33 @@ export default function SDRSettings() {
               />
               <p className="text-xs text-muted-foreground">
                 Concatenado ao fim do prompt principal (não o substitui).
+              </p>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label className="text-sm">Base de conhecimento (txt)</Label>
+                <div className="flex items-center gap-1">
+                  <label className="cursor-pointer">
+                    <Input
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="hidden"
+                      onChange={(e) => { handleKnowledgeFile(e.target.files?.[0] ?? null); e.target.value = "" }}
+                    />
+                    <Button asChild={false} variant="outline" size="sm" className="h-7 text-xs pointer-events-none" type="button">
+                      <Plus className="mr-1 h-3 w-3" /> Anexar arquivo
+                    </Button>
+                  </label>
+                  {((settings.knowledge_base ?? "") !== "" || knowledgeFile) && (
+                    <Button variant="outline" size="sm" className="h-7 text-xs text-destructive" onClick={handleRemoveKnowledge}>
+                      <Trash2 className="mr-1 h-3 w-3" /> Remover
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Conteudo do .txt incluido como contexto na IA do SDR.
+                {settings.knowledge_base ? ` Anexado: ${knowledgeFile?.name ?? "arquivo"} (${settings.knowledge_base.length} caracteres).` : " Nenhum arquivo anexado."}
               </p>
             </div>
           </CardContent>

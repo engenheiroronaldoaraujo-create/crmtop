@@ -706,9 +706,12 @@ async function processMessage(
     ? settings.code_prompt
     : SYSTEM_PROMPT
   const extraPrompt = settings.system_prompt?.trim() ?? ""
-  const systemMsg = extraPrompt
-    ? `${basePrompt}\n\nINSTRUÇÕES ADICIONAIS:\n${extraPrompt}`
-    : basePrompt
+  const knowledgeBase = settings.knowledge_base?.trim() ?? ""
+
+  let promptParts = [basePrompt]
+  if (extraPrompt) promptParts.push(`INSTRUÇÕES ADICIONAIS:\n${extraPrompt}`)
+  if (knowledgeBase) promptParts.push(`BASE DE CONHECIMENTO:\n${knowledgeBase}`)
+  const systemMsg = promptParts.join("\n\n")
 
   // Use the conversation as the user message (includes the new message naturally)
   const userMsg = `Conversa até agora:
@@ -1214,7 +1217,7 @@ Deno.serve(async (req) => {
           "silence_start", "silence_end",
           "meeting_duration_minutes", "meeting_buffer_minutes",
           "max_messages_per_conversation", "cooldown_seconds",
-          "tone", "system_prompt", "code_prompt", "primary_model", "fallback_model", "extraction_model",
+          "tone", "system_prompt", "code_prompt", "knowledge_base", "primary_model", "fallback_model", "extraction_model",
         ]
         const filtered: Record<string, unknown> = {}
         for (const key of allowedFields) {
