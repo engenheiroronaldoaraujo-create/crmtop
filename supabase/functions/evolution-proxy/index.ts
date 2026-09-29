@@ -42,6 +42,17 @@ function extFromMimetype(mimetype: string, fallback: string): string {
   return map[base] ?? fallback;
 }
 
+// Matroska/WebM (o que o MediaRecorder do Chrome produz) começa com a
+// assinatura EBML 0x1A45DFA3. Ogg começa com a assinatura ASCII "OggS".
+// Olhar os bytes evita confiar no Content-Type do multipart, que o cliente
+// envia sempre como o container original mesmo depois de converter.
+function isOggSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53
+  );
+}
+
 function base64ToBytes(base64: string): Uint8Array {
   const clean = base64.includes(",") ? base64.split(",")[1] : base64;
   const bin = atob(clean);
@@ -699,9 +710,23 @@ async function actionSendAudio(
   const mediaBase64 = btoa(binaryStr);
 
   const sentAt = new Date().toISOString();
-  // Nome com a extensão do container: o Baileys infere a bolha de voz pelo
-  // mimetype/filename e cai para documento se o nome não ajudar.
-  const fileName = `audio.${audioExtension(fileType)}`;
+
+  // O cliente converte webm->ogg/opus antes de enviar, mas o multipart chega
+  // com o MIME do *container original* (audio/webm;codecs=opus) mesmo quando
+  // os bytes são de ogg. Duas correções decorrem disso:
+  //
+  // 1. `fileName` precisa refletir o container real dos BYTES, não o MIME
+  //    declarado. Mandar "audio.webm" com bytes Ogg faz o Baileys/Baileys-
+  //    wrapper tratar como anexo e não como voz.
+  // 2. `ptt: true` é o que faz o WhatsApp renderizar a bolha com microfone.
+  //    Sem ele, mesmo ogg/opus chega como arquivo de áudio comum.
+  //
+  // Evidência (banco de produção, 29/09): todas as gravações entregues pelo
+  // WhatsApp têm mime "audio/ogg; codecs=opus"; as 5 deste recurso ficaram
+  // "audio/webm;codecs=opus" e nenhuma chegou. A detecção abaixo olha os
+  // bytes reais (assinatura EBML do Matroska) em vez de confiar no MIME.
+  const isOggBytes = isOggSignature(bytes);
+  const fileName = isOggBytes ? "audio.ogg" : `audio.${audioExtension(fileType)}`;
 
   const payload = {
     number: sendTarget,
@@ -709,8 +734,16 @@ async function actionSendAudio(
     media: mediaBase64,
     isBase64: true,
     fileName,
+    // Só marca como bolha de voz quando o container é realmente ogg/opus.
+    // Mandar ptt com webm produz mensagem corrompida do lado do cliente.
+    ...(isOggBytes ? { ptt: true } : {}),
   };
 
+  // O nome do arquivo é o que o Baileys usa para decidir se a mídia entra
+  // como voz. Evidência do banco de produção: toda gravação que o WhatsApp
+  // entregou como bolha tem container ogg/opus; nenhuma das que chegaram
+  // como webm foi entregue. O `extFromMimetype` deste arquivo (usado no
+  // send-media) já cobre audio/ogg → "ogg".
   const post = () =>
     fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
       method: "POST",
@@ -759,7 +792,12 @@ async function actionSendAudio(
     ok: res.ok,
     mediatype: payload.mediatype,
     fileName: payload.fileName,
-    mime: fileType,
+    // MIME declarado pelo cliente vs container real dos bytes. A divergência
+    // entre os dois é exatamente o que fez a conversão parecer funcionar e o
+    // envio falhar.
+    declaredMime: fileType,
+    actualContainer: isOggBytes ? "ogg" : "webm/outro",
+    ptt: Boolean(payload.ptt),
     base64Length: mediaBase64.length,
     body: resText.slice(0, 500),
   });
