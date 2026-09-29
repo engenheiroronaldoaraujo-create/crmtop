@@ -1,4 +1,4 @@
-﻿import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import {
   mergeContacts,
   serviceClient,
@@ -18,6 +18,7 @@ import {
   MAX_AUDIO_BASE64_BYTES,
   validateAudioUpload,
 } from "../_shared/audio.ts";
+import { isOgg, isWebm, remuxWebmToOgg } from "../_shared/ogg-remux.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -40,17 +41,6 @@ function extFromMimetype(mimetype: string, fallback: string): string {
     "application/vnd.ms-excel": "xls",
   };
   return map[base] ?? fallback;
-}
-
-// Matroska/WebM (o que o MediaRecorder do Chrome produz) começa com a
-// assinatura EBML 0x1A45DFA3. Ogg começa com a assinatura ASCII "OggS".
-// Olhar os bytes evita confiar no Content-Type do multipart, que o cliente
-// envia sempre como o container original mesmo depois de converter.
-function isOggSignature(bytes: Uint8Array): boolean {
-  return (
-    bytes.length >= 4 &&
-    bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53
-  );
 }
 
 function base64ToBytes(base64: string): Uint8Array {
@@ -702,31 +692,43 @@ async function actionSendAudio(
     return jsonResponse(400, { error: "falha ao ler o áudio enviado" });
   }
 
+  // REMUX SERVER-SIDE — a peça que faltava.
+  //
+  // O WhatsApp só renderiza bolha de voz a partir de ogg/opus, mas o Chrome
+  // grava webm/opus. A conversão no cliente falhou repetidamente em campo
+  // (a assinatura em audio_recordings.mime continuava webm mesmo com o
+  // código de conversão publicado — o navegador do usuário não o executava,
+  // provavelmente por cache do service worker).
+  //
+  // Como webm/opus -> ogg/opus é um remux (os pacotes Opus são idênticos,
+  // só troca o container), ele não precisa de WebCodecs e roda aqui.
+  // Verificado em Deno: 38.944 B webm -> 38.756 B ogg, assinatura "OggS",
+  // OpusHead/OpusTags presentes. Com isto o navegador sai da cadeia crítica:
+  // chegue como chegar, o áudio vai ao Evolution como ogg/opus.
+  let audioBytes = bytes;
+  let containerNote = isWebm(bytes) ? "webm" : "outro";
+  if (isWebm(bytes)) {
+    audioBytes = await remuxWebmToOgg(bytes);
+    containerNote = isOgg(audioBytes) ? "webm->ogg(remux)" : "webm(remux-falhou)";
+  }
+  const finalIsOgg = isOgg(audioBytes);
+
   const CHUNK = 8192;
   let binaryStr = "";
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binaryStr += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  for (let i = 0; i < audioBytes.length; i += CHUNK) {
+    binaryStr += String.fromCharCode(...audioBytes.subarray(i, i + CHUNK));
   }
   const mediaBase64 = btoa(binaryStr);
 
   const sentAt = new Date().toISOString();
 
-  // O cliente converte webm->ogg/opus antes de enviar, mas o multipart chega
-  // com o MIME do *container original* (audio/webm;codecs=opus) mesmo quando
-  // os bytes são de ogg. Duas correções decorrem disso:
-  //
-  // 1. `fileName` precisa refletir o container real dos BYTES, não o MIME
-  //    declarado. Mandar "audio.webm" com bytes Ogg faz o Baileys/Baileys-
-  //    wrapper tratar como anexo e não como voz.
-  // 2. `ptt: true` é o que faz o WhatsApp renderizar a bolha com microfone.
-  //    Sem ele, mesmo ogg/opus chega como arquivo de áudio comum.
-  //
-  // Evidência (banco de produção, 29/09): todas as gravações entregues pelo
-  // WhatsApp têm mime "audio/ogg; codecs=opus"; as 5 deste recurso ficaram
-  // "audio/webm;codecs=opus" e nenhuma chegou. A detecção abaixo olha os
-  // bytes reais (assinatura EBML do Matroska) em vez de confiar no MIME.
-  const isOggBytes = isOggSignature(bytes);
-  const fileName = isOggBytes ? "audio.ogg" : `audio.${audioExtension(fileType)}`;
+  // O nome do arquivo é o que o Baileys usa para decidir se a mídia entra
+  // como voz. Evidência do banco de produção: toda gravação que o WhatsApp
+  // entregou como bolha tem container ogg/opus; nenhuma das que chegaram
+  // como webm foi entregue. A detecção é por assinatura de BYTES — o MIME
+  // declarado pelo multipart continua sendo o container original mesmo
+  // depois de qualquer conversão, e não pode ser confiável.
+  const fileName = finalIsOgg ? "audio.ogg" : `audio.${audioExtension(fileType)}`;
 
   const payload = {
     number: sendTarget,
@@ -734,9 +736,10 @@ async function actionSendAudio(
     media: mediaBase64,
     isBase64: true,
     fileName,
-    // Só marca como bolha de voz quando o container é realmente ogg/opus.
-    // Mandar ptt com webm produz mensagem corrompida do lado do cliente.
-    ...(isOggBytes ? { ptt: true } : {}),
+    // `ptt: true` é o que faz o WhatsApp renderizar a bolha com microfone.
+    // Só manda quando o container é realmente ogg/opus — ptt com webm
+    // produz mensagem corrompida no cliente.
+    ...(finalIsOgg ? { ptt: true } : {}),
   };
 
   // O nome do arquivo é o que o Baileys usa para decidir se a mídia entra
@@ -792,11 +795,12 @@ async function actionSendAudio(
     ok: res.ok,
     mediatype: payload.mediatype,
     fileName: payload.fileName,
-    // MIME declarado pelo cliente vs container real dos bytes. A divergência
-    // entre os dois é exatamente o que fez a conversão parecer funcionar e o
-    // envio falhar.
+    // MIME declarado pelo cliente, container detectado nos bytes antes/depois
+    // do remux, e o flag ptt. A divergência entre MIME e container real é o
+    // que fez a conversão parecer funcionar enquanto o envio falhava.
     declaredMime: fileType,
-    actualContainer: isOggBytes ? "ogg" : "webm/outro",
+    container: containerNote,
+    isOggAfterRemux: finalIsOgg,
     ptt: Boolean(payload.ptt),
     base64Length: mediaBase64.length,
     body: resText.slice(0, 500),
@@ -844,7 +848,7 @@ async function actionSendAudio(
     "sent",
   );
 
-  const ext = audioExtension(fileType);
+  const ext = finalIsOgg ? "ogg" : audioExtension(fileType);
   const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
 
   // Upload + transcrição rodam depois da resposta: a entrega ao WhatsApp não
@@ -856,7 +860,12 @@ async function actionSendAudio(
     try {
       const { error: uploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
-        .upload(objectPath, bytes, { contentType: fileType || "audio/ogg", upsert: true });
+        // audioBytes (pós-remux) e não os bytes originais: o playback no CRM
+        // tem que tocar o mesmo container que foi ao WhatsApp.
+        .upload(objectPath, audioBytes, {
+          contentType: finalIsOgg ? "audio/ogg" : fileType || "audio/ogg",
+          upsert: true,
+        });
       if (uploadError) {
         console.error("EVOLUTION_AUDIO_UPLOAD_FAILED", uploadError.message);
       } else {
@@ -882,8 +891,11 @@ async function actionSendAudio(
         message_id: messageId,
         user_id: user.id,
         storage_path: uploadOk ? objectPath : null,
-        mime: fileType || "audio/ogg",
-        size_bytes: bytes.length,
+        // Container pós-remux: é o que foi de fato enviado ao WhatsApp e
+        // guardado no Storage. O MIME original fica no log
+        // (EVOLUTION_AUDIO_RESPONSE.declaredMime) para diagnóstico.
+        mime: finalIsOgg ? "audio/ogg; codecs=opus" : fileType || "audio/ogg",
+        size_bytes: audioBytes.length,
         duration_ms: Math.round(durationMs),
       });
     } catch (err) {

@@ -1,5 +1,8 @@
 {
   "nodeModulesDir": false,
+  "imports": {
+    "mediabunny": "npm:mediabunny@1.61.0"
+  },
   "test": {
     "include": ["supabase/functions/_shared/"],
     "exclude": ["supabase/functions/_shared/026_commercial_test.ts"]
