@@ -878,7 +878,15 @@ async function actionSendAudio(
 
   return jsonResponse(200, {
     ok: true,
-    message: { evolution_message_id: evolutionId, sent_at: sentAt },
+    message: {
+      evolution_message_id: evolutionId,
+      // Prova de persistência: sem isto o cliente recebe 200, remove a bolha
+      // otimista e a mensagem desaparece sem nenhum sinal quando a linha não
+      // foi gravada (ou o realtime não entrega).
+      id: messageId,
+      conversation_id: conversationId,
+      sent_at: sentAt,
+    },
   });
 }
 

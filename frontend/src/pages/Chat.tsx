@@ -248,7 +248,26 @@ function MediaMessage({ msg }: { msg: Message }) {
   }, [msg.media_url])
 
   if (!msg.media_url) {
-    if (msg.type === "audio") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Clock className="h-4 w-4" /> Áudio</div>
+    // O upload ao Storage roda em background depois do INSERT, então há uma
+    // janela em que a linha existe sem media_url. Distingue os três casos
+    // para o usuário não interpretar "processando" como "não enviou".
+    if (msg.type === "audio") {
+      if (msg.status === "pending") {
+        return (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Enviando áudio...
+          </div>
+        )
+      }
+      if (msg.status === "failed") {
+        return (
+          <div className="flex items-center gap-2 text-sm text-destructive">
+            <Clock className="h-4 w-4" /> Áudio não enviado
+          </div>
+        )
+      }
+      return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Clock className="h-4 w-4" /> Áudio</div>
+    }
     if (msg.type === "image") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> Imagem</div>
     if (msg.type === "video") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> Vídeo</div>
     if (msg.type === "document") return <div className="flex items-center gap-2 text-sm text-muted-foreground"><Paperclip className="h-4 w-4" /> {msg.content || "Documento"}</div>
@@ -744,6 +763,23 @@ export default function ChatPage() {
     }
   }, [conversations, searchParams, selectedId, setSearchParams])
 
+  // Recarrega as mensagens da conversa. Usado pelo effect inicial e também
+  // depois de enviar mídia/áudio, para não depender só do realtime: o upload
+  // do Storage roda em background e termina depois do INSERT, então o realtime
+  // pode entregar a linha ainda sem media_url.
+  const refreshMessages = useCallback(async (conversationId: string) => {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("conversation_id", conversationId)
+      .order("sent_at", { ascending: false })
+      .limit(MESSAGE_PAGE_SIZE)
+    if (error) return
+    const rows = ((data as Message[]) ?? []).slice().reverse()
+    setMessages(rows)
+    setHasMoreOlder(rows.length === MESSAGE_PAGE_SIZE)
+  }, [])
+
   // Load messages for the selected conversation and mark it read.
   useEffect(() => {
     setOptimisticMsgs([])
@@ -753,23 +789,13 @@ export default function ChatPage() {
       return
     }
     let active = true
-    supabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", selectedId)
-      .order("sent_at", { ascending: false })
-      .limit(MESSAGE_PAGE_SIZE)
-      .then(({ data, error }) => {
-        if (!active || error) return
-        const rows = ((data as Message[]) ?? []).slice().reverse()
-        setMessages(rows)
-        setHasMoreOlder(rows.length === MESSAGE_PAGE_SIZE)
-      })
-    markRead(selectedId)
+    refreshMessages(selectedId).then(() => {
+      if (active) markRead(selectedId)
+    })
     return () => {
       active = false
     }
-  }, [selectedId, markRead])
+  }, [selectedId, markRead, refreshMessages])
 
   const loadOlder = useCallback(async () => {
     if (!selectedId || messages.length === 0) return
@@ -1142,22 +1168,30 @@ export default function ChatPage() {
     return selected.contact?.phone ?? ""
   }
 
-  // Envia a gravação como bolha de voz. A bolha otimista sai da lista de
-  // confirmação (como a mídia): a linha real chega pelo realtime já com
-  // media_url apontando para o objeto no Storage.
+  // Envia a gravação como bolha de voz.
+  //
+  // Regra deste handler: NUNCA destruir a bolha otimista por otimismo. A
+  // versão anterior removia a bolha assim que a API devolvia 200 e contava
+  // com o realtime para trazer a linha real. Quando o realtime não entrega
+  // (ou a linha não foi persistida), a mensagem evaporava sem nenhum sinal —
+  // "envia, não conclui e some da tela".
+  //
+  // Aqui a bolha é mantida e marcada como enviada, e a conversa é recarregada
+  // explicitamente. O realtime, se vier, apenas reconcilia.
   async function handleSendAudio() {
     if (!selected || !recorder.recording || sendingAudio) return
     const targetPhone = canSendNow()
     if (targetPhone === null) return
 
     const rec = recorder.recording
+    const conversationId = selected.id
     const tempId = `optimistic-${crypto.randomUUID()}`
     const nowIso = new Date().toISOString()
     setOptimisticMsgs((prev) => [
       ...prev,
       {
         id: tempId,
-        conversation_id: selected.id,
+        conversation_id: conversationId,
         evolution_message_id: null,
         direction: "outbound",
         sender_profile_id: user?.id ?? null,
@@ -1173,17 +1207,33 @@ export default function ChatPage() {
     recorder.discard()
     setSendingAudio(true)
     try {
-      await proxySendAudio(
+      const res = await proxySendAudio(
         selected.instance_id,
         targetPhone,
         rec.blob,
         rec.fileName,
         rec.durationMs,
       )
-      setOptimisticMsgs((prev) => prev.filter((m) => m.id !== tempId))
-      setConversations((prev) =>
-        prev.map((c) => (c.id === selected.id ? { ...c, last_message_inbound: false } : c)),
+      const persistedId = res?.message?.id ?? null
+      if (!persistedId) {
+        // A API respondeu ok, mas a linha não foi gravada. Não dá para
+        // fingir sucesso: a bolha fica em "falha" e dizemos o que houve.
+        throw new Error(
+          "O áudio foi aceito, mas não foi registrado no CRM. Tente novamente.",
+        )
+      }
+      setOptimisticMsgs((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, status: "sent" as const } : m)),
       )
+      setConversations((prev) =>
+        prev.map((c) => (c.id === conversationId ? { ...c, last_message_inbound: false } : c)),
+      )
+      // Reconciliação determinística: o upload ao Storage termina em
+      // background, então a primeira leitura costuma vir sem media_url.
+      await refreshMessages(conversationId)
+      setTimeout(() => {
+        void refreshMessages(conversationId)
+      }, 1500)
     } catch (err) {
       setOptimisticMsgs((prev) =>
         prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
