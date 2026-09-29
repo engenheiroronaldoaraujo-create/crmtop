@@ -12,6 +12,7 @@ import {
   transcribeAudio,
 } from "../_shared/transcribe.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
+import { timingSafeEqual } from "../_shared/timing.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
@@ -392,16 +393,25 @@ async function processMessage(
 
   if (error) {
     console.error("EVOLUTION_MESSAGE_INSERT_FAILED", error.message, { conversationId, evolutionId });
+  } else if (!isNewMessage) {
+    console.info("EVOLUTION_MESSAGE_DEDUPED", evolutionId);
   } else {
     console.info("EVOLUTION_MESSAGE_CREATED", evolutionId);
   }
 
-  await supabase.rpc("bump_conversation", {
-    p_id: conversationId,
-    p_sent_at: sentAt,
-    p_preview: preview,
-    p_inbound: !fromMe,
-  });
+  // O bump precisa ficar dentro do guard de dedup: `bump_conversation` soma
+  // `unread_count` a cada inbound (004:82 / 052:37), então chamá-lo numa
+  // reentrega inflava o badge sem existir mensagem nova. A reconciliação na
+  // reconexão reprocessa dezenas de conversas por este mesmo caminho, o que
+  // tornava o erro cumulativo.
+  if (isNewMessage) {
+    await supabase.rpc("bump_conversation", {
+      p_id: conversationId,
+      p_sent_at: sentAt,
+      p_preview: preview,
+      p_inbound: !fromMe,
+    });
+  }
 
   // Enriquecimento (transcrição → SDR → automação) roda em background para o
   // webhook responder já com a mensagem persistida (evita retry/queda de
@@ -508,18 +518,33 @@ async function postProcessInbound(args: {
   }
 
   // Automação (engine de regras). Best-effort; nunca derruba o restante.
+  //
+  // Dois bugs que escondiam a falha total deste caminho:
+  // 1. `.catch()` preso ao promise do fetch nunca dispara num 401 — resposta
+  //    HTTP é promise resolvido. O status era descartado em silêncio.
+  // 2. O header Authorization faltava; sem ele o gate do plataforma devolvia
+  //    401 antes do handler rodar (mesmo padrão da chamada ao sdr-engine
+  //    acima, que manda Bearer <service_role>).
   try {
-    await fetch(`${SUPABASE_URL}/functions/v1/automation-engine?token=${WEBHOOK_SECRET}`, {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/automation-engine?token=${WEBHOOK_SECRET}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+      },
       body: JSON.stringify({
         event: "messages.upsert",
         instance: instanceName,
         data: { conversation_id: conversationId, contact_id: contactId, text: sdrContent, media_type: type },
       }),
-    }).catch(() => {});
+    });
+    if (!res.ok) {
+      // Sem o corpo não dá pra saber se foi 401 do gate ou erro da regra.
+      const body = await res.text().catch(() => "");
+      console.error("AUTOMATION_KICK_FAILED", res.status, body.slice(0, 200));
+    }
   } catch (e) {
-    console.warn("AUTOMATION_KICK_FAILED", String(e));
+    console.warn("AUTOMATION_KICK_NETWORK_ERROR", String(e));
   }
 }
 
@@ -1016,7 +1041,7 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
-    if (url.searchParams.get("token") !== WEBHOOK_SECRET) {
+    if (!timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET)) {
       return jsonResponse(401, { error: "unauthorized" });
     }
 

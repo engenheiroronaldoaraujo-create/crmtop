@@ -4,6 +4,7 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 import { getSecret } from "../_shared/secrets.ts";
+import { timingSafeEqual } from "../_shared/timing.ts";
 import {
   ZERNIO_WEBHOOK_SECRET_NAME,
   ZERNIO_WEBHOOK_TOKEN_NAME,
@@ -197,7 +198,7 @@ Deno.serve(async (req) => {
 
     const raw = await req.text();
     const signatureOk = await verifySignature(raw, webhookSecret, signatureHeader);
-    const tokenOk = Boolean(expectedToken) && token === expectedToken;
+    const tokenOk = Boolean(expectedToken) && timingSafeEqual(token, expectedToken);
     if (!signatureOk && !tokenOk) {
       return jsonResponse(401, { error: "unauthorized" });
     }

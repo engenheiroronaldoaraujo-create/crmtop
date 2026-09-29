@@ -1,6 +1,7 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, upsertConversation } from "../_shared/contacts.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
+import { timingSafeEqual } from "../_shared/timing.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -69,17 +70,28 @@ interface Contact {
 
 const supabase = serviceClient();
 
+// O token pode chegar no body (o cron em 053_cadences.sql manda assim) ou na
+// query string. Ambos passam pela MESMA validação contra o segredo em
+// app_secrets — antes, `if (internalToken) return true` aceitava qualquer
+// string não-vazia no body e pulava a checagem por completo.
 async function authorize(req: Request, internalToken: string | undefined): Promise<boolean> {
-  if (internalToken) return true;
   const url = new URL(req.url);
-  const token = url.searchParams.get("token") ?? "";
+  const token = (internalToken ?? "").trim() || (url.searchParams.get("token") ?? "").trim();
   if (!token) return false;
-  const { data: secret } = await supabase
+
+  const { data: secret, error } = await supabase
     .from("app_secrets")
     .select("value")
     .eq("key", "cadence_internal_token")
     .maybeSingle();
-  return token === secret?.value;
+  if (error) {
+    console.error("CADENCE_TOKEN_LOOKUP_FAILED", error.message);
+    return false;
+  }
+  // Fail closed: sem segredo cadastrado, ninguém passa.
+  if (!secret?.value) return false;
+
+  return timingSafeEqual(token, secret.value);
 }
 
 // ---------------------------------------------------------------------------

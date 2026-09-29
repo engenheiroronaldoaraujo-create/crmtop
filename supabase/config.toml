@@ -388,8 +388,20 @@ deno_version = 2
 #  - evolution-webhook uses the ?token=WEBHOOK_SECRET query param (no JWT).
 #  - admin-users and evolution-proxy validate the caller JWT inside the
 #    function via supabase.auth.getUser and never trust client claims.
+#  - automation-engine and cadence-runner are called server-to-server (webhook
+#    and pg_cron) with the internal secret; they are NOT reachable from a
+#    browser. Both fail closed when the secret is missing from app_secrets.
+#    Without these two entries the platform JWT gate defaults to true and
+#    returns 401 before the handler runs — which silently killed every
+#    automation rule.
 # Therefore the platform-level JWT gate is disabled for all of them.
 [functions.admin-users]
+verify_jwt = false
+
+[functions.automation-engine]
+verify_jwt = false
+
+[functions.cadence-runner]
 verify_jwt = false
 
 [functions.evolution-proxy]

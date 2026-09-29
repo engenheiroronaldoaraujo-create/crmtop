@@ -7,6 +7,7 @@ import {
   getSecret,
   setSecret,
 } from "../_shared/secrets.ts";
+import { timingSafeEqual } from "../_shared/timing.ts";
 import {
   buildBroadcastTemplate,
   chunk,
@@ -1308,7 +1309,7 @@ Deno.serve(async (req) => {
     if (action === "campaign-send-batch") {
       const token = String(body.internal_token ?? "");
       const expected = await getSecret(supabase, ZERNIO_INTERNAL_TOKEN_NAME);
-      if (!expected || token !== expected) {
+      if (!expected || !timingSafeEqual(token, expected)) {
         return jsonResponse(401, { error: "internal token inválido" });
       }
       const campaign = await getCampaignOr404(supabase, String(body.campaign_id));

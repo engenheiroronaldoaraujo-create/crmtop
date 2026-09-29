@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
+import { timingSafeEqual } from "../_shared/timing.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
@@ -681,7 +682,7 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
-    if (url.searchParams.get("token") !== WEBHOOK_SECRET) {
+    if (!timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET)) {
       return jsonResponse(401, { error: "unauthorized" });
     }
 

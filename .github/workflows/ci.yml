@@ -25,7 +25,7 @@ jobs:
         run: deno test supabase/functions/_shared/
 
       - name: Type-check Edge Functions
-        run: deno check supabase/functions/ai-service/index.ts supabase/functions/sdr-engine/index.ts supabase/functions/deal-inspector/index.ts supabase/functions/automation-engine/index.ts supabase/functions/evolution-webhook/index.ts supabase/functions/evolution-proxy/index.ts supabase/functions/admin-users/index.ts
+        run: deno check supabase/functions/ai-service/index.ts supabase/functions/sdr-engine/index.ts supabase/functions/deal-inspector/index.ts supabase/functions/automation-engine/index.ts supabase/functions/evolution-webhook/index.ts supabase/functions/evolution-proxy/index.ts supabase/functions/admin-users/index.ts supabase/functions/cadence-runner/index.ts supabase/functions/zernio-proxy/index.ts supabase/functions/zernio-webhook/index.ts
 
       - name: Frontend lint
         working-directory: frontend
