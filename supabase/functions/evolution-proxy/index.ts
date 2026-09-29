@@ -750,6 +750,20 @@ async function actionSendAudio(
   } catch {
     data = null;
   }
+
+  // Log cru: sem isso não há como saber o que o Evolution respondeu quando o
+  // envio falha sem erro HTTP. É o que transformou "unknown action" em
+  // silêncio e o que esconde a resposta real de um 2xx-com-corpo-de-erro.
+  console.log("EVOLUTION_AUDIO_RESPONSE", {
+    status: res.status,
+    ok: res.ok,
+    mediatype: payload.mediatype,
+    fileName: payload.fileName,
+    mime: fileType,
+    base64Length: mediaBase64.length,
+    body: resText.slice(0, 500),
+  });
+
   if (!res.ok) {
     await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
       evolutionId: null,
@@ -762,7 +776,26 @@ async function actionSendAudio(
     return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
 
-  const evolutionId = data?.key?.id ?? null;
+  // O Evolution pode responder 2xx carregando um erro no corpo. A única
+  // confirmação real de entrega é a presence da key da mensagem — sem ela o
+  // áudio não foi enviado, e antes isso retornava 200 para o front, que
+  // removia a bolha otimista e o usuário não recebia nada nem erro.
+  const evolutionId = data?.key?.id ?? data?.message?.key?.id ?? null;
+  if (!evolutionId) {
+    const detail = resText.slice(0, 300) || `HTTP ${res.status} sem corpo`;
+    await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+      evolutionId: null,
+      type: "audio",
+      content: null,
+      mediaUrl: null,
+      sentAt,
+      sendError: `evolution não confirmou o envio: ${detail}`,
+    }, "failed");
+    return jsonResponse(502, {
+      error: `O WhatsApp não confirmou o envio do áudio. Resposta do Evolution: ${detail}`,
+    });
+  }
+
   const { conversationId, messageId } = await recordOutboundMessage(
     supabase,
     instance_id,

@@ -6,6 +6,7 @@ import {
   formatDuration,
   pickRecordingMime,
 } from "@/lib/audio-shared"
+import { prepareAudioForSend } from "@/lib/opus-convert"
 
 // ---------------------------------------------------------------------------
 // useAudioRecorder
@@ -111,7 +112,7 @@ export function useAudioRecorder() {
   // Unmount e troca de conversa: nada pode sobreviver a isso.
   useEffect(() => reset, [reset])
 
-  const finishRecording = useCallback((mime: string) => {
+  const finishRecording = useCallback(async (mime: string) => {
     clearTimer()
     const chunks = chunksRef.current
     chunksRef.current = []
@@ -129,9 +130,20 @@ export function useAudioRecorder() {
       return
     }
 
-    const blob = new Blob(chunks, { type: mime })
-    const ext = mime.includes("mp4") ? "m4a" : mime.includes("webm") ? "webm" : "ogg"
-    setRecording({ blob, mime, durationMs: measuredClamped, fileName: `audio.${ext}` })
+    const raw = new Blob(chunks, { type: mime })
+
+    // O WhatsApp só faz bolha de voz em ogg/opus. Navegadores que gravam
+    // webm/opus (Chrome) precisam converter; prepareAudioForSend devolve o
+    // blob original se a conversão falhar, então nunca perdemos a gravação.
+    setStatus("preview")
+    const { blob } = await prepareAudioForSend(raw, measuredClamped)
+    const finalMime = blob.type || mime
+    const ext = finalMime.includes("mp4")
+      ? "m4a"
+      : finalMime.includes("webm")
+      ? "webm"
+      : "ogg"
+    setRecording({ blob, mime: finalMime, durationMs: measuredClamped, fileName: `audio.${ext}` })
     setDurationMs(measuredClamped)
     setStatus("preview")
   }, [clearTimer, releaseStream])
