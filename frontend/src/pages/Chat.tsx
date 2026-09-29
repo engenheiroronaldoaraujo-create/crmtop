@@ -1877,7 +1877,11 @@ export default function ChatPage() {
                     {recorder.formattedDuration}
                   </span>
                   <span className="flex-1 text-xs text-muted-foreground">
-                    {recorder.isProcessing ? "Preparando áudio..." : "Áudio pronto para enviar"}
+                    {recorder.isProcessing
+                      ? "Preparando áudio..."
+                      : recorder.conversionError
+                      ? "Atenção: formato pode não chegar como mensagem de voz"
+                      : "Áudio pronto para enviar"}
                   </span>
                   {recorder.isProcessing && (
                     <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />

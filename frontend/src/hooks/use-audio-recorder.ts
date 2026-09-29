@@ -61,6 +61,8 @@ export function useAudioRecorder() {
   const [recording, setRecording] = useState<AudioRecording | null>(null)
   // Pulso de 250ms só para redesenhar a duração enquanto grava.
   const [tick, setTick] = useState(0)
+  // Motivo da última conversão que caiu no fallback (ver opus-convert.ts).
+  const [conversionError, setConversionError] = useState<string | null>(null)
 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -108,6 +110,7 @@ export function useAudioRecorder() {
     releasePreviewUrl()
     chunksRef.current = []
     recordingRef.current = null
+    setConversionError(null)
     startedAtRef.current = 0
     setRecording(null)
     setDurationMs(0)
@@ -135,12 +138,25 @@ export function useAudioRecorder() {
   const convertInBackground = useCallback(
     async (raw: Blob, durationMs: number, fallbackMime: string) => {
       try {
-        const { blob } = await prepareAudioForSend(raw, durationMs)
+        const { blob, error } = await prepareAudioForSend(raw, durationMs)
         // Só troca se o usuário ainda estiver olhando para esta gravação
         // (pode ter descartado ou trocado de conversa durante a conversão).
         if (recordingRef.current === raw) {
           setRecording(buildRecording(blob, durationMs, fallbackMime))
           setStatus("preview")
+          if (error) {
+            // A degradação silenciosa foi o que escondeu o problema por três
+            // rodadas: o áudio ia como webm, que o WhatsApp não entrega, e
+            // nada indicava que tinha havido fallback.
+            setConversionError(error)
+            toast.error(
+              "Não foi possível converter o áudio para o formato do WhatsApp. " +
+                "Ele será enviado como arquivo comum — pode não chegar como mensagem de voz.",
+              { duration: 8000 },
+            )
+          } else {
+            setConversionError(null)
+          }
         }
       } catch (err) {
         // prepareAudioForSend já é best-effort e devolve o original; se mesmo
@@ -309,6 +325,9 @@ export function useAudioRecorder() {
     isProcessing: status === "processing",
     isPreview: status === "preview",
     isSupported: status !== "unsupported",
+    // Conversion fell back to the raw container: WhatsApp will likely not
+    // deliver it as a voice note. The UI says so instead of degrading quietly.
+    conversionError,
     start,
     stop,
     cancel,

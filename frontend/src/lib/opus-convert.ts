@@ -86,6 +86,21 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
     return blob
   }
 
+  // Por que a conversão falhou em campo? Diagnóstico antes da correção:
+  // a primeira versão fazia `catch { return blob }` — o usuário recebia webm
+  // (que o WhatsApp não entrega como áudio) e nenhum sinal de que houve
+  // fallback. O diagnóstico vivia num console.error que ninguém vê.
+  //
+  // O sintoma observável do fallback é: o áudio chega no CRM com
+  // `mime = audio/webm;codecs=opus`. Isso é a assinatura exata. Ela vira
+  // um aviso na tela e fica registrada em `audio_recordings` para o
+  // diagnóstico no banco.
+  const reportFallback = (reason: string, err?: unknown) => {
+    const detail = err instanceof Error ? `${err.message}` : err ? String(err) : reason
+    console.error(`[audio] conversão para ogg/opus falhou (${reason}) — usando o original`, detail)
+    lastConversionError = `${reason}: ${detail}`
+  }
+
   try {
     // O import dinâmico é a parte lenta e não pode ser abortado — fica dentro
     // do timeout junto com a conversão, senão o download do chunk trava tudo.
@@ -122,10 +137,22 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
     )
     return converted
   } catch (err) {
-    // Log e segue: o áudio original ainda é enviável.
-    console.error("[audio] falha ao converter para ogg/opus, mantendo original", err)
+    // O blob original continua válido, só não vira bolha de voz. Avisa quem
+    // gravou em vez de degradar em silêncio.
+    reportFallback("conversão", err)
     return blob
   }
+}
+
+/**
+ * Motivo da última falha de conversão, ou null se deu certo. O hook usa para
+ * mostrar um aviso honesto no preview em vez de mandar o usuário para o
+ * WhatsApp sem saber que o container é o errado.
+ */
+let lastConversionError: string | null = null
+
+export function getLastConversionError(): string | null {
+  return lastConversionError
 }
 
 /**
@@ -135,13 +162,18 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
 export async function prepareAudioForSend(
   blob: Blob,
   durationMs: number,
-): Promise<{ blob: Blob; converted: boolean }> {
+): Promise<{ blob: Blob; converted: boolean; error: string | null }> {
+  if (isOggContainer(blob)) return { blob, converted: false, error: null }
   if (durationMs > MAX_AUDIO_DURATION_MS) {
-    // Sinaliza para a UI avisar; não converte.
-    return { blob, converted: false }
+    // Além do teto o servidor recusa de qualquer jeito; não gasta conversão.
+    return { blob, converted: false, error: null }
   }
-  if (isOggContainer(blob)) return { blob, converted: false }
 
+  lastConversionError = null
   const converted = await toOggOpus(blob)
-  return { blob: converted, converted: converted !== blob }
+  return {
+    blob: converted,
+    converted: converted !== blob,
+    error: converted !== blob ? null : lastConversionError,
+  }
 }
