@@ -21,6 +21,40 @@
 import { MAX_AUDIO_DURATION_MS } from "./audio-shared"
 
 /**
+ * Teto absoluto para a conversão.
+ *
+ * Motivo: `import("mediabunny")` baixa um chunk de ~724 KB (183 KB gzip) e o
+ * `conversion.execute()` não tem prazo. Em 3G/WiFi ruim — ou se a biblioteca
+ * travar num codec inesperado — a promise simplesmente nunca resolve. Sem
+ * este timeout o `await` do chamador fica pendurado para sempre e a gravação
+ * some da tela sem erro nenhum.
+ *
+ * A conversão é opcional por definição: passados 20s, o blob original (webm)
+ * é melhor do que nenhum áudio. Matematicamente o repackaging de até 5 min
+ * leva bem menos que isso; o teto existe para o pior caso, não para o normal.
+ */
+const CONVERSION_TIMEOUT_MS = 20_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} excedeu ${ms}ms`)),
+      ms,
+    )
+    promise.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
+}
+
+/**
  * O container já é o que o WhatsApp quer? (Firefox cai aqui direto.)
  */
 export function isOggContainer(blob: Blob): boolean {
@@ -53,8 +87,10 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
   }
 
   try {
+    // O import dinâmico é a parte lenta e não pode ser abortado — fica dentro
+    // do timeout junto com a conversão, senão o download do chunk trava tudo.
     const { Input, Output, BufferTarget, OggOutputFormat, ALL_FORMATS, BlobSource, Conversion } =
-      await loadConverter()
+      await withTimeout(loadConverter(), CONVERSION_TIMEOUT_MS, "import do conversor")
 
     const input = new Input({
       source: new BlobSource(blob),
@@ -66,9 +102,13 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
       target,
     })
 
-    const conversion = await Conversion.init({ input, output })
-    await conversion.execute()
-    await output.finalize()
+    const conversion = await withTimeout(
+      Conversion.init({ input, output }),
+      CONVERSION_TIMEOUT_MS,
+      "init da conversao",
+    )
+    await withTimeout(conversion.execute(), CONVERSION_TIMEOUT_MS, "execucao da conversao")
+    await withTimeout(output.finalize(), CONVERSION_TIMEOUT_MS, "finalizacao da conversao")
 
     const buffer = target.buffer
     if (!buffer || buffer.byteLength === 0) {

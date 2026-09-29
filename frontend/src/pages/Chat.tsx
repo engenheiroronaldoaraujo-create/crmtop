@@ -1820,15 +1820,18 @@ export default function ChatPage() {
                     <Square className="h-4 w-4 fill-current" />
                   </Button>
                 </div>
-              ) : recorder.isPreview && recorder.recording ? (
+              ) : recorder.recording ? (
                 <div className="flex flex-1 items-center gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
                   <Mic className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <span className="font-mono text-sm tabular-nums text-muted-foreground">
                     {recorder.formattedDuration}
                   </span>
                   <span className="flex-1 text-xs text-muted-foreground">
-                    Áudio pronto para enviar
+                    {recorder.isProcessing ? "Preparando áudio..." : "Áudio pronto para enviar"}
                   </span>
+                  {recorder.isProcessing && (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+                  )}
                   <Button
                     type="button"
                     variant="ghost"

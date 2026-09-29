@@ -6,7 +6,7 @@ import {
   formatDuration,
   pickRecordingMime,
 } from "@/lib/audio-shared"
-import { prepareAudioForSend } from "@/lib/opus-convert"
+import { isOggContainer, prepareAudioForSend } from "@/lib/opus-convert"
 
 // ---------------------------------------------------------------------------
 // useAudioRecorder
@@ -34,6 +34,7 @@ export type RecorderStatus =
   | "idle"
   | "requesting"
   | "recording"
+  | "processing"
   | "preview"
   | "denied"
   | "unsupported"
@@ -67,6 +68,10 @@ export function useAudioRecorder() {
   const startedAtRef = useRef(0)
   const timerRef = useRef<number | null>(null)
   const previewUrlRef = useRef<string | null>(null)
+  // Blob da gravação em andamento. Permite saber se o usuário ainda está
+  // olhando para ela quando a conversão assincrônica terminar, e garante
+  // que o áudio sobreviva a qualquer falha no pós-processamento.
+  const recordingRef = useRef<Blob | null>(null)
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -102,6 +107,7 @@ export function useAudioRecorder() {
     releaseStream()
     releasePreviewUrl()
     chunksRef.current = []
+    recordingRef.current = null
     startedAtRef.current = 0
     setRecording(null)
     setDurationMs(0)
@@ -112,7 +118,40 @@ export function useAudioRecorder() {
   // Unmount e troca de conversa: nada pode sobreviver a isso.
   useEffect(() => reset, [reset])
 
-  const finishRecording = useCallback(async (mime: string) => {
+  // Constrói o AudioRecording final a partir de um blob.
+  const buildRecording = useCallback((blob: Blob, durationMs: number, fallbackMime: string): AudioRecording => {
+    const finalMime = blob.type || fallbackMime
+    const ext = finalMime.includes("mp4")
+      ? "m4a"
+      : finalMime.includes("webm")
+      ? "webm"
+      : "ogg"
+    return { blob, mime: finalMime, durationMs, fileName: `audio.${ext}` }
+  }, [])
+
+  // Convert é async e pode demorar (chunk de ~724 KB) ou falhar. Durante esse
+  // tempo a gravação TEM que continuar visível e enviável: é por isso que
+  // `recordingRef` guarda o blob desde o `onstop`, antes de qualquer await.
+  const convertInBackground = useCallback(
+    async (raw: Blob, durationMs: number, fallbackMime: string) => {
+      try {
+        const { blob } = await prepareAudioForSend(raw, durationMs)
+        // Só troca se o usuário ainda estiver olhando para esta gravação
+        // (pode ter descartado ou trocado de conversa durante a conversão).
+        if (recordingRef.current === raw) {
+          setRecording(buildRecording(blob, durationMs, fallbackMime))
+          setStatus("preview")
+        }
+      } catch (err) {
+        // prepareAudioForSend já é best-effort e devolve o original; se mesmo
+        // assim lançar, o preview com o blob original já está na tela.
+        console.error("[audio] falha inesperada na preparacao do envio", err)
+      }
+    },
+    [buildRecording],
+  )
+
+  const finishRecording = useCallback((mime: string) => {
     clearTimer()
     const chunks = chunksRef.current
     chunksRef.current = []
@@ -132,21 +171,22 @@ export function useAudioRecorder() {
 
     const raw = new Blob(chunks, { type: mime })
 
-    // O WhatsApp só faz bolha de voz em ogg/opus. Navegadores que gravam
-    // webm/opus (Chrome) precisam converter; prepareAudioForSend devolve o
-    // blob original se a conversão falhar, então nunca perdemos a gravação.
-    setStatus("preview")
-    const { blob } = await prepareAudioForSend(raw, measuredClamped)
-    const finalMime = blob.type || mime
-    const ext = finalMime.includes("mp4")
-      ? "m4a"
-      : finalMime.includes("webm")
-      ? "webm"
-      : "ogg"
-    setRecording({ blob, mime: finalMime, durationMs: measuredClamped, fileName: `audio.${ext}` })
+    // 1) Publica IMEDIATAMENTE o blob original. O usuário já pode revisar e
+    //    enviar; nada depende da conversão.
+    recordingRef.current = raw
+    setRecording(buildRecording(raw, measuredClamped, mime))
     setDurationMs(measuredClamped)
-    setStatus("preview")
-  }, [clearTimer, releaseStream])
+
+    // 2) Só converte se o browser não gravar ogg nativamente. Quando grava,
+    //    pulamos direto para o preview sem passar por "processing".
+    if (isOggContainer(raw)) {
+      setStatus("preview")
+      return
+    }
+
+    setStatus("processing")
+    void convertInBackground(raw, measuredClamped, mime)
+  }, [buildRecording, clearTimer, convertInBackground, releaseStream])
 
   const start = useCallback(async () => {
     if (!isBrowserRecordingSupported()) {
@@ -266,6 +306,7 @@ export function useAudioRecorder() {
     remainingMs: Math.max(0, MAX_AUDIO_DURATION_MS - liveMs),
     formattedDuration: formatDuration(liveMs),
     isRecording: status === "recording",
+    isProcessing: status === "processing",
     isPreview: status === "preview",
     isSupported: status !== "unsupported",
     start,
