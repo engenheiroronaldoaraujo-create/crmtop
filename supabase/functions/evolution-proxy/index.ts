@@ -13,6 +13,16 @@ import {
   phoneLookupVariants,
   resolveSendTarget,
 } from "../_shared/evolution-identity.ts";
+import {
+  audioExtension,
+  MAX_AUDIO_BASE64_BYTES,
+  validateAudioUpload,
+} from "../_shared/audio.ts";
+import { getOpenRouterKey } from "../_shared/secrets.ts";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL,
+  transcribeAudio,
+} from "../_shared/transcribe.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
@@ -573,6 +583,14 @@ async function actionSendMedia(
         .upload(objectPath, bytes, { contentType: fileType || "application/octet-stream", upsert: true });
       if (uploadError) {
         console.error("EVOLUTION_MEDIA_UPLOAD_FAILED", uploadError.message);
+        // A resposta HTTP já foi 200: sem marcar a mensagem, o usuário nunca
+        // descobre que a mídia não salvou (bug pré-existente).
+        if (messageId) {
+          await supabase
+            .from("messages")
+            .update({ send_error: "falha ao salvar a mídia no storage" })
+            .eq("id", messageId);
+        }
         return;
       }
       if (!messageId) {
@@ -582,6 +600,246 @@ async function actionSendMedia(
       await supabase.from("messages").update({ media_url: objectPath }).eq("id", messageId);
     } catch (err) {
       console.error("EVOLUTION_MEDIA_UPLOAD_ERROR", err);
+    }
+  })();
+
+  return jsonResponse(200, {
+    ok: true,
+    message: { evolution_message_id: evolutionId, sent_at: sentAt },
+  });
+}
+
+// Config de transcrição de áudio (mesmo evento de log usado pelo webhook em
+// evolution-webhook/index.ts — `ai_config` / `TRANSCRIPTION_CONFIG_UPDATED`).
+// `transcribeOwn` é o opt-in do áudio enviado pelo próprio vendedor: default
+// false, então nada muda para quem não ligou explicitamente em Configurações → IA.
+async function getTranscriptionConfig(
+  supabase: Supabase,
+): Promise<{ enabled: boolean; transcribeOwn: boolean; model: string }> {
+  try {
+    const { data } = await supabase
+      .from("activity_log")
+      .select("new_data")
+      .eq("entity_type", "ai_config")
+      .eq("action", "TRANSCRIPTION_CONFIG_UPDATED")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const d = (data?.new_data as Record<string, unknown>) ?? {};
+    return {
+      enabled: d.enabled !== false,
+      transcribeOwn: d.transcribeOwn === true,
+      model: String(
+        d.model || Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || DEFAULT_TRANSCRIPTION_MODEL,
+      ),
+    };
+  } catch {
+    return { enabled: true, transcribeOwn: false, model: DEFAULT_TRANSCRIPTION_MODEL };
+  }
+}
+
+// Envia uma gravação do vendedor como bolha de voz. Mesma transporte do
+// send-media (base64 JSON — esta build do Evolution rejeita multipart), mas com
+// validação server-side de tamanho/duração/MIME: o cliente não é confiável.
+async function actionSendAudio(
+  supabase: Supabase,
+  user: { id: string },
+  formData: FormData,
+): Promise<Response> {
+  const instance_id = String(formData.get("instance_id") ?? "");
+  const phone = String(formData.get("phone") ?? "");
+  const file = formData.get("file") as Blob | null;
+  // O Evolution não devolve a duração — o cliente mede e o servidor valida o teto.
+  const durationMs = Number(formData.get("durationMs") ?? NaN);
+
+  if (!instance_id) return jsonResponse(400, { error: "instance_id is required" });
+  if (!phone) return jsonResponse(400, { error: "phone is required" });
+  if (!file || file.size === 0) return jsonResponse(400, { error: "file is required" });
+
+  const fileType = file.type ?? "";
+  const validation = validateAudioUpload({
+    mime: fileType,
+    sizeBytes: file.size,
+    durationMs,
+  });
+  if (!validation.ok) return jsonResponse(400, { error: validation.error });
+
+  const instance_name = await getInstanceName(supabase, instance_id);
+  const phoneDigits = sanitizePhone(phone);
+
+  const contact = await findContactByNumber(supabase, phoneDigits);
+  const contactPhone = contact?.phone ?? null;
+  const contactLid = contact?.lid ?? null;
+
+  let sendTarget: string | null = null;
+  if (contact) {
+    sendTarget = resolveSendTarget({ phone: contactPhone, lid: contactLid, jid: contact.jid }).target;
+  } else {
+    const canonical = normalizePhoneStrict(phoneDigits);
+    if (canonical) sendTarget = canonical;
+  }
+  if (!sendTarget) {
+    return jsonResponse(400, {
+      error: "sem identificador confiável para envio (telefone inválido ou contato sem phone/JID)",
+    });
+  }
+
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch {
+    return jsonResponse(400, { error: "falha ao ler o áudio enviado" });
+  }
+
+  const CHUNK = 8192;
+  let binaryStr = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binaryStr += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  const mediaBase64 = btoa(binaryStr);
+
+  const sentAt = new Date().toISOString();
+  // Nome com a extensão do container: o Baileys infere a bolha de voz pelo
+  // mimetype/filename e cai para documento se o nome não ajudar.
+  const fileName = `audio.${audioExtension(fileType)}`;
+
+  const payload = {
+    number: sendTarget,
+    mediatype: "audio",
+    media: mediaBase64,
+    isBase64: true,
+    fileName,
+  };
+
+  const post = () =>
+    fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
+      method: "POST",
+      headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+  let res: Response;
+  let resText = "";
+  try {
+    res = await post();
+    resText = await res.text();
+    if (res.status >= 500) {
+      await new Promise((r) => setTimeout(r, 1200));
+      res = await post();
+      resText = await res.text();
+    }
+  } catch (err) {
+    try {
+      await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+        evolutionId: null,
+        type: "audio",
+        content: null,
+        mediaUrl: null,
+        sentAt,
+        sendError: String(err).slice(0, 300),
+      }, "failed");
+    } catch (recordErr) {
+      console.error("EVOLUTION_SEND_AUDIO_FAILED_RECORD_ERROR", recordErr);
+    }
+    throw err;
+  }
+
+  let data: any = null;
+  try {
+    data = resText ? JSON.parse(resText) : null;
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
+      evolutionId: null,
+      type: "audio",
+      content: null,
+      mediaUrl: null,
+      sentAt,
+      sendError: resText.slice(0, 300),
+    }, "failed");
+    return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
+  }
+
+  const evolutionId = data?.key?.id ?? null;
+  const { conversationId, messageId } = await recordOutboundMessage(
+    supabase,
+    instance_id,
+    contactPhone,
+    contactLid,
+    user.id,
+    { evolutionId, type: "audio", content: null, mediaUrl: null, sentAt },
+    "sent",
+  );
+
+  const ext = audioExtension(fileType);
+  const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
+
+  // Upload + transcrição rodam depois da resposta: a entrega ao WhatsApp não
+  // pode ficar presa na latência do Storage nem na da OpenRouter.
+  (async () => {
+    // Grava a linha da mensagem antes do upload; se o upload falhar, a
+    // mensagem fica marcada com send_error em vez de sumir em silêncio.
+    let uploadOk = false;
+    try {
+      const { error: uploadError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(objectPath, bytes, { contentType: fileType || "audio/ogg", upsert: true });
+      if (uploadError) {
+        console.error("EVOLUTION_AUDIO_UPLOAD_FAILED", uploadError.message);
+      } else {
+        uploadOk = true;
+        if (messageId) {
+          await supabase.from("messages").update({ media_url: objectPath }).eq("id", messageId);
+        }
+      }
+    } catch (err) {
+      console.error("EVOLUTION_AUDIO_UPLOAD_ERROR", err);
+    }
+
+    if (!uploadOk && messageId) {
+      await supabase
+        .from("messages")
+        .update({ send_error: "falha ao salvar o áudio no storage" })
+        .eq("id", messageId);
+    }
+
+    try {
+      await supabase.from("audio_recordings").insert({
+        conversation_id: conversationId,
+        message_id: messageId,
+        user_id: user.id,
+        storage_path: uploadOk ? objectPath : null,
+        mime: fileType || "audio/ogg",
+        size_bytes: bytes.length,
+        duration_ms: Math.round(durationMs),
+      });
+    } catch (err) {
+      console.error("EVOLUTION_AUDIO_RECORDING_INSERT_ERROR", err);
+    }
+
+    // Transcrição do áudio próprio é opt-in (Configurações → IA). Sem ela, o
+    // texto do vendedor não entra no resumo/SDR/deal-inspector.
+    try {
+      const cfg = await getTranscriptionConfig(supabase);
+      if (cfg.enabled && cfg.transcribeOwn && messageId && mediaBase64.length <= MAX_AUDIO_BASE64_BYTES) {
+        const apiKey = await getOpenRouterKey(supabase);
+        if (apiKey) {
+          const transcript = await transcribeAudio({
+            apiKey,
+            model: cfg.model,
+            base64: mediaBase64,
+            mimetype: fileType || "audio/ogg",
+          });
+          if (transcript) {
+            await supabase.from("messages").update({ transcription: transcript }).eq("id", messageId);
+          }
+        }
+      }
+    } catch (err) {
+      // Best-effort: falhar a transcrição jamais pode desfazer o envio.
+      console.error("EVOLUTION_AUDIO_TRANSCRIBE_ERROR", err);
     }
   })();
 
@@ -1592,6 +1850,10 @@ Deno.serve(async (req) => {
       case "send-media": {
         if (!formData) return jsonResponse(400, { error: "send-media requires multipart/form-data" });
         return await actionSendMedia(supabase, user, formData);
+      }
+      case "send-audio": {
+        if (!formData) return jsonResponse(400, { error: "send-audio requires multipart/form-data" });
+        return await actionSendAudio(supabase, user, formData);
       }
       case "logout-instance": {
         await requireAdmin(user);

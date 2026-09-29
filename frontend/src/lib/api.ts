@@ -144,6 +144,28 @@ export function proxyLinkConversationPhone(conversation_id: string, phone: strin
   })
 }
 
+/**
+ * Envia uma gravação do vendedor como bolha de voz.
+ * `durationMs` é medido no cliente (o Evolution não devolve duração) e
+ * revalidado no servidor contra MAX_AUDIO_DURATION_MS.
+ */
+export function proxySendAudio(
+  instance_id: string,
+  phone: string,
+  file: Blob,
+  fileName: string,
+  durationMs: number,
+) {
+  const formData = new FormData()
+  formData.append("action", "send-audio")
+  formData.append("instance_id", instance_id)
+  formData.append("phone", phone)
+  formData.append("durationMs", String(Math.round(durationMs)))
+  formData.append("fileName", fileName)
+  formData.append("file", file, fileName)
+  return postForm("evolution-proxy", formData)
+}
+
 // ---------------------------------------------------------------------------
 // AI Service
 // ---------------------------------------------------------------------------

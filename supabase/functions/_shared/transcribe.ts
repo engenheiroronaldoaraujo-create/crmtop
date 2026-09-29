@@ -39,8 +39,15 @@ export function shouldAttemptTranscription(opts: {
   isAudio: boolean;
   isFromMe: boolean;
   base64Length: number;
+  /**
+   * Libera a transcrição do áudio enviado pelo próprio vendedor. O default é
+   * `false`: a liberação é sempre deliberada (opt-in em Configurações → IA) e
+   * nunca um efeito colateral de mexer em outro parâmetro.
+   */
+  allowFromMe?: boolean;
 }): boolean {
-  if (!opts.enabled || !opts.isAudio || opts.isFromMe) return false;
+  if (!opts.enabled || !opts.isAudio) return false;
+  if (opts.isFromMe && !opts.allowFromMe) return false;
   if (opts.base64Length === 0) return false;
   if (opts.base64Length > MAX_AUDIO_BASE64_BYTES) return false;
   return true;

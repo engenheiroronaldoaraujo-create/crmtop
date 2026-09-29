@@ -29,6 +29,8 @@ import {
   X,
   Zap,
   ZapOff,
+  Mic,
+  Square,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -40,7 +42,8 @@ import {
   setAlertMuted,
   unlockAlertSound,
 } from "@/lib/alert-sound"
-import { proxyLinkConversationPhone, proxySendMedia, proxySendText } from "@/lib/api"
+import { proxyLinkConversationPhone, proxySendAudio, proxySendMedia, proxySendText } from "@/lib/api"
+import { useAudioRecorder } from "@/hooks/use-audio-recorder"
 import {
   contactDisplayName,
   cn,
@@ -507,6 +510,10 @@ export default function ChatPage() {
   const [query, setQuery] = useState("")
   const [text, setText] = useState("")
   const [pendingFile, setPendingFile] = useState<{ file: File } | null>(null)
+
+  // Gravação da bolha de voz. O `reset` no unmount/troca de conversa é do hook.
+  const recorder = useAudioRecorder()
+  const [sendingAudio, setSendingAudio] = useState(false)
 
   // SDR state for current conversation
   const [sdrStatus, setSdrStatus] = useState<string | null>(null)
@@ -1116,36 +1123,107 @@ export default function ChatPage() {
     }
   }
 
+  // Precondições comuns ao envio de texto, mídia e áudio. Retorna o telefone
+  // de destino quando o envio pode seguir, ou null (já avisou o usuário).
+  function canSendNow(): string | null {
+    if (!selected) return null
+    if (!instance) {
+      toast.error("Nenhuma instância configurada — veja Configurações")
+      return null
+    }
+    if (instance.status !== "connected") {
+      toast.error("WhatsApp não está conectado")
+      return null
+    }
+    if (selected.contact && !isRealPhone(selected.contact.phone)) {
+      toast.error("Este contato não possui telefone cadastrado (contato via ID do WhatsApp).")
+      return null
+    }
+    return selected.contact?.phone ?? ""
+  }
+
+  // Envia a gravação como bolha de voz. A bolha otimista sai da lista de
+  // confirmação (como a mídia): a linha real chega pelo realtime já com
+  // media_url apontando para o objeto no Storage.
+  async function handleSendAudio() {
+    if (!selected || !recorder.recording || sendingAudio) return
+    const targetPhone = canSendNow()
+    if (targetPhone === null) return
+
+    const rec = recorder.recording
+    const tempId = `optimistic-${crypto.randomUUID()}`
+    const nowIso = new Date().toISOString()
+    setOptimisticMsgs((prev) => [
+      ...prev,
+      {
+        id: tempId,
+        conversation_id: selected.id,
+        evolution_message_id: null,
+        direction: "outbound",
+        sender_profile_id: user?.id ?? null,
+        type: "audio",
+        content: null,
+        media_url: null,
+        status: "pending",
+        sent_at: nowIso,
+        created_at: nowIso,
+      },
+    ])
+
+    recorder.discard()
+    setSendingAudio(true)
+    try {
+      await proxySendAudio(
+        selected.instance_id,
+        targetPhone,
+        rec.blob,
+        rec.fileName,
+        rec.durationMs,
+      )
+      setOptimisticMsgs((prev) => prev.filter((m) => m.id !== tempId))
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selected.id ? { ...c, last_message_inbound: false } : c)),
+      )
+    } catch (err) {
+      setOptimisticMsgs((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
+      )
+      toast.error(err instanceof Error ? err.message : "Falha ao enviar áudio")
+    } finally {
+      setSendingAudio(false)
+    }
+  }
+
   async function handleSend(e: FormEvent) {
     e.preventDefault()
     if (!selected) return
     if (!text.trim() && !pendingFile) return
-    if (!instance) {
-      toast.error("Nenhuma instância configurada — veja Configurações")
-      return
-    }
-    if (instance.status !== "connected") {
-      toast.error("WhatsApp não está conectado")
-      return
-    }
-    if (selected.contact && !isRealPhone(selected.contact.phone)) {
-      toast.error("Este contato não possui telefone cadastrado (contato via ID do WhatsApp).")
-      return
-    }
-    const targetPhone = selected.contact?.phone ?? ""
+    const targetPhone = canSendNow()
+    if (targetPhone === null) return
 
     // UI otimista: a bolha aparece na hora com ⏱ pendente; o status vira ✓
     // quando o proxy confirma e a bolha real substitui via realtime.
     const tempId = `optimistic-${crypto.randomUUID()}`
     const nowIso = new Date().toISOString()
     const isMedia = Boolean(pendingFile)
+    // O tipo real vem do MIME anexado: fixar "document" fazia um .ogg
+    // aparecer como documento até a confirmação chegar.
+    const optimisticType: Message["type"] = !isMedia
+      ? "text"
+      : pendingFile!.file.type.startsWith("audio/")
+      ? "audio"
+      : pendingFile!.file.type.startsWith("image/")
+      ? "image"
+      : pendingFile!.file.type.startsWith("video/")
+      ? "video"
+      : "document"
     const optimisticMsg: Message = {
       id: tempId,
       conversation_id: selected.id,
       evolution_message_id: null,
       direction: "outbound",
       sender_profile_id: user?.id ?? null,
-      type: isMedia ? "document" : "text",
+      type: optimisticType,
       content: isMedia
         ? text.trim() || `📎 ${pendingFile!.file.name}`
         : text.trim(),
@@ -1707,67 +1785,146 @@ export default function ChatPage() {
                   if (file) setPendingFile({ file })
                 }}
               />
-              <DropdownMenu onOpenChange={(open) => !open && setTplSearch("")}>
-                <DropdownMenuTrigger asChild>
+              {/* Gravação da bolha de voz. Durante a gravação o composer é
+                  substituído pelo contador; no preview, aparece a barra com
+                  duração e os botões de enviar/descartar. */}
+              {recorder.status === "recording" ? (
+                <div className="flex flex-1 items-center gap-3">
+                  <span className="flex h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-red-500" />
+                  <span className="font-mono text-sm tabular-nums text-muted-foreground">
+                    {recorder.formattedDuration}
+                  </span>
+                  <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                    <span
+                      className="block h-full rounded-full bg-red-500 transition-[width]"
+                      style={{
+                        width: `${Math.min(100, (recorder.durationMs / (5 * 60 * 1000)) * 100)}%`,
+                      }}
+                    />
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
-                    title="Templates de resposta"
+                    onClick={recorder.cancel}
+                    title="Descartar gravação"
                   >
-                    <FileText className="h-5 w-5" />
+                    <X className="h-5 w-5" />
                   </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-72">
-                  <div className="p-2">
-                    <Input
-                      placeholder="Buscar template..."
-                      value={tplSearch}
-                      onChange={(e) => setTplSearch(e.target.value)}
-                      className="h-7 text-xs"
-                    />
-                  </div>
-                  {visibleTemplates.map((t) => (
-                    <DropdownMenuItem
-                      key={t.id}
-                      onSelect={() => applyTemplate(t)}
-                      className="flex-col items-start gap-0"
+                  <Button
+                    type="button"
+                    size="icon"
+                    onClick={recorder.stop}
+                    title="Parar e revisar"
+                  >
+                    <Square className="h-4 w-4 fill-current" />
+                  </Button>
+                </div>
+              ) : recorder.isPreview && recorder.recording ? (
+                <div className="flex flex-1 items-center gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                  <Mic className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="font-mono text-sm tabular-nums text-muted-foreground">
+                    {recorder.formattedDuration}
+                  </span>
+                  <span className="flex-1 text-xs text-muted-foreground">
+                    Áudio pronto para enviar
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={recorder.discard}
+                    title="Descartar"
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    onClick={handleSendAudio}
+                    disabled={sendingAudio}
+                    title="Enviar áudio"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  {recorder.isSupported && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      onClick={recorder.start}
+                      disabled={recorder.status === "requesting"}
+                      title="Gravar áudio"
                     >
-                      <span className="text-xs font-medium">{t.title}</span>
-                      <span className="max-w-60 truncate text-[10px] text-muted-foreground">
-                        {t.body}
-                      </span>
-                    </DropdownMenuItem>
-                  ))}
-                  {visibleTemplates.length === 0 && (
-                    <p className="p-2 text-center text-xs text-muted-foreground">
-                      Nenhum template cadastrado.
-                    </p>
+                      <Mic className="h-5 w-5" />
+                    </Button>
                   )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => fileInputRef.current?.click()}
-                title="Anexar"
-              >
-                <Paperclip className="h-5 w-5" />
-              </Button>
-              <Input
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder={pendingFile ? "Legenda (opcional)..." : "Digite uma mensagem..."}
-                className="flex-1"
-              />
-              <Button
-                type="submit"
-                size="icon"
-                disabled={!text.trim() && !pendingFile}
-              >
-                <Send className="h-4 w-4" />
-              </Button>
+                  <DropdownMenu onOpenChange={(open) => !open && setTplSearch("")}>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        title="Templates de resposta"
+                      >
+                        <FileText className="h-5 w-5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-72">
+                      <div className="p-2">
+                        <Input
+                          placeholder="Buscar template..."
+                          value={tplSearch}
+                          onChange={(e) => setTplSearch(e.target.value)}
+                          className="h-7 text-xs"
+                        />
+                      </div>
+                      {visibleTemplates.map((t) => (
+                        <DropdownMenuItem
+                          key={t.id}
+                          onSelect={() => applyTemplate(t)}
+                          className="flex-col items-start gap-0"
+                        >
+                          <span className="text-xs font-medium">{t.title}</span>
+                          <span className="max-w-60 truncate text-[10px] text-muted-foreground">
+                            {t.body}
+                          </span>
+                        </DropdownMenuItem>
+                      ))}
+                      {visibleTemplates.length === 0 && (
+                        <p className="p-2 text-center text-xs text-muted-foreground">
+                          Nenhum template cadastrado.
+                        </p>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Anexar"
+                  >
+                    <Paperclip className="h-5 w-5" />
+                  </Button>
+                  <Input
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    placeholder={pendingFile ? "Legenda (opcional)..." : "Digite uma mensagem..."}
+                    className="flex-1"
+                  />
+                  <Button
+                    type="submit"
+                    size="icon"
+                    disabled={!text.trim() && !pendingFile}
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                </>
+              )}
             </form>
           </>
         )}

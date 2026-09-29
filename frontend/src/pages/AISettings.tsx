@@ -20,6 +20,7 @@ export default function AISettings() {
   const [testResult, setTestResult] = useState<"success" | "error" | null>(null)
   const [transcriptionEnabled, setTranscriptionEnabled] = useState(true)
   const [transcriptionModel, setTranscriptionModel] = useState("google/gemini-2.5-flash")
+  const [transcribeOwn, setTranscribeOwn] = useState(false)
   const [savingTranscription, setSavingTranscription] = useState(false)
 
   const callAiService = async (action: string, data: Record<string, unknown> = {}) => {
@@ -41,6 +42,7 @@ export default function AISettings() {
         const cfg = json?.result
         if (cfg && typeof cfg === "object") {
           setTranscriptionEnabled(cfg.enabled !== false)
+          setTranscribeOwn(cfg.transcribeOwn === true)
           if (cfg.model) setTranscriptionModel(cfg.model)
         }
       })
@@ -136,6 +138,7 @@ export default function AISettings() {
     try {
       await callAiService("set_transcription_config", {
         enabled: transcriptionEnabled,
+        transcribeOwn,
         model: transcriptionModel.trim(),
       })
       toast.success("Transcrição de áudio salva")
@@ -299,6 +302,22 @@ export default function AISettings() {
               Modelo multimodal no OpenRouter (suporta entrada de áudio). Padrão: google/gemini-2.5-flash
             </p>
           </div>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={transcribeOwn}
+              onChange={(e) => setTranscribeOwn(e.target.checked)}
+              disabled={!transcriptionEnabled}
+              className="mt-0.5 h-4 w-4 rounded border-input"
+            />
+            <span>
+              Transcrever também os áudios enviados pelo vendedor
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                Faz o texto da sua própria voz entrar nos resumos, no SDR e na análise de
+                deals. Cada gravação gera uma chamada à OpenRouter.
+              </span>
+            </span>
+          </label>
           <Button onClick={handleSaveTranscription} disabled={savingTranscription}>
             {savingTranscription ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
             Salvar transcrição

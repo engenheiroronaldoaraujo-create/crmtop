@@ -397,7 +397,7 @@ Retorne APENAS o JSON.`
 // Transcrição de áudio (retprocesso / on-demand)
 // ---------------------------------------------------------------------------
 
-async function getTranscriptionConfig(supabase: Supabase): Promise<{ enabled: boolean; model: string }> {
+async function getTranscriptionConfig(supabase: Supabase): Promise<{ enabled: boolean; transcribeOwn: boolean; model: string }> {
   try {
     const { data } = await supabase
       .from("activity_log")
@@ -410,10 +410,13 @@ async function getTranscriptionConfig(supabase: Supabase): Promise<{ enabled: bo
     const d = (data?.new_data as any) ?? {};
     return {
       enabled: d.enabled !== false,
+      // Opt-in explícito: o áudio enviado pelo próprio vendedor só é
+      // transcrito se o admin ligar. Default false.
+      transcribeOwn: d.transcribeOwn === true,
       model: String(d.model || Deno.env.get("OPENROUTER_TRANSCRIPTION_MODEL") || DEFAULT_TRANSCRIPTION_MODEL),
     };
   } catch {
-    return { enabled: true, model: DEFAULT_TRANSCRIPTION_MODEL };
+    return { enabled: true, transcribeOwn: false, model: DEFAULT_TRANSCRIPTION_MODEL };
   }
 }
 
@@ -520,6 +523,13 @@ Deno.serve(async (req) => {
           result = await transcribeAudioMessage(supabase, data.message_id as string)
           break
         case "set_transcription_config": {
+          // Configuração global de IA: só admin. A policy de INSERT em
+          // activity_log é is_admin(), mas o service role bypassa RLS — sem
+          // este gate, qualquer vendedor autenticado alteraria a transcrição
+          // do sistema inteiro.
+          if (!(await isAdmin(supabase, user.id))) {
+            return jsonResponse(403, { error: "forbidden: admin role required" });
+          }
           await supabase.from("activity_log").insert({
             entity_type: "ai_config",
             entity_id: null,
@@ -527,6 +537,7 @@ Deno.serve(async (req) => {
             actor_id: user.id,
             new_data: {
               enabled: Boolean((data as any)?.enabled),
+              transcribeOwn: (data as any)?.transcribeOwn === true,
               model: String((data as any)?.model ?? ""),
             },
           });
