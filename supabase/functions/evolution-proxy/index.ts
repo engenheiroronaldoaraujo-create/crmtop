@@ -722,12 +722,15 @@ async function actionSendAudio(
 
   const sentAt = new Date().toISOString();
 
-  // O nome do arquivo é o que o Baileys usa para decidir se a mídia entra
-  // como voz. Evidência do banco de produção: toda gravação que o WhatsApp
-  // entregou como bolha tem container ogg/opus; nenhuma das que chegaram
-  // como webm foi entregue. A detecção é por assinatura de BYTES — o MIME
-  // declarado pelo multipart continua sendo o container original mesmo
-  // depois de qualquer conversão, e não pode ser confiável.
+  // O nome do arquivo é o que o Baileys usa para decidir o tratamento da
+  // mídia. Evidência do banco de produção: os 66 áudios entregues entre
+  // 18/08 e 27/09 eram ogg/opus SEM o flag ptt, e chegaram; os meus com
+  // `ptt: true` não chegaram. Essa build do Evolution não entrega quando o
+  // flag está presente — pode não suportá-lo em sendMedia, e o resultado é
+  // mensagem aceita (key.id de volta) mas nunca renderizada no destinatário.
+  //
+  // A detecção é por assinatura de BYTES, nunca pelo MIME declarado: o
+  // multipart chega sempre com o container original mesmo depois do remux.
   const fileName = finalIsOgg ? "audio.ogg" : `audio.${audioExtension(fileType)}`;
 
   const payload = {
@@ -736,10 +739,6 @@ async function actionSendAudio(
     media: mediaBase64,
     isBase64: true,
     fileName,
-    // `ptt: true` é o que faz o WhatsApp renderizar a bolha com microfone.
-    // Só manda quando o container é realmente ogg/opus — ptt com webm
-    // produz mensagem corrompida no cliente.
-    ...(finalIsOgg ? { ptt: true } : {}),
   };
 
   // O nome do arquivo é o que o Baileys usa para decidir se a mídia entra
@@ -795,13 +794,12 @@ async function actionSendAudio(
     ok: res.ok,
     mediatype: payload.mediatype,
     fileName: payload.fileName,
-    // MIME declarado pelo cliente, container detectado nos bytes antes/depois
-    // do remux, e o flag ptt. A divergência entre MIME e container real é o
-    // que fez a conversão parecer funcionar enquanto o envio falhava.
+    // MIME declarado pelo cliente vs container detectado nos bytes pós-remux.
+    // A divergência entre os dois é o que fez a conversão parecer funcionar
+    // enquanto o envio falhava.
     declaredMime: fileType,
     container: containerNote,
     isOggAfterRemux: finalIsOgg,
-    ptt: Boolean(payload.ptt),
     base64Length: mediaBase64.length,
     body: resText.slice(0, 500),
   });

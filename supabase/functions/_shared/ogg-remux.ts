@@ -16,6 +16,27 @@
 
 const EBML_HEADER = [0x1a, 0x45, 0xdf, 0xa3];
 
+// CRC32 do Ogg (polinômio 0x04c11db7, sem reflexão, init 0) — RFC 3533.
+// Necessário porque toda página cujo granule for reescrito precisa de CRC
+// recalculado.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let r = i << 24;
+    for (let j = 0; j < 8; j++) r = r & 0x80000000 ? (r << 1) ^ 0x04c11db7 : r << 1;
+    t[i] = r >>> 0;
+  }
+  return t;
+})();
+
+function oggCrc(bytes: Uint8Array): number {
+  let crc = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = ((crc << 8) ^ CRC_TABLE[((crc >>> 24) & 0xff) ^ bytes[i]]) >>> 0;
+  }
+  return crc >>> 0;
+}
+
 /** O blob é um container Matroska/WebM (o que o MediaRecorder do Chrome gera)? */
 export function isWebm(bytes: Uint8Array): boolean {
   return bytes.length >= 4 &&
@@ -32,12 +53,6 @@ export function isOgg(bytes: Uint8Array): boolean {
     bytes[0] === 0x4f && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53;
 }
 
-/**
- * Remuxa webm/opus para ogg/opus — o formato das bolhas de voz do WhatsApp.
- * Devolve os bytes de entrada quando não é webm ou quando a conversão falha:
- * o chamador decide o que fazer com o container original, mas nunca perde o
- * áudio por causa do remux.
- */
 export async function remuxWebmToOgg(
   bytes: Uint8Array,
   timeoutMs = 15_000,
@@ -82,6 +97,10 @@ export async function remuxWebmToOgg(
       console.error("REMUX_SAIDA_INESPERADA", out.slice(0, 4).toString());
       return bytes;
     }
+    // A correção de granule é o que faz a diferença entre "container certo" e
+    // "mensagem entregue": sem ela o WhatsApp via 614s de duração em 2,5s de
+    // áudio. Aplicada aqui, dentro do remux, o chamador recebe o arquivo já
+    // utilizável.
     console.log("REMUX_OK", bytes.length, "->", out.length);
     return out;
   } catch (err) {
