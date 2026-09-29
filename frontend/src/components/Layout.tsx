@@ -246,6 +246,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </Button>
         </div>
         {children}
+        {/* Build em execução. Existe para confirmar, em um segundo, que o
+            navegador recebeu o bundle novo depois de um deploy — o PWA pode
+            servir cache antigo e o sintoma é idêntico ao de um bug de código. */}
+        <div className="px-3 py-1 text-center text-[10px] text-white/25 select-none">
+          build {__BUILD_ID__}
+        </div>
       </main>
     </div>
   )

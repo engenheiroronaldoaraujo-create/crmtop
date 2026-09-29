@@ -9,3 +9,9 @@ interface BeforeInstallPromptEvent extends Event {
 interface Window {
   __crmPromptInstall?: () => Promise<void>
 }
+
+// Injetado pelo vite.config.ts (ver `define.__BUILD_ID__`). Identifica o
+// bundle em execução — exibido no rodapé do app e no atributo data-build do
+// <html>. Serve para distinguir, em segundos, "código novo com bug" de
+// "navegador ainda servindo bundle antigo do cache do PWA".
+declare const __BUILD_ID__: string
