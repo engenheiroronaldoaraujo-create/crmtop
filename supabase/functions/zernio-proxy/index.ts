@@ -489,6 +489,34 @@ async function actionCampaignCreate(
     return jsonResponse(400, { error: `template ${tpl.status ?? "?"}: só templates aprovados podem enviar` });
   }
 
+  // Cache sem components ⇒ o app enxerga "0 variáveis", cria a campanha como
+  // broadcast sem parâmetros e a Meta rejeita TODOS os destinatários com
+  // #132000 (parameter count mismatch). Re-sincroniza antes de decidir o modo.
+  if (tpl.components === null || tpl.components === undefined) {
+    try {
+      await syncTemplates(supabase, conn.account_id!);
+    } catch (err) {
+      console.error("campaign-create syncTemplates automático falhou", err);
+    }
+    const { data: refreshed } = await supabase
+      .from("zernio_templates")
+      .select("status, components")
+      .eq("account_id", conn.account_id!)
+      .eq("name", templateName)
+      .eq("language", templateLanguage)
+      .maybeSingle();
+    if (refreshed?.status !== "APPROVED") {
+      return jsonResponse(400, { error: "template não está mais aprovado — sincronize os templates" });
+    }
+    if (refreshed.components === null || refreshed.components === undefined) {
+      return jsonResponse(400, {
+        error: "não consegui ler os componentes do template — sincronize os templates e tente de novo",
+      });
+    }
+    tpl.status = refreshed.status;
+    tpl.components = refreshed.components;
+  }
+
   // Template com variáveis nomeadas ({{nome}}) → envio DIRETO por destinatário
   // (o broadcast da Meta só resolve numeradas). Nº de variáveis e ordem dos
   // valores: slots nomeados em ordem de aparição no corpo aprovado.
@@ -1140,12 +1168,14 @@ async function actionCampaignSync(
   const b = bRes?.broadcast ?? {};
 
   // Página a página dos recipients, atualizando o espelho local.
+  // O limite da Zernio é 200 por página (500 devolve 400 e derrubava o sync).
   let skip = 0;
   let pages = 0;
   let lastSeenAt: string | null = null;
-  while (pages < 40) {
+  let firstError: string | null = null;
+  while (pages < 100) {
     const rRes = await zernioRequest(supabase, `/broadcasts/${broadcastId}/recipients`, {
-      query: { limit: 500, skip },
+      query: { limit: 200, skip },
     });
     const list = rRes?.recipients ?? [];
     if (list.length === 0) break;
@@ -1156,6 +1186,7 @@ async function actionCampaignSync(
       const status = ["pending", "sent", "delivered", "read", "failed"].includes(r.status)
         ? r.status
         : "pending";
+      if (status === "failed" && !firstError && r.error) firstError = String(r.error);
       const patch: Record<string, unknown> = {
         status,
         zernio_recipient_id: String(r.id ?? ""),
@@ -1191,6 +1222,9 @@ async function actionCampaignSync(
   const patch: Record<string, unknown> = {};
   if (["draft", "scheduled", "sending", "completed", "failed", "cancelled"].includes(String(b.status))) {
     patch.status = b.status;
+    // Sem isso o broadcast falho ficava "sending" para sempre, sem motivo à vista.
+    if (b.status === "failed" && firstError) patch.last_error = firstError;
+    if (b.status !== "failed") patch.last_error = null;
   }
   if (b.scheduledAt) patch.scheduled_at = b.scheduledAt;
   if (b.startedAt) patch.started_at = b.startedAt;

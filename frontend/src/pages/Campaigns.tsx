@@ -884,6 +884,28 @@ function CampaignDetail({
     return () => clearInterval(iv)
   }, [campaign?.status, load])
 
+  // Broadcast da Meta não devolve status por webhook — sem este polling a
+  // campanha ficaria "sending" para sempre, mesmo depois de a Meta falhar
+  // todos os destinatários.
+  useEffect(() => {
+    if (campaign?.status !== "sending" || campaign.send_mode !== "broadcast") return
+    let alive = true
+    const sync = async () => {
+      try {
+        const r = await zernioCampaignSync(campaignId)
+        if (!alive || r?.error) return
+        await load()
+      } catch {
+        // tenta de novo no próximo tick
+      }
+    }
+    const iv = setInterval(sync, 30_000)
+    return () => {
+      alive = false
+      clearInterval(iv)
+    }
+  }, [campaign?.status, campaign?.send_mode, campaignId, load])
+
   if (loading) return <p className="text-muted-foreground">Carregando...</p>
   if (!campaign) return <p className="text-muted-foreground">Campanha não encontrada.</p>
 

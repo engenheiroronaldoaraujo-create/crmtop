@@ -308,11 +308,15 @@ async function processMessage(
   const evolutionId = raw.key?.id ?? null;
   const { type, content, mediaMessage } = mapMessageType(raw);
   const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
-  const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
+  // Alguns servidores Evolution enviam epoch em milissegundos; sem normalizar,
+  // `new Date(ts * 1000)` estoura RangeError e derruba o lote inteiro.
+  const tsMs = ts ? (ts > 8.64e15 ? ts / 1000 : ts) * 1000 : null;
+  const sentAt = tsMs ? new Date(tsMs).toISOString() : new Date().toISOString();
 
   // Regra de negócio: manter apenas os últimos 60 dias de histórico.
   const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
-  if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
+  if (tsMs && tsMs < Date.now() - HISTORY_CUTOFF_MS) {
+    console.info("EVOLUTION_MESSAGE_SKIPPED_HISTORY_CUTOFF", evolutionId, sentAt);
     return;
   }
 
@@ -972,9 +976,16 @@ async function handleMessages(
   const BATCH = 10;
   for (let i = 0; i < list.length; i += BATCH) {
     const chunk = list.slice(i, i + BATCH);
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       chunk.map((raw) => processMessage(supabase, instance.id, instanceName, raw)),
     );
+    // Sem log aqui uma exceção em processMessage descarta a mensagem com
+    // resposta 200 e zero rastro.
+    for (const r of results) {
+      if (r.status === "rejected") {
+        console.error("EVOLUTION_MESSAGE_PROCESS_FAILED", r.reason);
+      }
+    }
   }
   return jsonResponse(200, { ok: true, processed: list.length });
 }
@@ -1046,11 +1057,12 @@ Deno.serve(async (req) => {
     }
 
     const payload = await req.json();
-    const event = String(payload.event ?? "");
+    const rawEvent = String(payload.event ?? "");
+    const event = rawEvent.toLowerCase();
     const instanceName = String(payload.instance ?? "");
     // Rastro de ingestão: sem isso, quedas de entrega ficam invisíveis
     // (foi exatamente o bug do chat "perdido" das 21:07).
-    console.info("EVOLUTION_EVENT_RECEIVED", event, instanceName);
+    console.info("EVOLUTION_EVENT_RECEIVED", rawEvent, instanceName);
     const supabase = serviceClient();
 
     switch (event) {
@@ -1065,7 +1077,7 @@ Deno.serve(async (req) => {
       case "contacts.upsert":
         return await handleContacts(supabase, payload.data);
       default:
-        return jsonResponse(200, { ok: true, ignored: event });
+        return jsonResponse(200, { ok: true, ignored: rawEvent });
     }
   } catch (err) {
     console.error("EVOLUTION_WEBHOOK_ERROR", err);
