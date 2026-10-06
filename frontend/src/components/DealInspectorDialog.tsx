@@ -44,6 +44,10 @@ interface InspectorParams {
   stage_ids: string[]
   stall_reasons: string[]
   action_mode: "report_only" | "create_task" | "suggest_message"
+  // Período opcional (de/até) para escolher os leads pela data da última
+  // mensagem — silêncio iniciado entre as datas. "" = sem filtro.
+  period_start?: string
+  period_end?: string
 }
 
 interface InsightResult {
@@ -146,6 +150,8 @@ export function DealInspectorDialog({
   // Config state
   const [stalledDays, setStalledDays] = useState(3)
   const [historyDays, setHistoryDays] = useState(30)
+  const [periodStart, setPeriodStart] = useState("")
+  const [periodEnd, setPeriodEnd] = useState("")
   const [includeClosed, setIncludeClosed] = useState(false)
   const [selectedStages, setSelectedStages] = useState<string[]>([])
   const [selectedReasons, setSelectedReasons] = useState<string[]>(Object.keys(STALL_REASONS))
@@ -194,6 +200,14 @@ export function DealInspectorDialog({
         stage_ids: selectedStages,
         stall_reasons: selectedReasons,
         action_mode: actionMode,
+        ...(periodStart ? { period_start: periodStart } : {}),
+        ...(periodEnd ? { period_end: periodEnd } : {}),
+      }
+
+      if (periodStart && periodEnd && periodEnd < periodStart) {
+        toast.error("Data final anterior à inicial")
+        setPhase("config")
+        return
       }
 
       setLoadingMsg(`Analisando conversas...`)
@@ -223,7 +237,7 @@ export function DealInspectorDialog({
       toast.error(e.message ?? "Erro ao executar Deal Inspector")
       setPhase("config")
     }
-  }, [stalledDays, historyDays, includeClosed, selectedStages, selectedReasons, actionMode])
+  }, [stalledDays, historyDays, includeClosed, selectedStages, selectedReasons, actionMode, periodStart, periodEnd])
 
   const handleCreateTask = async (insight: InsightResult) => {
     const dueAt = new Date()
@@ -308,6 +322,29 @@ export function DealInspectorDialog({
                   />
                 </div>
               </div>
+              {/* Período de escolha dos leads: silêncio iniciado entre as datas */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Silêncio iniciado de</Label>
+                  <Input
+                    type="date"
+                    value={periodStart}
+                    onChange={(e) => setPeriodStart(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Silêncio iniciado até</Label>
+                  <Input
+                    type="date"
+                    value={periodEnd}
+                    onChange={(e) => setPeriodEnd(e.target.value)}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Opcional — filtra leads cuja última mensagem está entre as datas (fim incluso).
+                Vazio = sem limite de período.
+              </p>
             </div>
 
             <Separator />

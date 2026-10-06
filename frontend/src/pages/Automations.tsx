@@ -16,11 +16,14 @@ import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
 import { cn } from "@/lib/utils"
-import type { AutomationRule, AutomationExecution } from "@/lib/types"
+import type { AutomationRule, AutomationExecution, IdleWatchdogSettings } from "@/lib/types"
+import { useAuth } from "@/hooks/use-auth"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Dialog,
   DialogContent,
@@ -252,6 +255,140 @@ function ExecutionHistoryDialog({
 // Main Automations Page
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Watchdog — emissor de oportunidades paradas (cron horário, 058)
+// ---------------------------------------------------------------------------
+
+function WatchdogCard() {
+  const { profile } = useAuth()
+  const isAdmin = profile?.role === "admin"
+  const [settings, setSettings] = useState<IdleWatchdogSettings | null>(null)
+  const [savingKey, setSavingKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    supabase
+      .from("idle_watchdog_settings")
+      .select("*")
+      .order("created_at")
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => setSettings((data as IdleWatchdogSettings) ?? null))
+  }, [])
+
+  async function save(patch: Partial<IdleWatchdogSettings>, key: string) {
+    if (!settings) return
+    setSavingKey(key)
+    try {
+      const { data, error } = await supabase
+        .from("idle_watchdog_settings")
+        .update(patch)
+        .eq("id", settings.id)
+        .select()
+        .single()
+      if (error) throw error
+      setSettings(data as IdleWatchdogSettings)
+      toast.success("Watchdog salvo")
+    } catch (err: any) {
+      toast.error(err?.message ?? "Falha ao salvar")
+    } finally {
+      setSavingKey(null)
+    }
+  }
+
+  if (!settings) return null
+
+  return (
+    <Card className="border-dashed">
+      <CardContent className="space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold">Watchdog de leads parados</h3>
+            <Badge variant={settings.is_active ? "default" : "outline"}>
+              {settings.is_active ? "Ativo" : "Inativo"}
+            </Badge>
+          </div>
+          <Button
+            variant={settings.is_active ? "outline" : "default"}
+            size="sm"
+            disabled={!isAdmin || savingKey === "is_active"}
+            onClick={() => save({ is_active: !settings.is_active }, "is_active")}
+          >
+            {savingKey === "is_active" ? "..." : settings.is_active ? "Desativar" : "Ativar"}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          A cada hora varre <b>oportunidades abertas sem atividade</b> e dispara a regra
+          {" "}<b>Oportunidade Parada - Follow-up</b>, que cria a tarefa de retomar o contato na
+          Agenda. Uma emissão por episódio de paralisia — a tarefa não duplica enquanto o lead
+          continua parado; se ele voltar a interagir, uma nova paralisia emite de novo.
+        </p>
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="space-y-1">
+            <Label className="text-xs">Parado há no mínimo (dias)</Label>
+            <Input
+              type="number"
+              min={3}
+              className="h-8"
+              disabled={!isAdmin || savingKey === "idle_days_min"}
+              defaultValue={settings.idle_days_min}
+              onBlur={(e) => {
+                const v = Math.max(3, parseInt(e.target.value, 10) || 3)
+                if (v !== settings.idle_days_min) save({ idle_days_min: v }, "idle_days_min")
+              }}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Período — de (início)</Label>
+            <Input
+              type="date"
+              className="h-8"
+              disabled={!isAdmin || savingKey === "period"}
+              value={settings.period_start ?? ""}
+              onChange={(e) => {
+                const v = e.target.value || null
+                // Início depois do fim existente → limpa o fim (evita check constraint).
+                if (v && settings.period_end && v > settings.period_end) {
+                  save({ period_start: v, period_end: null }, "period")
+                } else {
+                  save({ period_start: v }, "period")
+                }
+              }}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Período — até (fim)</Label>
+            <Input
+              type="date"
+              className="h-8"
+              disabled={!isAdmin || savingKey === "period"}
+              value={settings.period_end ?? ""}
+              onChange={(e) => {
+                const v = e.target.value || null
+                // Fim antes do início existente → limpa o início (evita check constraint).
+                if (v && settings.period_start && v < settings.period_start) {
+                  save({ period_end: v, period_start: null }, "period")
+                } else {
+                  save({ period_end: v }, "period")
+                }
+              }}
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          O período escolhe os leads: só entram oportunidades cuja <b>última atividade</b>
+          (mensagem do contato ou movimentação do card) está entre as datas — inclusive o fim.
+          Vazio = todos, contínuo. Use o período para resgatar um lote antigo (ex.: leads que
+          pararam em setembro) sem mexer nos demais.
+        </p>
+        {!isAdmin && (
+          <p className="text-xs text-amber-600">Somente administradores alteram o watchdog.</p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function AutomationsPage() {
   const [rules, setRules] = useState<AutomationRule[]>([])
   const [loading, setLoading] = useState(true)
@@ -312,6 +449,9 @@ export default function AutomationsPage() {
       </header>
 
       <div className="flex-1 overflow-auto p-6">
+        <div className="mb-4">
+          <WatchdogCard />
+        </div>
         {loading ? (
           <div className="space-y-3">
             {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full" />)}

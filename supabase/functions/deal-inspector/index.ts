@@ -110,8 +110,19 @@ async function findCandidates(supabase: any, params: any, userId: string) {
   cutoffDate.setDate(cutoffDate.getDate() - params.stalled_days);
   const cutoff = cutoffDate.toISOString();
 
+  // Período opcional (de/até): escolhe os leads pela data da ÚLTIMA mensagem
+  // — "silêncio iniciado entre essas datas". Fim incluso (dia inteiro).
+  const dayStartIso = (d: string) => {
+    const [y, m, day] = String(d).split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, day)).toISOString();
+  };
+  const dayEndIso = (d: string) => {
+    const [y, m, day] = String(d).split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, day + 1)).toISOString(); // exclusivo
+  };
+
   // 1. Get ALL stalled conversations with at least 1 inbound message
-  const { data: convs } = await supabase
+  let convQuery = supabase
     .from("conversations")
     .select(`
       id, contact_id, last_message_at,
@@ -119,6 +130,10 @@ async function findCandidates(supabase: any, params: any, userId: string) {
     `)
     .lt("last_message_at", cutoff)
     .not("contact_id", "is", null);
+  if (params.period_start) convQuery = convQuery.gte("last_message_at", dayStartIso(params.period_start));
+  if (params.period_end) convQuery = convQuery.lt("last_message_at", dayEndIso(params.period_end));
+
+  const { data: convs } = await convQuery;
 
   if (!convs || convs.length === 0) return candidates;
 
@@ -297,6 +312,18 @@ Deno.serve(async (req) => {
     // Validate required params
     if (typeof params.stalled_days !== "number" || params.stalled_days < 1) {
       return jsonResponse(400, { error: "stalled_days required (min 1)" });
+    }
+
+    // Período opcional (de/até) para escolher os leads — validação básica.
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (params.period_start && !dateRe.test(String(params.period_start))) {
+      return jsonResponse(400, { error: "period_start inválido (use AAAA-MM-DD)" });
+    }
+    if (params.period_end && !dateRe.test(String(params.period_end))) {
+      return jsonResponse(400, { error: "period_end inválido (use AAAA-MM-DD)" });
+    }
+    if (params.period_start && params.period_end && String(params.period_end) < String(params.period_start)) {
+      return jsonResponse(400, { error: "period_end anterior ao period_start" });
     }
 
     const apiKey = await getApiKey(supabase);

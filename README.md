@@ -132,10 +132,19 @@ npm --prefix frontend run lint
 CI no GitHub Actions (`.github/workflows/ci.yml`): testes Deno, type-check das
 Edge Functions, lint e build do frontend em cada push/PR.
 
+- **Watchdog de leads parados**: emissor `OPPORTUNITY_IDLE` no cron horário
+  (`automation-engine` com `event=WATCHDOG_IDLE`, token interno) varre
+  oportunidades abertas sem atividade e dispara a regra semeadada
+  "Oportunidade Parada - Follow-up" — config em **Automações → Watchdog**
+  (dias mínimos + período de/até para escolher os leads; uma emissão por
+  episódio de paralisia). O Deal Inspector também aceita período de/até
+  (data da última mensagem) para revisão assistida com IA.
+
 ## Dívida conhecida / próximos passos
 
 - Atualizações **majors** pendentes (avisadas pelo `npm audit`): vite 5→8 e
   react-router 6→7 (com testes), em branch dedicada.
 - `evolution-proxy` com ~1.7k linhas — dividir em módulos na próxima mudança grande.
-- Regras de automação fora `MESSAGE_RECEIVED`/`FIRST_MESSAGE_RECEIVED` ainda não
-  têm emissor (ex.: `OPPORTUNITY_STAGE_CHANGED`, `TASK_OVERDUE` via cron).
+- Regras de automação fora `MESSAGE_RECEIVED`/`FIRST_MESSAGE_RECEIVED`/`OPPORTUNITY_IDLE`
+  ainda não têm emissor (ex.: `OPPORTUNITY_STAGE_CHANGED`, `TASK_OVERDUE`, `TASK_DUE`,
+  `FOLLOWUP_DUE` via cron).

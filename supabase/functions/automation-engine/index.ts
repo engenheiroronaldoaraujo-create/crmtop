@@ -682,16 +682,71 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
-    if (!timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET)) {
-      return jsonResponse(401, { error: "unauthorized" });
-    }
-
-    const payload = await req.json();
-    const event = payload.event as string;
+    const payload = await req.json().catch(() => ({}));
+    const event = String(payload?.event ?? "");
     const data = payload.data as Record<string, unknown>;
     const instanceName = payload.instance as string;
 
     const supabase = serviceClient();
+
+    // Autorização: token do webhook (query ?token=WEBHOOK_SECRET) — caminho
+    // das mensagens — OU token interno do pg_cron no body, aceito SOMENTE
+    // para event = WATCHDOG_IDLE (o cron não tem o segredo de env; o token
+    // vive em app_secrets e falha fechado se ausente/diferente).
+    let authorized = timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET);
+    if (!authorized && event === "WATCHDOG_IDLE") {
+      const internalToken = String(payload?.internal_token ?? "").trim();
+      if (internalToken) {
+        const { data: secret } = await supabase
+          .from("app_secrets")
+          .select("value")
+          .eq("key", "automation_internal_token")
+          .maybeSingle();
+        const stored = secret?.value;
+        authorized = Boolean(stored) && timingSafeEqual(internalToken, stored!);
+      }
+    }
+    if (!authorized) {
+      return jsonResponse(401, { error: "unauthorized" });
+    }
+
+    // Watchdog (pg_cron, 058_idle_watchdog.sql): varre oportunidades paradas
+    // e dispara as regras OPPORTUNITY_IDLE — o emissor que faltava.
+    if (event === "WATCHDOG_IDLE") {
+      const { data: candidates, error } = await supabase.rpc("idle_watchdog_candidates", {
+        p_limit: 100,
+      });
+      if (error) {
+        console.error("IDLE_WATCHDOG_CANDIDATES_FAILED", error.message);
+        return jsonResponse(500, { error: "candidates failed" });
+      }
+      const rows = (candidates ?? []) as {
+        r_opportunity_id: string;
+        r_contact_id: string;
+        r_idle_days: number;
+        r_idle_since: string;
+      }[];
+      let emitted = 0;
+      for (const c of rows) {
+        try {
+          await processTrigger(supabase, {
+            event_type: "OPPORTUNITY_IDLE",
+            entity_type: "opportunity",
+            entity_id: c.r_opportunity_id,
+            entity_data: {
+              idle_days: c.r_idle_days,
+              status: "open",
+              idle_since: c.r_idle_since,
+              contact_id: c.r_contact_id,
+            },
+          });
+          emitted++;
+        } catch (e) {
+          console.error("IDLE_WATCHDOG_EMIT_FAILED", c.r_opportunity_id, String(e));
+        }
+      }
+      return jsonResponse(200, { ok: true, event, candidates: rows.length, emitted });
+    }
 
     // Chamado pelo evolution-webhook com payload estruturado (a mensagem já
     // foi persistida quando a função é invocada).

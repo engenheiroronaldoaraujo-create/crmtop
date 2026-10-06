@@ -347,6 +347,20 @@ export type OpportunityTag = {
 }
 
 // ---------------------------------------------------------------------------
+// Watchdog de oportunidades paradas (emissor OPPORTUNITY_IDLE)
+// ---------------------------------------------------------------------------
+
+export type IdleWatchdogSettings = {
+  id: string
+  is_active: boolean
+  idle_days_min: number
+  period_start: string | null
+  period_end: string | null
+  created_at: string
+  updated_at: string
+}
+
+// ---------------------------------------------------------------------------
 // Automations
 // ---------------------------------------------------------------------------
 
