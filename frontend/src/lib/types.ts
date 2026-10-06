@@ -259,6 +259,63 @@ export type CadenceEnrollment = {
 }
 
 // ---------------------------------------------------------------------------
+// Régua de follow-up sem resposta (noreply)
+// ---------------------------------------------------------------------------
+
+export type NoreplySettings = {
+  id: string
+  is_active: boolean
+  business_hours_only: boolean
+  skip_weekends: boolean
+  restart_after_reply: boolean
+  exhaust_grace_hours: number
+  task_on_exhaust: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type NoreplyAttempt = {
+  id: string
+  attempt_number: number
+  delay_hours: number
+  template_id: string | null
+  message_text: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  // Joined fields
+  template?: MessageTemplate | null
+}
+
+export type NoreplyPipelineConfig = {
+  id: string
+  pipeline_id: string
+  target_stage_id: string | null
+  is_enabled: boolean
+  created_at: string
+  updated_at: string
+  // Joined fields
+  pipeline?: Pipeline | null
+  target_stage?: PipelineStage | null
+}
+
+export type NoreplyState = {
+  id: string
+  conversation_id: string
+  contact_id: string
+  opportunity_id: string | null
+  attempts_made: number
+  status: "active" | "replied" | "exhausted" | "cancelled"
+  next_check_at: string | null
+  next_delay_hours: number | null
+  last_outbound_at: string | null
+  started_at: string
+  ended_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+// ---------------------------------------------------------------------------
 // Tags
 // ---------------------------------------------------------------------------
 

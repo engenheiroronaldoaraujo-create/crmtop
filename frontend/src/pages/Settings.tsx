@@ -8,6 +8,7 @@ import SDRSettings from "@/pages/SDRSettings"
 import TemplatesSettings from "@/pages/TemplatesSettings"
 import ApkSettings from "@/pages/ApkSettings"
 import CadencesSettings from "@/pages/CadencesSettings"
+import NoreplySettings from "@/pages/NoreplySettings"
 
 export default function SettingsPage() {
   // Aba inicial via ?tab= (o OAuth da Meta retorna em /settings?tab=whatsapp).
@@ -26,6 +27,7 @@ export default function SettingsPage() {
             <TabsTrigger value="templates">Templates</TabsTrigger>
             <TabsTrigger value="app">App Android</TabsTrigger>
             <TabsTrigger value="cadences">Cadências</TabsTrigger>
+            <TabsTrigger value="noreply">Follow-up sem resposta</TabsTrigger>
             <TabsTrigger value="ai">Inteligência Artificial</TabsTrigger>
             <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
@@ -43,6 +45,9 @@ export default function SettingsPage() {
           </TabsContent>
           <TabsContent value="cadences">
             <CadencesSettings />
+          </TabsContent>
+          <TabsContent value="noreply">
+            <NoreplySettings />
           </TabsContent>
           <TabsContent value="ai">
             <AISettings />

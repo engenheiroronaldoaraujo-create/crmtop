@@ -204,6 +204,18 @@ async function recordOutboundMessage(
       p_inbound: false,
     });
     if (error) console.error("BUMP_CONVERSATION_FAILED", error.message);
+
+    // Régua "sem resposta": mensagem manual do SDR reinicia o relógio da régua
+    // ativa (a próxima tentativa é reagendada a partir de agora). As tentativas
+    // NÃO zeram — mensagem manual não devolve ao lead um ciclo novo. Envios
+    // com falha não tocam a régua (o lead não recebeu nada).
+    if (status === "sent") {
+      const { error: nrErr } = await supabase.rpc("noreply_touch", {
+        p_conversation_id: conversationId,
+        p_sent_at: msg.sentAt,
+      });
+      if (nrErr) console.error("NOREPLY_TOUCH_FAILED", nrErr.message);
+    }
   })();
 
   return { conversationId, messageId: msgRow?.id ?? null };
@@ -923,6 +935,33 @@ async function actionSendAudio(
       console.error("EVOLUTION_AUDIO_TRANSCRIBE_ERROR", err);
     }
   })();
+
+  // A resposta crua do Evolution é o dado que faltava para diagnosticar. Não
+  // existe leitura de log daqui (a CLI não expõe), então gravamos ela no
+  // activity_log — legível via SQL. Mantida mesmo no sucesso: o modo de falha
+  // é "200 com key, mensagem nunca renderizada", que o status não captura.
+  try {
+    await supabase.from("activity_log").insert({
+      entity_type: "diagnostic",
+      entity_id: messageId ?? null,
+      action: "EVOLUTION_AUDIO_RESPONSE",
+      actor_id: user.id,
+      new_data: {
+        status: res.status,
+        ok: res.ok,
+        fileName,
+        declared_mime: fileType,
+        container: containerNote,
+        is_ogg: finalIsOgg,
+        target: sendTarget,
+        base64_length: mediaBase64.length,
+        evolution_id: evolutionId,
+        body: resText.slice(0, 1500),
+      },
+    });
+  } catch (err) {
+    console.error("EVOLUTION_AUDIO_DIAG_LOG_ERROR", err);
+  }
 
   return jsonResponse(200, {
     ok: true,

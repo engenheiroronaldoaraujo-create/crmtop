@@ -308,15 +308,11 @@ async function processMessage(
   const evolutionId = raw.key?.id ?? null;
   const { type, content, mediaMessage } = mapMessageType(raw);
   const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
-  // Alguns servidores Evolution enviam epoch em milissegundos; sem normalizar,
-  // `new Date(ts * 1000)` estoura RangeError e derruba o lote inteiro.
-  const tsMs = ts ? (ts > 8.64e15 ? ts / 1000 : ts) * 1000 : null;
-  const sentAt = tsMs ? new Date(tsMs).toISOString() : new Date().toISOString();
+  const sentAt = ts ? new Date(ts * 1000).toISOString() : new Date().toISOString();
 
   // Regra de negócio: manter apenas os últimos 60 dias de histórico.
   const HISTORY_CUTOFF_MS = 60 * 24 * 60 * 60 * 1000;
-  if (tsMs && tsMs < Date.now() - HISTORY_CUTOFF_MS) {
-    console.info("EVOLUTION_MESSAGE_SKIPPED_HISTORY_CUTOFF", evolutionId, sentAt);
+  if (ts && ts * 1000 < Date.now() - HISTORY_CUTOFF_MS) {
     return;
   }
 
@@ -417,6 +413,20 @@ async function processMessage(
     });
   }
 
+  // Régua "sem resposta": eco outbound de mensagem enviada fora do CRM (ex.:
+  // direto do celular do SDR) reinicia o relógio da régua ativa da conversa.
+  // Mensagens do próprio runner caem no dedup acima (a bolha já foi inserida
+  // pelo runner) e não chegam aqui — ele agenda a próxima checagem sozinho.
+  if (isNewMessage && fromMe) {
+    scheduleBackground((async () => {
+      const { error: nrErr } = await supabase.rpc("noreply_touch", {
+        p_conversation_id: conversationId,
+        p_sent_at: sentAt,
+      });
+      if (nrErr) console.error("NOREPLY_TOUCH_FAILED", nrErr.message);
+    })());
+  }
+
   // Enriquecimento (transcrição → SDR → automação) roda em background para o
   // webhook responder já com a mensagem persistida (evita retry/queda de
   // entrega por timeout na Evolution). Só em linha NOVA (dedup).
@@ -459,6 +469,19 @@ async function postProcessInbound(args: {
     evolutionId, type, audioBase64, audioMimetype, hasPhone,
   } = args;
   let sdrContent = args.content;
+
+  // Régua "sem resposta": o lead respondeu — encerra o ciclo ativo. Se a
+  // resposta vem APÓS a régua esgotada, apenas registra (activity_log) para
+  // o humano revisar o card no funil — sem auto-retorno de estágio.
+  try {
+    const { data: nrResult } = await supabase.rpc("noreply_mark_replied", {
+      p_conversation_id: conversationId,
+      p_message_id: messageId,
+    });
+    if (nrResult && nrResult !== "none") console.info("NOREPLY_REPLY_DETECTED", nrResult);
+  } catch (e) {
+    console.warn("NOREPLY_MARK_REPLIED_FAILED", String(e));
+  }
 
   // Transcrição de áudio inbound (best-effort, só em linha nova).
   if (type === "audio" && audioBase64 && messageId) {
@@ -976,16 +999,9 @@ async function handleMessages(
   const BATCH = 10;
   for (let i = 0; i < list.length; i += BATCH) {
     const chunk = list.slice(i, i + BATCH);
-    const results = await Promise.allSettled(
+    await Promise.allSettled(
       chunk.map((raw) => processMessage(supabase, instance.id, instanceName, raw)),
     );
-    // Sem log aqui uma exceção em processMessage descarta a mensagem com
-    // resposta 200 e zero rastro.
-    for (const r of results) {
-      if (r.status === "rejected") {
-        console.error("EVOLUTION_MESSAGE_PROCESS_FAILED", r.reason);
-      }
-    }
   }
   return jsonResponse(200, { ok: true, processed: list.length });
 }
@@ -1057,12 +1073,11 @@ Deno.serve(async (req) => {
     }
 
     const payload = await req.json();
-    const rawEvent = String(payload.event ?? "");
-    const event = rawEvent.toLowerCase();
+    const event = String(payload.event ?? "");
     const instanceName = String(payload.instance ?? "");
     // Rastro de ingestão: sem isso, quedas de entrega ficam invisíveis
     // (foi exatamente o bug do chat "perdido" das 21:07).
-    console.info("EVOLUTION_EVENT_RECEIVED", rawEvent, instanceName);
+    console.info("EVOLUTION_EVENT_RECEIVED", event, instanceName);
     const supabase = serviceClient();
 
     switch (event) {
@@ -1077,7 +1092,7 @@ Deno.serve(async (req) => {
       case "contacts.upsert":
         return await handleContacts(supabase, payload.data);
       default:
-        return jsonResponse(200, { ok: true, ignored: rawEvent });
+        return jsonResponse(200, { ok: true, ignored: event });
     }
   } catch (err) {
     console.error("EVOLUTION_WEBHOOK_ERROR", err);
