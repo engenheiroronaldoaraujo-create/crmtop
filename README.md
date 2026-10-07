@@ -29,6 +29,8 @@ SDR IA (com transcrição de áudio), templates de resposta e dashboard.
 
 ### Follow-up sem resposta (régua de recuperação)
 
+> 📖 **Manual completo de instruções** (o que é automático, onde o humano atua e o que a IA faz): veja [`MANUAL_FOLLOWUP.md`](./MANUAL_FOLLOWUP.md).
+
 Fluxo: o SDR responde o lead e a conversa morre em silêncio → o
 `noreply-runner` (pg_cron, 10 min) detecta via `conversations.last_message_inbound
 = false` e envia as mensagens de re-engajamento configuradas por tentativa
