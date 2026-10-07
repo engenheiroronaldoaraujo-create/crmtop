@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Clock, MessageCircleQuestion, Plus, Timer, Trash2 } from "lucide-react"
+import { Clock, History, MessageCircleQuestion, Plus, Timer, Trash2 } from "lucide-react"
 
 import {
   useNoreplyAttempts,
@@ -116,6 +116,8 @@ export default function NoreplySettings() {
   const templates = useActiveTemplates()
 
   const [savingKey, setSavingKey] = useState<string | null>(null)
+  const [backfillDays, setBackfillDays] = useState(30)
+  const [backfillRunning, setBackfillRunning] = useState(false)
 
   if (!isAdmin) {
     return <p className="text-sm text-muted-foreground">Área restrita a administradores.</p>
@@ -169,6 +171,43 @@ export default function NoreplySettings() {
       await remove(id)
     } catch (err: any) {
       toast.error(err?.message ?? "Falha ao excluir tentativa")
+    }
+  }
+
+  async function handleBackfill() {
+    if (!settings?.is_active) {
+      toast.error("Ative a régua antes de rodar o backfill")
+      return
+    }
+    const days = Math.min(365, Math.max(1, backfillDays || 30))
+    const firstDelay = attempts.find((a) => a.is_active)?.delay_hours ?? 24
+    if (
+      !window.confirm(
+        `Matricular leads com silêncio de até ${days} dias na régua?\n\n` +
+          `A 1ª tentativa é agendada para daqui a ${firstDelay}h (horário comercial) — ` +
+          `sem rajada: o runner envia no máximo 50 por execução.\n\n` +
+          `Contatos com opt-out, SDR IA ativo e cards no estágio de destino ficam de fora.`,
+      )
+    ) {
+      return
+    }
+    setBackfillRunning(true)
+    try {
+      const { data, error } = await supabase.rpc("noreply_backfill", {
+        p_days: days,
+        p_limit: 200,
+      })
+      if (error) throw error
+      const n = Number(data ?? 0)
+      toast.success(
+        n > 0
+          ? `${n} conversa(s) matriculada(s) — primeira tentativa em ~${firstDelay}h`
+          : "Nenhuma conversa nova para matricular neste período",
+      )
+    } catch (err: any) {
+      toast.error(err?.message ?? "Falha no backfill")
+    } finally {
+      setBackfillRunning(false)
     }
   }
 
@@ -386,6 +425,53 @@ export default function NoreplySettings() {
                   ))}
                 </div>
               )}
+            </CardContent>
+          </Card>
+
+          {/* Backfill de leads antigos */}
+          <Card>
+            <CardContent className="space-y-3 p-4">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-muted-foreground" />
+                <h3 className="text-sm font-semibold">Recuperar leads antigos</h3>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                A régua normal só entra com silêncios de até ~14 dias (anti-rajada). Este botão
+                matricula também leads antigos cujo <b>silêncio seja de até a janela</b> abaixo,
+                pulando o horizonte. A 1ª tentativa é agendada a partir de <b>agora</b> (não do
+                passado) e segue o ritmo normal: máx. 50 envios por execução, horário comercial e
+                fim de semana respeitados. Opt-out, SDR IA ativo e card no estágio de destino
+                ficam de fora automaticamente.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Silêncio de até (dias)</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={365}
+                    className="w-32"
+                    value={backfillDays}
+                    onChange={(e) =>
+                      setBackfillDays(Math.min(365, Math.max(1, parseInt(e.target.value, 10) || 30)))
+                    }
+                  />
+                </div>
+                <Button onClick={handleBackfill} disabled={backfillRunning || !settings?.is_active}>
+                  {backfillRunning ? (
+                    "Matriculando..."
+                  ) : (
+                    <>
+                      <History className="mr-2 h-4 w-4" /> Recuperar agora
+                    </>
+                  )}
+                </Button>
+                {!settings?.is_active && (
+                  <span className="text-xs text-muted-foreground">
+                    Ative a régua acima para usar o backfill.
+                  </span>
+                )}
+              </div>
             </CardContent>
           </Card>
 
