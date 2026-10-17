@@ -999,6 +999,160 @@ async function actionSetWebhook(
   return jsonResponse(200, { ok: true, events: WEBHOOK_EVENTS });
 }
 
+// ---------------------------------------------------------------------------
+// Grupos (@g.us) — posts programados + DM a quem comentar
+// ---------------------------------------------------------------------------
+
+/** Lista os grupos da instância (picker da página /groups). */
+async function actionListGroups(
+  supabase: Supabase,
+  body: { instance_id?: string },
+): Promise<Response> {
+  const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  const { res, data, text } = await callEvolution(
+    `/group/fetchAllGroups/${instance_name}?getParticipants=false`,
+    { method: "GET" },
+  );
+  if (!res.ok) {
+    return jsonResponse(res.status, { error: `group list failed: ${text.slice(0, 300)}` });
+  }
+  const raw = Array.isArray(data) ? data : (data?.groups ?? data?.data ?? []);
+  const groups = (Array.isArray(raw) ? raw : [])
+    .map((g: any) => ({
+      id: String(g?.id ?? g?.ID ?? ""),
+      name: g?.subject ?? g?.name ?? null,
+      size: typeof g?.size === "number"
+        ? g.size
+        : (Array.isArray(g?.participants) ? g.participants.length : null),
+    }))
+    .filter((g) => g.id.endsWith("@g.us"));
+  return jsonResponse(200, { groups });
+}
+
+function groupMediaType(mime: string): "image" | "video" | "audio" | "document" {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return "document";
+}
+
+/** Cria um post programado (texto + mídia opcional). Só admin. */
+async function actionGroupPostCreate(
+  supabase: Supabase,
+  user: { id: string },
+  formData: FormData | null,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const get = (k: string): string => {
+    if (formData) return String(formData.get(k) ?? "");
+    return String(body[k] ?? "");
+  };
+  const instance_id = get("instance_id");
+  const group_jid = get("group_jid").trim();
+  const group_name = get("group_name").trim() || null;
+  const content = get("content");
+  const scheduled_at = get("scheduled_at");
+  if (!instance_id) return jsonResponse(400, { error: "instance_id is required" });
+  if (!group_jid.endsWith("@g.us")) return jsonResponse(400, { error: "group_jid inválido (esperado @g.us)" });
+  if (!scheduled_at || Number.isNaN(Date.parse(scheduled_at))) {
+    return jsonResponse(400, { error: "scheduled_at inválido" });
+  }
+  const file = formData?.get("file") as Blob | null;
+  if (!content.trim() && (!file || file.size === 0)) {
+    return jsonResponse(400, { error: "informe texto ou anexo" });
+  }
+  await getInstanceName(supabase, instance_id); // 404 se instância inexistente
+
+  const num = (v: string, fallback: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  let media_url: string | null = null;
+  let media_type: string | null = null;
+  if (file && file.size > 0) {
+    if (file.size > 20 * 1024 * 1024) {
+      return jsonResponse(400, { error: "arquivo muito grande (máx. 20 MB)" });
+    }
+    const fileType = file.type ?? "application/octet-stream";
+    const ext = extFromMimetype(fileType, "bin");
+    const objectPath = `group-posts/${crypto.randomUUID()}.${ext}`;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const { error: uploadError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(objectPath, bytes, { contentType: fileType, upsert: true });
+    if (uploadError) return jsonResponse(500, { error: `falha ao salvar mídia: ${uploadError.message}` });
+    media_url = objectPath;
+    media_type = groupMediaType(fileType);
+  }
+
+  const { data: post, error } = await supabase.from("group_posts").insert({
+    instance_id,
+    group_jid,
+    group_name,
+    content,
+    media_url,
+    media_type,
+    scheduled_at,
+    window_hours: Math.min(720, Math.max(1, num(get("window_hours"), 72))),
+    dm_delay_min_s: Math.max(0, num(get("dm_delay_min_s"), 300)),
+    dm_delay_max_s: Math.max(0, num(get("dm_delay_max_s"), 900)),
+    dm_template: get("dm_template") ||
+      "Oi {{contact.name}}! Vi que você comentou no grupo e quis te chamar aqui no privado. Como posso te ajudar?",
+    pacing_seconds: Math.min(300, Math.max(0, num(get("pacing_seconds"), 20))),
+    created_by: user.id,
+  }).select().single();
+  if (error) return jsonResponse(400, { error: error.message });
+  return jsonResponse(200, { ok: true, post });
+}
+
+/** Cancela um post (e as DMs pendentes dele). Só admin. */
+async function actionGroupPostCancel(
+  supabase: Supabase,
+  body: { post_id?: string },
+): Promise<Response> {
+  if (!body.post_id) return jsonResponse(400, { error: "post_id is required" });
+  const { data: post } = await supabase
+    .from("group_posts")
+    .select("id, status")
+    .eq("id", body.post_id)
+    .maybeSingle();
+  if (!post) return jsonResponse(404, { error: "post não encontrado" });
+  if (!["scheduled", "publishing", "published", "failed"].includes(post.status)) {
+    return jsonResponse(400, { error: `post em estado ${post.status} não pode ser cancelado` });
+  }
+  await supabase.from("group_posts").update({ status: "cancelled" }).eq("id", post.id);
+  await supabase
+    .from("group_post_engagements")
+    .update({ dm_status: "cancelled" })
+    .eq("post_id", post.id)
+    .in("dm_status", ["pending", "waiting"]);
+  await supabase.rpc("recalc_group_post_stats", { p_post_id: post.id });
+  return jsonResponse(200, { ok: true });
+}
+
+/** Cancela uma DM pendente específica. Só admin. */
+async function actionGroupPostDmCancel(
+  supabase: Supabase,
+  body: { engagement_id?: string },
+): Promise<Response> {
+  if (!body.engagement_id) return jsonResponse(400, { error: "engagement_id is required" });
+  const { data: eng } = await supabase
+    .from("group_post_engagements")
+    .select("id, post_id, dm_status")
+    .eq("id", body.engagement_id)
+    .maybeSingle();
+  if (!eng) return jsonResponse(404, { error: "engajamento não encontrado" });
+  if (!["pending", "waiting"].includes(eng.dm_status)) {
+    return jsonResponse(400, { error: `DM em estado ${eng.dm_status} não pode ser cancelada` });
+  }
+  await supabase
+    .from("group_post_engagements")
+    .update({ dm_status: "cancelled" })
+    .eq("id", eng.id);
+  await supabase.rpc("recalc_group_post_stats", { p_post_id: eng.post_id });
+  return jsonResponse(200, { ok: true });
+}
+
 // Enables syncFullHistory on an existing instance so the ~60 day history is
 // pulled on the next connection (coverage decided by WhatsApp). Best effort.
 async function actionSyncHistory(
@@ -1934,6 +2088,9 @@ const ADMIN_ACTIONS = new Set([
   "sync-names",
   "sync-media",
   "link-conversation-phone",
+  "group-post-create",
+  "group-post-cancel",
+  "group-post-dm-cancel",
   "debug-chats",
   "debug-find-messages",
 ]);
@@ -2022,6 +2179,21 @@ Deno.serve(async (req) => {
       case "link-conversation-phone": {
         await requireAdmin(user);
         return await actionLinkConversationPhone(supabase, body);
+      }
+      case "list-groups": {
+        return await actionListGroups(supabase, body);
+      }
+      case "group-post-create": {
+        await requireAdmin(user);
+        return await actionGroupPostCreate(supabase, user, formData, body);
+      }
+      case "group-post-cancel": {
+        await requireAdmin(user);
+        return await actionGroupPostCancel(supabase, body);
+      }
+      case "group-post-dm-cancel": {
+        await requireAdmin(user);
+        return await actionGroupPostDmCancel(supabase, body);
       }
       case "debug-chats": {
         await requireAdmin(user);

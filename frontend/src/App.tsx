@@ -18,6 +18,7 @@ const AgendaPage = lazy(() => import("@/pages/Agenda"))
 const AutomationsPage = lazy(() => import("@/pages/Automations"))
 const DashboardPage = lazy(() => import("@/pages/Dashboard"))
 const CampaignsPage = lazy(() => import("@/pages/Campaigns"))
+const GroupsPage = lazy(() => import("@/pages/Groups"))
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
@@ -89,6 +90,18 @@ function AppRoutes() {
             <RequireAdmin>
               <Layout>
                 <CampaignsPage />
+              </Layout>
+            </RequireAdmin>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/groups"
+        element={
+          <ProtectedRoute>
+            <RequireAdmin>
+              <Layout>
+                <GroupsPage />
               </Layout>
             </RequireAdmin>
           </ProtectedRoute>

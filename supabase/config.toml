@@ -411,6 +411,12 @@ verify_jwt = false
 [functions.evolution-webhook]
 verify_jwt = false
 
+[functions.group-publisher]
+verify_jwt = false
+
+[functions.group-dm-runner]
+verify_jwt = false
+
 [functions.noreply-runner]
 verify_jwt = false
 

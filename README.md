@@ -24,6 +24,7 @@ SDR IA (com transcrição de áudio), templates de resposta e dashboard.
 | Agenda | `/agenda` | Tarefas, follow-ups, reuniões |
 | Automações | `/automations` | Regras disparadas por eventos (admin) |
 | Dashboard | `/dashboard` | Métricas comerciais |
+| Grupos | `/groups` | Posts programados em grupos + DM a quem comentar (admin) |
 | Configurações | `/settings` | Usuários, WhatsApp, Templates, Cadências, Follow-up sem resposta, IA, SDR IA (admin) |
 | Minha conta | `/account` | Troca de senha |
 
@@ -59,6 +60,21 @@ pipeline) com tarefa de revisão para o humano analisar e excluir/ganhar.
 texto alimenta o SDR (`sdr-engine`), os resumos/insights (`ai-service`) e o
 inspector de deals (`deal-inspector`). Configuração em **Configurações → IA →
 Transcrição de Áudios** (modelo + liga/desliga). Coluna: `messages.transcription`.
+
+### Posts em grupos + DM a quem comentar
+
+**Configurações → não; página própria `/groups`** (admin): agenda texto/mídia num grupo
+WhatsApp (`@g.us`, via Evolution — a API oficial Meta/Zernio não suporta grupos), com
+data/hora, janela de engajamento (default 72h) e template de DM (`{{contact.name}}`).
+
+Publicado o post (`group-publisher`, pg_cron 5 min), o webhook marca quem comentar
+(**reply ao post OU qualquer mensagem na janela**, 1 por post+contato) em
+`group_post_engagements` com `dm_due_at` = comentário + jitter (default 5–15 min).
+O `group-dm-runner` (pg_cron 5 min) envia a DM 1:1 pela mesma instância, com pacing
+(1/20s, teto 50/run). A DM **entra na fila**: SDR IA ativo, régua noreply ativa,
+opt-out, horário comercial e fim de semana adiam ou pulam — nunca envia junto.
+Falha de envio retenta (+30min, 3x); claim atômico (`FOR UPDATE SKIP LOCKED`) nos
+dois runners impede envio duplicado. Auditoria em `activity_log` (`GROUP_POST:*`).
 
 ### Confiabilidade do webhook
 

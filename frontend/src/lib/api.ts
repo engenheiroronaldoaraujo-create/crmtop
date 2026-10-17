@@ -144,6 +144,49 @@ export function proxyLinkConversationPhone(conversation_id: string, phone: strin
   })
 }
 
+// ----- Grupos (@g.us) — posts programados + DM a quem comentar -----
+
+export function proxyListGroups(instance_id: string) {
+  return postJson("evolution-proxy", { action: "list-groups", instance_id })
+}
+
+export function groupPostCreate(input: {
+  instance_id: string
+  group_jid: string
+  group_name?: string | null
+  content: string
+  scheduled_at: string
+  window_hours?: number
+  dm_delay_min_s?: number
+  dm_delay_max_s?: number
+  dm_template?: string
+  pacing_seconds?: number
+  file?: File | null
+}) {
+  const formData = new FormData()
+  formData.append("action", "group-post-create")
+  formData.append("instance_id", input.instance_id)
+  formData.append("group_jid", input.group_jid)
+  formData.append("group_name", input.group_name ?? "")
+  formData.append("content", input.content)
+  formData.append("scheduled_at", input.scheduled_at)
+  if (input.window_hours !== undefined) formData.append("window_hours", String(input.window_hours))
+  if (input.dm_delay_min_s !== undefined) formData.append("dm_delay_min_s", String(input.dm_delay_min_s))
+  if (input.dm_delay_max_s !== undefined) formData.append("dm_delay_max_s", String(input.dm_delay_max_s))
+  if (input.dm_template !== undefined) formData.append("dm_template", input.dm_template)
+  if (input.pacing_seconds !== undefined) formData.append("pacing_seconds", String(input.pacing_seconds))
+  if (input.file) formData.append("file", input.file, input.file.name)
+  return postForm("evolution-proxy", formData)
+}
+
+export function groupPostCancel(post_id: string) {
+  return postJson("evolution-proxy", { action: "group-post-cancel", post_id })
+}
+
+export function groupPostDmCancel(engagement_id: string) {
+  return postJson("evolution-proxy", { action: "group-post-dm-cancel", engagement_id })
+}
+
 /**
  * Envia uma gravação do vendedor como bolha de voz.
  * `durationMs` é medido no cliente (o Evolution não devolve duração) e

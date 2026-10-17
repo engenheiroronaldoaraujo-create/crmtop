@@ -5,6 +5,12 @@ import {
   normalizePhoneStrict,
   normalizeWhatsAppIdentity,
 } from "../_shared/evolution-identity.ts";
+import {
+  engagementDueAt,
+  extractQuotedId,
+  isGroupJid,
+  isWithinEngagementWindow,
+} from "../_shared/group-posts.ts";
 import { createLidCacheStore, resolveLidPhone } from "../_shared/lid-phone-resolver.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -79,6 +85,8 @@ interface RawMessage {
     id?: string;
     senderPn?: string;
     remoteJidAlt?: string;
+    // Em grupos (@g.us), quem enviou vem em `participant` (phone@s.whatsapp.net ou @lid).
+    participant?: string;
     // Atribuição de anúncio click-to-WhatsApp (Meta) presente na primeira
     // mensagem de conversas vindas de anúncios no Facebook/Instagram.
     advertiser?: {
@@ -111,6 +119,8 @@ interface StatusUpdate {
     id?: string;
     senderPn?: string;
     remoteJidAlt?: string;
+    // Em grupos (@g.us), quem enviou vem em `participant` (phone@s.whatsapp.net ou @lid).
+    participant?: string;
   };
   status?: number;
 }
@@ -252,6 +262,89 @@ function mapMessageType(raw: RawMessage): {
 }
 
 // ---------------------------------------------------------------------------
+// Grupos (@g.us) — engajamento em posts programados
+// ---------------------------------------------------------------------------
+
+/**
+ * Marca engajamento de quem comentou um post programado publicado: reply ao
+ * post OU qualquer mensagem dentro da janela (window_hours). 1 linha por
+ * (post, contato) — reentrega do webhook cai no dedup (ignoreDuplicates).
+ * Grupo não vira conversa/contato de funil: só registra o engajamento para
+ * a DM programada do group-dm-runner.
+ */
+async function handleGroupMessage(
+  supabase: Supabase,
+  instanceId: string,
+  groupJid: string,
+  raw: RawMessage,
+): Promise<void> {
+  const fromMe = Boolean(raw.key?.fromMe);
+  if (fromMe) return; // ecos dos nossos envios (inclusive o publish) não contam
+
+  const participant = raw.key?.participant ?? (raw as Record<string, unknown>).participant as string | undefined;
+  if (!participant) {
+    console.warn("GROUP_MESSAGE_NO_PARTICIPANT", groupJid, raw.key?.id ?? "");
+    return;
+  }
+  const identity = normalizeWhatsAppIdentity({ remoteJid: participant });
+  const { phone, lid } = identity;
+  if (!phone && !lid) return;
+
+  const { type, content } = mapMessageType(raw);
+  if (type === "unknown" && !content) return; // reações e eventos sem texto
+
+  const evolutionId = raw.key?.id ?? null;
+  const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
+  const commentedAt = ts ? new Date(ts * 1000) : new Date();
+
+  const { data: posts } = await supabase
+    .from("group_posts")
+    .select("id, published_message_id, published_at, window_hours, dm_delay_min_s, dm_delay_max_s")
+    .eq("instance_id", instanceId)
+    .eq("group_jid", groupJid)
+    .eq("status", "published")
+    .not("published_at", "is", null)
+    .limit(20);
+  if (!posts || posts.length === 0) return;
+
+  const quotedId = extractQuotedId(raw.message);
+  const rawPushName = raw.pushName ?? null;
+  const pushName = rawPushName && !/^\d{8,}$/.test(rawPushName) ? rawPushName : null;
+  const contactId = await upsertContact(supabase, phone, lid, pushName);
+
+  for (const post of posts) {
+    const publishedAt = new Date(post.published_at as string);
+    if (!isWithinEngagementWindow(publishedAt, commentedAt, post.window_hours as number)) continue;
+    const via = quotedId && post.published_message_id && quotedId === post.published_message_id
+      ? "reply"
+      : "window";
+    const { data: inserted } = await supabase.from("group_post_engagements").upsert(
+      {
+        post_id: post.id,
+        contact_id: contactId,
+        commented_at: commentedAt.toISOString(),
+        comment_message_id: evolutionId,
+        via,
+        dm_status: "pending",
+        dm_due_at: engagementDueAt(
+          commentedAt,
+          post.dm_delay_min_s as number,
+          post.dm_delay_max_s as number,
+        ).toISOString(),
+      },
+      { onConflict: "post_id, contact_id", ignoreDuplicates: true },
+    ).select("id").maybeSingle();
+    if (inserted?.id) {
+      console.info("GROUP_POST_ENGAGED", post.id, contactId, via);
+      void supabase.rpc("recalc_group_post_stats", { p_post_id: post.id }).then(
+        () => {},
+        (e: unknown) => console.error("GROUP_POST_STATS_FAILED", String(e)),
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Processamento de mensagem
 // ---------------------------------------------------------------------------
 
@@ -262,6 +355,12 @@ async function processMessage(
   raw: RawMessage,
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
+  // Grupos têm fluxo próprio (engajamento em posts programados): nunca viram
+  // conversa/contato de funil — isRelevantJid rejeita @g.us abaixo.
+  if (isGroupJid(jid)) {
+    await handleGroupMessage(supabase, instanceId, jid, raw);
+    return;
+  }
   if (!isRelevantJid(jid)) {
     // Nunca descartar em silêncio: quedas de entrega só são diagnosticáveis
     // se o drop aparecer nos logs.
