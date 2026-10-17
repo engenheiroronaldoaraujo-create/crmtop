@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { supabase } from "@/lib/supabase"
 import type { Tag } from "@/lib/types"
 
@@ -158,6 +158,7 @@ export function useOpportunityTags(opportunityId: string | null) {
 
 export function useGlobalSearch() {
   const [query, setQuery] = useState("")
+  const searchSeq = useRef(0)
   const [results, setResults] = useState<{
     contacts: any[]
     opportunities: any[]
@@ -166,18 +167,28 @@ export function useGlobalSearch() {
   const [loading, setLoading] = useState(false)
 
   const search = useCallback(async (q: string) => {
-    if (!q.trim()) {
+    const raw = q.trim()
+    if (!raw) {
       setResults({ contacts: [], opportunities: [], conversations: [] })
       return
     }
+    // PostgREST `or=` usa vírgula/parênteses como separadores e `%`/`_` como
+    // curingas: sanitize para não quebrar a query nem virar wildcard.
+    const sanitized = raw.replace(/[%_,()"'*\\]/g, "").replace(/\s+/g, " ").trim()
+    if (!sanitized) {
+      setResults({ contacts: [], opportunities: [], conversations: [] })
+      return
+    }
+    const reqId = ++searchSeq.current
     setLoading(true)
-    const pattern = `%${q.trim()}%`
+    const pattern = `%${sanitized}%`
 
     const [contactsRes, oppsRes, convsRes] = await Promise.all([
       supabase.from("contacts").select("id, name, push_name, phone, lid").or(`name.ilike.${pattern},push_name.ilike.${pattern},phone.ilike.${pattern},email.ilike.${pattern}`).limit(5),
       supabase.from("opportunities").select("id, title, status, contact:contacts(name, phone)").ilike("title", pattern).limit(5),
       supabase.from("conversations").select("id, contact:contacts(name, phone, push_name)").ilike("contact.name", pattern).limit(5),
     ])
+    if (reqId !== searchSeq.current) return
 
     setResults({
       contacts: contactsRes.data ?? [],

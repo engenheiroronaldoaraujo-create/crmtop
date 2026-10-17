@@ -50,9 +50,16 @@ import {
 
 function startOfWeek(d: Date): Date {
   const r = new Date(d)
-  r.setDate(r.getDate() - r.getDay() + 1)
+  r.setDate(r.getDate() - ((r.getDay() + 6) % 7))
   r.setHours(0, 0, 0, 0)
   return r
+}
+
+function localDateKey(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  return `${y}-${m}-${day}`
 }
 
 function addDays(d: Date, n: number): Date {
@@ -74,7 +81,7 @@ function fmtDate(iso: string): string {
 }
 
 const DAY_NAMES = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sab", "Dom"]
-const MONTH_NAMES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+const MONTH_NAMES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
 
 type ActivityItem = {
   id: string
@@ -221,7 +228,7 @@ function CreateMeetingDialog({
 }) {
   const { user } = useAuth()
   const [title, setTitle] = useState("")
-  const [opportunityId, setOpportunityId] = useState(defaultOpportunityId ?? "")
+  const [opportunityId, setOpportunityId] = useState(defaultOpportunityId || "none")
   const [assignedTo, setAssignedTo] = useState(defaultAssignee ?? user?.id ?? "")
   const [date, setDate] = useState("")
   const [startTime, setStartTime] = useState("09:00")
@@ -237,7 +244,7 @@ function CreateMeetingDialog({
   useEffect(() => {
     if (open) {
       setTitle("")
-      setOpportunityId(defaultOpportunityId ?? "")
+      setOpportunityId(defaultOpportunityId || "none")
       setAssignedTo(defaultAssignee ?? user?.id ?? "")
       setDate(new Date().toISOString().split("T")[0])
       setStartTime("09:00")
@@ -258,7 +265,7 @@ function CreateMeetingDialog({
       await onSave({
         title: title.trim(),
         contact_id: contactId || null,
-        opportunity_id: opportunityId || null,
+        opportunity_id: opportunityId === "none" ? null : (opportunityId || null),
         assigned_to: assignedTo || null,
         start_at: startAt,
         end_at: endAt,
@@ -317,7 +324,7 @@ function CreateMeetingDialog({
             <Select value={opportunityId} onValueChange={setOpportunityId}>
               <SelectTrigger><SelectValue placeholder="Nenhuma" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Nenhuma</SelectItem>
+                <SelectItem value="none">Nenhuma</SelectItem>
                 {opportunities.filter((o) => o.status === "open").map((o) => <SelectItem key={o.id} value={o.id}>{o.title}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -380,7 +387,7 @@ function CreateTaskDialog({
 }) {
   const { user } = useAuth()
   const [title, setTitle] = useState("")
-  const [opportunityId, setOpportunityId] = useState(defaultOpportunityId ?? "")
+  const [opportunityId, setOpportunityId] = useState(defaultOpportunityId || "none")
   const [assignedTo, setAssignedTo] = useState(defaultAssignee ?? user?.id ?? "")
   const [date, setDate] = useState("")
   const [time, setTime] = useState("09:00")
@@ -394,7 +401,7 @@ function CreateTaskDialog({
   useEffect(() => {
     if (open) {
       setTitle("")
-      setOpportunityId(defaultOpportunityId ?? "")
+      setOpportunityId(defaultOpportunityId || "none")
       setAssignedTo(defaultAssignee ?? user?.id ?? "")
       setDate(new Date().toISOString().split("T")[0])
       setTime("09:00")
@@ -412,7 +419,7 @@ function CreateTaskDialog({
       await onSave({
         title: title.trim(),
         contact_id: contactId || null,
-        opportunity_id: opportunityId || null,
+        opportunity_id: opportunityId === "none" ? null : (opportunityId || null),
         assigned_to: assignedTo || null,
         task_type: taskType,
         due_at: dueAt,
@@ -485,7 +492,7 @@ function CreateTaskDialog({
             <Select value={opportunityId} onValueChange={setOpportunityId}>
               <SelectTrigger><SelectValue placeholder="Nenhuma" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Nenhuma</SelectItem>
+                <SelectItem value="none">Nenhuma</SelectItem>
                 {opportunities.filter((o) => o.status === "open").map((o) => <SelectItem key={o.id} value={o.id}>{o.title}</SelectItem>)}
               </SelectContent>
             </Select>
@@ -601,11 +608,11 @@ export default function AgendaPage() {
     const map = new Map<string, ActivityItem[]>()
     for (let i = 0; i < 7; i++) {
       const d = addDays(weekStart, i)
-      const key = d.toISOString().split("T")[0]
+      const key = localDateKey(d)
       map.set(key, [])
     }
     for (const item of activities) {
-      const key = new Date(item.start_at).toISOString().split("T")[0]
+      const key = localDateKey(new Date(item.start_at))
       const arr = map.get(key)
       if (arr) arr.push(item)
     }
@@ -618,8 +625,8 @@ export default function AgendaPage() {
   }, [tasks])
 
   const todayCount = useMemo(() => {
-    const today = new Date().toISOString().split("T")[0]
-    return activities.filter((a) => new Date(a.start_at).toISOString().split("T")[0] === today).length
+    const today = localDateKey(new Date())
+    return activities.filter((a) => localDateKey(new Date(a.start_at)) === today).length
   }, [activities])
 
   const handleComplete = async (id: string, type: string) => {

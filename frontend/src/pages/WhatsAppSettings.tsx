@@ -139,31 +139,37 @@ export default function WhatsAppSettings() {
     let active = true
     let lastQrAt = 0
     let lastFailToastAt = 0
+    let ticking = false
     const tick = async () => {
-      if (!active) return
-      const id = instanceIdRef.current
-      if (!id) return
-      const status = await refreshStatus(id)
-      if (!active) return
-      const now = Date.now()
-      if (status && status !== "connected" && now - lastQrAt > 20000) {
-        lastQrAt = now
-        setQrLoading(true)
-        try {
-          const data = await proxyGetQr(id)
-          if (!active) return
-          setQr({
-            base64: data?.qrcode?.base64 ?? null,
-            pairingCode: data?.qrcode?.pairingCode ?? null,
-          })
-        } catch (err) {
-          if (active && now - lastFailToastAt > 30000) {
-            lastFailToastAt = now
-            toast.error(err instanceof Error ? err.message : "Falha ao obter QR code")
+      if (!active || ticking) return
+      ticking = true
+      try {
+        const id = instanceIdRef.current
+        if (!id) return
+        const status = await refreshStatus(id)
+        if (!active) return
+        const now = Date.now()
+        if (status && status !== "connected" && now - lastQrAt > 20000) {
+          lastQrAt = now
+          setQrLoading(true)
+          try {
+            const data = await proxyGetQr(id)
+            if (!active) return
+            setQr({
+              base64: data?.qrcode?.base64 ?? null,
+              pairingCode: data?.qrcode?.pairingCode ?? null,
+            })
+          } catch (err) {
+            if (active && now - lastFailToastAt > 30000) {
+              lastFailToastAt = now
+              toast.error(err instanceof Error ? err.message : "Falha ao obter QR code")
+            }
+          } finally {
+            if (active) setQrLoading(false)
           }
-        } finally {
-          if (active) setQrLoading(false)
         }
+      } finally {
+        ticking = false
       }
     }
     tick()
@@ -239,9 +245,8 @@ export default function WhatsAppSettings() {
     if (!instance) return
     setSettingWebhook(true)
     try {
-      const data = await proxySetWebhook(instance.id)
+      await proxySetWebhook(instance.id)
       toast.success("Webhook configurado na Evolution")
-      if (data?.url) console.info("webhook url:", data.url)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao configurar webhook")
     } finally {

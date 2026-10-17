@@ -56,16 +56,21 @@ Deno.serve(async (req) => {
 
     switch (action) {
       case "list": {
-        const { data: { users }, error } = await supabase.auth.admin.listUsers({
-          page: 1,
-          perPage: 1000,
-        });
-        if (error) return jsonResponse(400, { error: error.message });
+        const users: Array<{ id: string; email?: string; banned_until?: string | null }> = [];
+        for (let page = 1; page <= 10; page++) {
+          const { data: { users: batch }, error } = await supabase.auth.admin.listUsers({
+            page,
+            perPage: 1000,
+          });
+          if (error) return jsonResponse(400, { error: error.message });
+          users.push(...batch);
+          if (batch.length < 1000) break;
+        }
         const ids = users.map((u) => u.id);
-        const { data: profiles, error: profilesError } = await supabase
+        const { data: profiles, error: profilesError } = ids.length > 0 ? await supabase
           .from("profiles")
           .select("id, full_name, role, is_platform_admin, avatar_url, created_at")
-          .in("id", ids);
+          .in("id", ids) : { data: [], error: null };
         if (profilesError) return jsonResponse(400, { error: profilesError.message });
         const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
         const result = users.map((u) => ({

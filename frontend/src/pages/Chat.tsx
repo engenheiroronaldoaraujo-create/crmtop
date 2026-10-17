@@ -673,7 +673,7 @@ export default function ChatPage() {
     supabase.from("pipelines").select("*").eq("is_active", true).then(({ data }) => {
       const pls = (data ?? []) as Pipeline[]
       setPipelines(pls)
-      if (pls.length > 0 && !oppPipelineId) setOppPipelineId(pls[0].id)
+      if (pls.length > 0) setOppPipelineId((prev) => prev ?? pls[0].id)
     })
     supabase.from("profiles").select("id, full_name").order("full_name").then(({ data }) => {
       setOppAllProfiles((data as Pick<Profile, "id" | "full_name">[]) ?? [])
@@ -1235,11 +1235,11 @@ export default function ChatPage() {
       toast.error("WhatsApp não está conectado")
       return null
     }
-    if (selected.contact && !isRealPhone(selected.contact.phone)) {
+    if (!selected.contact?.phone || !isRealPhone(selected.contact.phone)) {
       toast.error("Este contato não possui telefone cadastrado (contato via ID do WhatsApp).")
       return null
     }
-    return selected.contact?.phone ?? ""
+    return selected.contact.phone
   }
 
   // Envia a gravação como bolha de voz.

@@ -135,6 +135,7 @@ export function ZernioSettings() {
         window.location.href = data.auth_url
       } else {
         toast.error("Zernio não retornou a URL de conexão")
+        setConnecting(false)
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao iniciar conexão")

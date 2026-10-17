@@ -411,7 +411,7 @@ export default function SDRSettings() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2"><Label className="text-sm">Modelo</Label><Input className="h-8" value={settings.primary_model ?? ""} onChange={(e) => handleSave({ primary_model: e.target.value })} placeholder="openrouter/free" /></div>
+            <div className="space-y-2"><Label className="text-sm">Modelo</Label><Input className="h-8" value={settings.primary_model ?? ""} onChange={(e) => handleSave({ primary_model: e.target.value })} placeholder="meta/muse-spark-1.3-contributor" /></div>
             <div className="space-y-2"><Label className="text-sm">Modelo requalificação</Label><Input className="h-8" value={settings.extraction_model ?? ""} onChange={(e) => handleSave({ extraction_model: e.target.value })} placeholder="Vazio = usa o mesmo modelo" /></div>
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">

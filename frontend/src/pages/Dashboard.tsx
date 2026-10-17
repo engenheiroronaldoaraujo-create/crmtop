@@ -253,7 +253,7 @@ export default function DashboardPage() {
   const [sellers, setSellers] = useState<SellerPerformance[]>([])
   const [alerts, setAlerts] = useState<Alert[]>([])
 
-  const { from, to, label } = useMemo(() => getPeriodRange(period), [period])
+  const { from, label } = useMemo(() => getPeriodRange(period), [period])
 
   const loadDashboard = useCallback(async () => {
     setLoading(true)
@@ -362,7 +362,7 @@ export default function DashboardPage() {
     } finally {
       setLoading(false)
     }
-  }, [profile, period, from, to])
+  }, [profile, period, from, label])
 
   useEffect(() => { loadDashboard() }, [loadDashboard])
 

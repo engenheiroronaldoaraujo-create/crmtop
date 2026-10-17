@@ -399,10 +399,6 @@ deno_version = 2
 [functions.admin-users]
 verify_jwt = false
 
-# TEMPORÁRIO: diagnóstico de envio de áudio — apagar com a função.
-[functions.diag-audio]
-verify_jwt = false
-
 [functions.automation-engine]
 verify_jwt = false
 

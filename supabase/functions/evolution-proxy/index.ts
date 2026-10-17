@@ -180,10 +180,14 @@ async function recordOutboundMessage(
   const contactId = await upsertContact(supabase, phone, lid, null);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
+  // Postgres trata NULL como distinto (NULL != NULL): upsert com
+  // evolution_message_id NULL nunca dedup e cada retry cria linha duplicada.
+  // Normaliza falhas para um id único por tentativa.
+  const evolutionMessageId = msg.evolutionId ?? `failed-${crypto.randomUUID()}`;
   const { data: msgRow } = await supabase.from("messages").upsert(
     {
       conversation_id: conversationId,
-      evolution_message_id: msg.evolutionId,
+      evolution_message_id: evolutionMessageId,
       direction: "outbound",
       sender_profile_id: userId,
       type: msg.type,
@@ -280,7 +284,7 @@ async function actionCreateInstance(
     return jsonResponse(200, {
       instance: { id: row.id, instance_name },
       qrcode: data?.qrcode ?? null,
-      webhook: wh.res.ok ? { ok: true, url: webhookUrl } : { ok: false, error: JSON.stringify(wh.data?.error ?? wh.data) },
+      webhook: wh.res.ok ? { ok: true } : { ok: false, error: JSON.stringify(wh.data?.error ?? wh.data) },
     });
   } catch (err) {
     console.error("create-instance error", err);
@@ -992,7 +996,7 @@ async function actionSetWebhook(
   if (!res.ok) {
     return jsonResponse(res.status, { error: `webhook config failed: ${text}` });
   }
-  return jsonResponse(200, { ok: true, url: webhookUrl, events: WEBHOOK_EVENTS });
+  return jsonResponse(200, { ok: true, events: WEBHOOK_EVENTS });
 }
 
 // Enables syncFullHistory on an existing instance so the ~60 day history is

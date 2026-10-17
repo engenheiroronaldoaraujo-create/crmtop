@@ -44,7 +44,7 @@ async function getModel(supabase: any): Promise<string> {
     .select("primary_model")
     .limit(1)
     .single();
-  return data?.primary_model ?? "google/gemini-2.5-flash";
+  return data?.primary_model ?? "meta/muse-spark-1.3-contributor";
 }
 
 async function callAI(

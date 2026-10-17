@@ -11,7 +11,7 @@ SDR IA (com transcrição de áudio), templates de resposta e dashboard.
 - **Frontend**: React 18 + Vite + TypeScript + Tailwind + shad/ui (rotas com code-splitting)
 - **Backend**: Supabase — Postgres + Auth + Edge Functions + Realtime + Storage
 - **WhatsApp**: Evolution API self-hosted (credenciais só em secrets server-side)
-- **IA**: OpenRouter (key em `app_secrets`, service-role only; default `google/gemini-2.5-flash`)
+- **IA**: OpenRouter (key em `app_secrets`, service-role only; default `meta/muse-spark-1.3-contributor`)
 - **Timezone de negócio**: `America/Sao_Paulo`
 
 ## Funcionalidades

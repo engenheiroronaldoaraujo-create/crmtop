@@ -12,7 +12,7 @@ import { Separator } from "@/components/ui/separator"
 export default function AISettings() {
   const [apiKey, setApiKey] = useState("")
   const [showKey, setShowKey] = useState(false)
-  const [model, setModel] = useState("openrouter/free")
+  const [model, setModel] = useState("meta/muse-spark-1.3-contributor")
   const [temperature, setTemperature] = useState("0.7")
   const [maxTokens, setMaxTokens] = useState("1024")
   const [saving, setSaving] = useState(false)
@@ -36,7 +36,7 @@ export default function AISettings() {
 
   useEffect(() => {
     // Settings are stored in Edge Function secrets, not in DB
-    setModel("openrouter/free")
+    setModel("meta/muse-spark-1.3-contributor")
     callAiService("get_transcription_config")
       .then((json) => {
         const cfg = json?.result
@@ -217,12 +217,12 @@ export default function AISettings() {
           <div className="space-y-2">
             <Label>Modelo</Label>
             <Input
-              placeholder="Ex: openrouter/free, openai/gpt-4, anthropic/claude-3-haiku"
+              placeholder="Ex: meta/muse-spark-1.3-contributor, openai/gpt-4, anthropic/claude-3-haiku"
               value={model}
               onChange={(e) => setModel(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              Nome do modelo conforme OpenRouter (ex: openrouter/free, openai/gpt-4, anthropic/claude-3-haiku)
+              Nome do modelo conforme OpenRouter (ex: meta/muse-spark-1.3-contributor, openai/gpt-4, anthropic/claude-3-haiku)
             </p>
           </div>
 

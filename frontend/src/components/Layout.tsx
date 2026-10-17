@@ -1,5 +1,5 @@
 import { NavLink, useLocation, useNavigate } from "react-router-dom"
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import {
   LogOut,
   Menu,
@@ -40,6 +40,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
+  const blurTimer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     const t = setTimeout(() => { if (query) search(query) }, 300)
@@ -50,6 +51,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setSidebarOpen(false)
   }, [location.pathname])
+
+  useEffect(() => {
+    return () => {
+      if (blurTimer.current !== undefined) window.clearTimeout(blurTimer.current)
+    }
+  }, [])
 
   const totalResults = results.contacts.length + results.opportunities.length + results.conversations.length
 
@@ -123,8 +130,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
               placeholder="Buscar..."
               value={query}
               onChange={(e) => { setQuery(e.target.value); setSearchOpen(true) }}
-              onFocus={() => setSearchOpen(true)}
-              onBlur={() => setTimeout(() => setSearchOpen(false), 200)}
+              onFocus={() => { if (blurTimer.current !== undefined) { window.clearTimeout(blurTimer.current); blurTimer.current = undefined } setSearchOpen(true) }}
+              onBlur={() => { blurTimer.current = window.setTimeout(() => setSearchOpen(false), 200) }}
             />
           </div>
           {searchOpen && query && (

@@ -101,7 +101,7 @@ async function callAI(
       .select("primary_model")
       .limit(1)
       .single();
-    cachedModel = sdrConfig?.primary_model ?? "google/gemini-2.5-flash";
+    cachedModel = sdrConfig?.primary_model ?? "meta/muse-spark-1.3-contributor";
   }
   const model = options.model || cachedModel;
 
@@ -540,7 +540,8 @@ async function saveQualification(
 async function isBusinessHours(supabase: Supabase, settings: any): Promise<boolean> {
   const now = new Date()
   const tz = settings.timezone ?? "America/Sao_Paulo"
-  const dayOfWeek = now.getDay()
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(now)
+  const dayOfWeek = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[weekday] ?? now.getUTCDay()
   const localTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: tz })
 
   // Check new schedule table first

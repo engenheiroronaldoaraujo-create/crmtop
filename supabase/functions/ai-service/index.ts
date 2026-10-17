@@ -6,7 +6,7 @@ import {
 } from "../_shared/transcribe.ts";
 import { getOpenRouterKey, setSecret, OPENROUTER_KEY_NAME } from "../_shared/secrets.ts";
 
-const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "google/gemini-2.5-flash";
+const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") ?? "meta/muse-spark-1.3-contributor";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 async function getApiKey(supabase: Supabase): Promise<string> {

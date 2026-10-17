@@ -105,7 +105,10 @@ function evaluateConditions(conditions: Condition[], logic: string, context: Rec
 
 async function isBusinessHours(supabase: Supabase, timezone: string = "America/Sao_Paulo"): Promise<boolean> {
   const now = new Date();
-  const dayOfWeek = now.getDay();
+  // Deno roda em UTC: getDay() seria o dia em UTC, não em SP. Deriva o
+  // weekday no timezone de negócio para não virar o dia perto da meia-noite.
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(now);
+  const dayOfWeek = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[weekday] ?? now.getUTCDay();
   const { data: hours } = await supabase
     .from("business_hours")
     .select("is_active, start_time, end_time")

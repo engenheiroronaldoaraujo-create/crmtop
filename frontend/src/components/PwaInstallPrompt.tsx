@@ -5,13 +5,17 @@ export function PwaInstallPrompt() {
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
+    let timer: number | undefined
     const handler = (e: Event) => {
       e.preventDefault()
       setPromptEvent(e as BeforeInstallPromptEvent)
-      setTimeout(() => setVisible(true), 3000)
+      timer = window.setTimeout(() => setVisible(true), 3000)
     }
     window.addEventListener("beforeinstallprompt", handler)
-    return () => window.removeEventListener("beforeinstallprompt", handler)
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handler)
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [])
 
   if (!promptEvent || !visible) return null

@@ -819,6 +819,10 @@ function CampaignDetail({
   }, [campaignId, statusFilter, offset])
 
   useEffect(() => {
+    setOffset(0)
+  }, [campaignId, statusFilter])
+
+  useEffect(() => {
     load()
   }, [load])
 
@@ -880,8 +884,13 @@ function CampaignDetail({
   // background; a página só espelha).
   useEffect(() => {
     if (campaign?.status !== "sending") return
-    const iv = setInterval(load, 10_000)
-    return () => clearInterval(iv)
+    let alive = true
+    const tick = () => { if (alive) void load() }
+    const iv = setInterval(tick, 10_000)
+    return () => {
+      alive = false
+      clearInterval(iv)
+    }
   }, [campaign?.status, load])
 
   // Broadcast da Meta não devolve status por webhook — sem este polling a
