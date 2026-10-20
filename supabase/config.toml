@@ -426,6 +426,9 @@ verify_jwt = false
 [functions.zernio-webhook]
 verify_jwt = false
 
+[functions.lead-webhook]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
