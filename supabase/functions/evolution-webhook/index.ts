@@ -4,6 +4,7 @@ import {
   isRelevantJid,
   normalizePhoneStrict,
   normalizeWhatsAppIdentity,
+  resolveSendTarget,
 } from "../_shared/evolution-identity.ts";
 import {
   engagementDueAt,
@@ -652,10 +653,16 @@ async function postProcessInbound(args: {
   //    401 antes do handler rodar (mesmo padrão da chamada ao sdr-engine
   //    acima, que manda Bearer <service_role>).
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/automation-engine?token=${WEBHOOK_SECRET}`, {
+    // O segredo vai no HEADER, não na query string.
+    //
+    // Na URL ele vazava para os logs: o `catch` logava `String(e)` e o erro
+    // de rede do Deno inclui a URL completa (`...automation-engine?token=SEGREDO`).
+    // No header não aparece em access log, `Referer` nem histórico.
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/automation-engine`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "x-webhook-token": WEBHOOK_SECRET,
         "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
       },
       body: JSON.stringify({
@@ -670,7 +677,12 @@ async function postProcessInbound(args: {
       console.error("AUTOMATION_KICK_FAILED", res.status, body.slice(0, 200));
     }
   } catch (e) {
-    console.warn("AUTOMATION_KICK_NETWORK_ERROR", String(e));
+    // Só o nome/tipo do erro: a mensagem do Deno carrega a URL (e o segredo).
+    console.warn(
+      "AUTOMATION_KICK_NETWORK_ERROR",
+      e instanceof Error ? e.name : "unknown",
+      e instanceof Error ? e.message.replace(/https?:\/\/\S+/g, "<url>").slice(0, 200) : "",
+    );
   }
 }
 
@@ -709,7 +721,25 @@ async function callSDREngine(
     if (res.ok) {
       const result = await res.json()
       console.info("SDR_ENGINE_RESULT", { action: result.action, hasResponse: !!result.response })
-      if (result.response && result.action !== "skip" && result.action !== "error") {
+
+      // Só estas ações realmente enviam mensagem ao lead.
+      // Antes bastava `action !== "skip" && action !== "error"`, o que fazia
+      // o webhook mandar para o lead textos internos como "Limite de mensagens
+      // atingido" (action = "pause_limit").
+      const SEND_ACTIONS = new Set([
+        "continue",
+        "transfer_human",
+        "schedule_callback",
+        "schedule_demo",
+      ])
+
+      // Opt-out: lead que pediu para não receber NUNCA recebe auto-reply.
+      if (result.response && SEND_ACTIONS.has(result.action)) {
+        if (await contactOptedOut(supabase, contactId)) {
+          console.info("SDR_SKIPPED_OPTED_OUT", { conversationId, contactId });
+          return;
+        }
+
         // Save SDR response to messages table FIRST (so context is available).
         // A linha nasce SEM evolution_message_id; após o envio anexamos o ID
         // real da Evolution — assim o eco do webhook bate na constraint
@@ -727,7 +757,7 @@ async function callSDREngine(
         // Send via Evolution API
         const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? ""
         const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "")
-        const phone = await getContactPhone(supabase, contactId)
+        const phone = await getContactSendTarget(supabase, contactId)
         let sendOk = false
         let sendErrorText: string | null = null
         if (phone) {
@@ -736,6 +766,7 @@ async function callSDREngine(
               method: "POST",
               headers: { "Content-Type": "application/json", "apikey": apiKey },
               body: JSON.stringify({ number: phone, text: result.response }),
+              signal: AbortSignal.timeout(20_000),
             })
             sendOk = sendRes.ok
             if (sendRes.ok) {
@@ -769,19 +800,29 @@ async function callSDREngine(
             .then(() => {}, () => {})
         }
 
-        // Update SDR conversation state
+        // Atualiza o preview da conversa. Sem isso, a resposta da IA não
+        // aparecia na lista do chat (a conversa continuava mostrando o
+        // preview da última mensagem do lead).
+        await supabase.rpc("bump_conversation", {
+          p_id: conversationId,
+          p_sent_at: new Date().toISOString(),
+          p_preview: String(result.response).slice(0, 140),
+          p_inbound: false,
+        }).then(() => {}, () => {})
+
+        // Update SDR conversation state.
+        // NÃO sobrescreve `status`: o upsert com 'active' reativava uma
+        // conversa pausada (paused_human / transferred / paused_limit).
         await supabase
           .from("sdr_conversations")
-          .upsert({
-            conversation_id: conversationId,
-            contact_id: contactId,
-            status: "active",
-            last_auto_reply_at: new Date().toISOString(),
-          }, { onConflict: "conversation_id" })
+          .update({ last_auto_reply_at: new Date().toISOString() })
+          .eq("conversation_id", conversationId)
           .then(() => {}, () => {})
 
-        // Increment message count
-        await supabase.rpc("increment_sdr_count", { p_conv_id: conversationId }).then(() => {}, () => {})
+        // O contador de mensagens é incrementado atomicamente pelo
+        // `sdr_try_claim_slot` dentro do sdr-engine. Aqui não se incrementa
+        // mais: o RPC antigo `increment_sdr_count` era chamado com o nome de
+        // parâmetro errado (`p_conv_id`) e falhava em silêncio.
       }
     }
   } catch (e) {
@@ -789,14 +830,42 @@ async function callSDREngine(
   }
 }
 
-async function getContactPhone(supabase: Supabase, contactId: string | null): Promise<string | null> {
+
+/**
+ * Alvo de envio do contato: telefone quando existe, senão o LID.
+ *
+ * A IA usava só `contacts.phone`: contato identificado apenas por LID
+ * (conta nova do WhatsApp) ficava sem resposta — a IA calava sem sinalizar.
+ * `resolveSendTarget` é a camada única de identidade do projeto.
+ */
+async function getContactSendTarget(
+  supabase: Supabase,
+  contactId: string | null,
+): Promise<string | null> {
   if (!contactId) return null
   const { data } = await supabase
     .from("contacts")
-    .select("phone")
+    .select("phone, lid, jid")
     .eq("id", contactId)
     .single()
-  return data?.phone ?? null
+  if (!data) return null
+  return resolveSendTarget({
+    id: contactId,
+    phone: data.phone ?? null,
+    lid: data.lid ?? null,
+    jid: data.jid ?? null,
+  } as any).target
+}
+
+/** Contato pediu para não receber mensagens? (opt-out) */
+async function contactOptedOut(supabase: Supabase, contactId: string | null): Promise<boolean> {
+  if (!contactId) return false
+  const { data } = await supabase
+    .from("contacts")
+    .select("opted_out")
+    .eq("id", contactId)
+    .maybeSingle()
+  return Boolean(data?.opted_out)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
+import { isServiceRole, requireAdmin, requireUser } from "../_shared/auth.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -585,6 +586,19 @@ async function isBusinessHours(supabase: Supabase, settings: any): Promise<boole
 // Process incoming message
 // ---------------------------------------------------------------------------
 
+interface ProcessOptions {
+  /**
+   * Modo teste (usado pela ação `test_sdr`): ignora os gates globais
+   * (enabled, test_mode, instância, limite de mensagens e cooldown).
+   *
+   * Antes o `test_sdr` desligava `enabled`/`test_mode` na tabela
+   * `sdr_settings` e restaurava no fim. Se o isolate morresse no meio, a IA
+   * ficava permanentemente ligada respondendo leads reais. Agora o override
+   * vive só na chamada — nada global é tocado.
+   */
+  force?: boolean;
+}
+
 async function processMessage(
   supabase: Supabase,
   conversationId: string,
@@ -592,6 +606,7 @@ async function processMessage(
   messageContent: string,
   instanceName: string,
   messageId: string,
+  options: ProcessOptions = {},
 ): Promise<{ action: string; response?: string }> {
   // 1. Check SDR settings
   const { data: settings } = await supabase
@@ -600,24 +615,26 @@ async function processMessage(
     .limit(1)
     .single()
 
-  if (!settings || !settings.enabled) {
-    return { action: "skip", response: "SDR desativado" }
-  }
+  if (!options.force) {
+    if (!settings || !settings.enabled) {
+      return { action: "skip", response: "SDR desativado" }
+    }
 
-  // 2. Check test mode
-  if (settings.test_mode) {
-    return { action: "skip", response: "Modo teste ativo" }
-  }
+    // 2. Check test mode
+    if (settings.test_mode) {
+      return { action: "skip", response: "Modo teste ativo" }
+    }
 
-  // 3. Check instance
-  if (settings.instance_id) {
-    const { data: inst } = await supabase
-      .from("whatsapp_instances")
-      .select("instance_name")
-      .eq("id", settings.instance_id)
-      .single()
-    if (inst?.instance_name !== instanceName) {
-      return { action: "skip", response: "Instância não configurada para SDR" }
+    // 3. Check instance
+    if (settings.instance_id) {
+      const { data: inst } = await supabase
+        .from("whatsapp_instances")
+        .select("instance_name")
+        .eq("id", settings.instance_id)
+        .single()
+      if (inst?.instance_name !== instanceName) {
+        return { action: "skip", response: "Instância não configurada para SDR" }
+      }
     }
   }
 
@@ -634,7 +651,7 @@ async function processMessage(
   }
 
   // 5. Check message limit
-  if (sdrConv && sdrConv.auto_messages_count >= settings.max_messages_per_conversation) {
+  if (!options.force && sdrConv && sdrConv.auto_messages_count >= settings.max_messages_per_conversation) {
     // Pause and notify
     await supabase
       .from("sdr_conversations")
@@ -644,7 +661,7 @@ async function processMessage(
   }
 
   // 6. Check cooldown
-  if (sdrConv?.last_auto_reply_at) {
+  if (!options.force && sdrConv?.last_auto_reply_at) {
     const lastReply = new Date(sdrConv.last_auto_reply_at).getTime()
     const now = Date.now()
     if (now - lastReply < settings.cooldown_seconds * 1000) {
@@ -862,14 +879,30 @@ Responda a última mensagem do CLIENTE.`
     || parsed.suggested_action === "schedule_demo"
 
   if (isRealResponse) {
-    await supabase
-      .from("sdr_conversations")
-      .update({
-        auto_messages_count: (sdrConv?.auto_messages_count ?? 0) + 1,
-        last_auto_reply_at: new Date().toISOString(),
-      })
-      .eq("conversation_id", conversationId)
-      .then(() => {}, () => {})
+    // Contador ATÔMICO.
+    //
+    // Antes era read-modify-write em JS (`(sdrConv?.auto_messages_count ?? 0) + 1`):
+    // duas mensagens inbound simultâneas liam o mesmo valor e as duas
+    // gravavam N+1 — o teto `max_messages_per_conversation` era furado e a IA
+    // respondia além do limite.
+    //
+    // `sdr_try_claim_slot` faz a checagem e o incremento na mesma transação,
+    // sob lock de linha.
+    const { data: claimed, error: claimErr } = await supabase.rpc("sdr_try_claim_slot", {
+      p_conversation_id: conversationId,
+    })
+    if (claimErr) {
+      console.error("SDR_SLOT_CLAIM_FAILED", conversationId, claimErr.message)
+    } else if (!claimed) {
+      // O limite foi atingido entre a checagem (passo 5) e agora: a IA já
+      // gastou uma chamada, mas não responde.
+      await supabase
+        .from("sdr_conversations")
+        .update({ status: "paused_limit" })
+        .eq("conversation_id", conversationId)
+        .then(() => {}, () => {})
+      return { action: "pause_limit", response: "Limite de mensagens atingido" }
+    }
   }
 
   // 15. Log
@@ -1173,8 +1206,34 @@ Deno.serve(async (req) => {
     const body = await req.json()
     const { action, data } = body as { action: string; data: Record<string, unknown> }
 
+    // Autorização.
+    //
+    // Antes desta função NÃO tinha nenhuma checagem: qualquer usuário
+    // autenticado podia ler o prompt/knowledge base, desligar o modo teste,
+    // ligar a IA e disparar requalificação em massa (custo de OpenRouter).
+    //
+    // `process_message` é chamada pelo webhook (service role) — é o único
+    // caminho interno. Todo o resto vem do painel de Configurações, que é
+    // rota de admin.
+    const internal = isServiceRole(req);
+    if (!internal) {
+      switch (action) {
+        case "get_default_prompt":
+          // Prompt padrão do código (não é o configurado) — qualquer usuário
+          // autenticado pode ver.
+          await requireUser(req, supabase);
+          break;
+        default:
+          await requireAdmin(req, supabase);
+          break;
+      }
+    }
+
     switch (action) {
       case "process_message": {
+        if (!internal) {
+          return jsonResponse(403, { error: "forbidden: internal action" });
+        }
         const { conversation_id, contact_id, message_content, instance_name, message_id } = data as any
         const result = await processMessage(supabase, conversation_id, contact_id, message_content, instance_name, message_id)
         // NOTE: message sending is handled by the webhook (callSDREngine)
@@ -1264,11 +1323,14 @@ Deno.serve(async (req) => {
       case "test_sdr": {
         const { message, conversation_id } = data as any
 
-        // Temporarily enable SDR and disable test_mode for testing
+        // NÃO mexe mais em `sdr_settings` globalmente.
+        //
+        // Antes o teste desligava `enabled`/`test_mode` na tabela e restaurava
+        // no fim: se o isolate morresse no meio, a IA ficava permanentemente
+        // ligada respondendo leads reais. O override agora vive só na chamada
+        // (options.force), então nada global é tocado.
         const { data: settings } = await supabase.from("sdr_settings").select("*").limit(1).single()
-        const wasEnabled = settings?.enabled
-        const wasTestMode = settings?.test_mode
-        await supabase.from("sdr_settings").update({ enabled: true, test_mode: false }).eq("id", settings?.id)
+        void settings
 
         // Use unique IDs per test call to avoid interference
         const testSuffix = Date.now().toString(36)
@@ -1349,6 +1411,7 @@ Deno.serve(async (req) => {
           message,
           "test",
           "test-" + Date.now(),
+          { force: true },
         )
 
         // Store the SDR response as outbound
@@ -1363,9 +1426,6 @@ Deno.serve(async (req) => {
           }).then(() => {}, () => {})
         }
 
-        // Restore original state
-        await supabase.from("sdr_settings").update({ enabled: wasEnabled, test_mode: wasTestMode }).eq("id", settings?.id)
-
         return jsonResponse(200, { ok: true, ...result })
       }
 
@@ -1373,6 +1433,8 @@ Deno.serve(async (req) => {
         return jsonResponse(400, { error: `Unknown action: ${action}` })
     }
   } catch (err) {
+    // requireAdmin/requireUser lançam a Response pronta.
+    if (err instanceof Response) return err;
     console.error("SDR_ENGINE_ERROR", err)
     return jsonResponse(500, { error: "internal error" })
   }

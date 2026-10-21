@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react"
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom"
 import { Toaster } from "sonner"
 
 import { AuthProvider, useAuth } from "@/hooks/use-auth"
@@ -7,6 +7,7 @@ import { ThemeProvider, useTheme } from "@/hooks/use-theme"
 import { ProtectedRoute } from "@/components/ProtectedRoute"
 import { PwaInstallPrompt } from "@/components/PwaInstallPrompt"
 import { Layout } from "@/components/Layout"
+import { ErrorBoundary } from "@/components/ErrorBoundary"
 import LoginPage from "@/pages/Login"
 
 const ChatPage = lazy(() => import("@/pages/Chat"))
@@ -22,9 +23,39 @@ const GroupsPage = lazy(() => import("@/pages/Groups"))
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
-  if (loading) return null
-  if (profile?.role !== "admin") return <Navigate to="/" replace />
+  // `loading` cobre o carregamento do profile (ver use-auth): sem isso
+  // existia uma janela em que profile era null e o admin era expulso.
+  if (loading) return <PageSkeleton />
+  if (!profile || profile.role !== "admin") return <Navigate to="/" replace />
   return <>{children}</>
+}
+
+/**
+ * Layout das rotas autenticadas.
+ *
+ * Antes o `<Layout>` era declarado dentro de cada `<Route>`: navegar entre
+ * páginas desmontava e remontava o Layout, zerando a busca global e
+ * refazendo o debounce a cada navegação. Com rota de layout + `<Outlet/>`
+ * o Layout permanece montado.
+ */
+function AppLayout() {
+  return (
+    <Layout>
+      <Outlet />
+    </Layout>
+  )
+}
+
+function PageSkeleton() {
+  return (
+    <div className="flex h-full w-full items-center justify-center p-6">
+      <div className="w-full max-w-md space-y-3">
+        <div className="h-8 w-40 animate-pulse rounded-md bg-muted" />
+        <div className="h-24 animate-pulse rounded-md bg-muted" />
+        <div className="h-24 animate-pulse rounded-md bg-muted" />
+      </div>
+    </div>
+  )
 }
 
 function AppRoutes() {
@@ -32,113 +63,51 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route
-        path="/"
         element={
           <ProtectedRoute>
-            <Layout>
-              <ChatPage />
-            </Layout>
+            <AppLayout />
           </ProtectedRoute>
         }
-      />
-      <Route
-        path="/contacts"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <ContactsPage />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/pipeline"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <PipelinePage />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/agenda"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <AgendaPage />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/automations"
-        element={
-          <ProtectedRoute>
+      >
+        <Route path="/" element={<ChatPage />} />
+        <Route path="/contacts" element={<ContactsPage />} />
+        <Route path="/pipeline" element={<PipelinePage />} />
+        <Route path="/agenda" element={<AgendaPage />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/account" element={<MyAccountPage />} />
+        <Route
+          path="/automations"
+          element={
             <RequireAdmin>
-              <Layout>
-                <AutomationsPage />
-              </Layout>
+              <AutomationsPage />
             </RequireAdmin>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/campaigns"
-        element={
-          <ProtectedRoute>
+          }
+        />
+        <Route
+          path="/campaigns"
+          element={
             <RequireAdmin>
-              <Layout>
-                <CampaignsPage />
-              </Layout>
+              <CampaignsPage />
             </RequireAdmin>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/groups"
-        element={
-          <ProtectedRoute>
+          }
+        />
+        <Route
+          path="/groups"
+          element={
             <RequireAdmin>
-              <Layout>
-                <GroupsPage />
-              </Layout>
+              <GroupsPage />
             </RequireAdmin>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/dashboard"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <DashboardPage />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/settings"
-        element={
-          <ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
             <RequireAdmin>
-              <Layout>
-                <SettingsPage />
-              </Layout>
+              <SettingsPage />
             </RequireAdmin>
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/account"
-        element={
-          <ProtectedRoute>
-            <Layout>
-              <MyAccountPage />
-            </Layout>
-          </ProtectedRoute>
-        }
-      />
+          }
+        />
+      </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
@@ -154,9 +123,11 @@ export default function App() {
     <ThemeProvider>
       <BrowserRouter>
         <AuthProvider>
-          <Suspense fallback={null}>
-            <AppRoutes />
-          </Suspense>
+          <ErrorBoundary>
+            <Suspense fallback={<PageSkeleton />}>
+              <AppRoutes />
+            </Suspense>
+          </ErrorBoundary>
           <AppToaster />
           <PwaInstallPrompt />
         </AuthProvider>

@@ -201,11 +201,15 @@ async function markFailed(post: GroupPost, error: string): Promise<void> {
 
 async function expireOld(): Promise<number> {
   // Publicados cuja janela já fechou: expired (webhook para de casar, UI mostra).
+  // `.order("published_at")` garante que os mais antigos sejam avaliados
+  // primeiro — sem ORDER BY o Postgres devolve linhas em qualquer ordem e o
+  // limite de 100 podia deixar posts antigos para sempre "published".
   const { data } = await supabase
     .from("group_posts")
     .select("id, published_at, window_hours")
     .eq("status", "published")
     .not("published_at", "is", null)
+    .order("published_at", { ascending: true })
     .limit(100);
   let expired = 0;
   const now = Date.now();
@@ -233,6 +237,13 @@ Deno.serve(async (req) => {
       return jsonResponse(401, { error: "unauthorized" });
     }
     const { data: claimed } = await supabase.rpc("claim_group_posts", { p_limit: 5 });
+
+    // Reaper: posts presos em 'publishing' (runner morreu entre o claim e o
+    // update) voltam para 'scheduled'. Sem isso o post ficava travado para
+    // sempre — nunca publicado e sem aviso para ninguém.
+    const { data: reaped } = await supabase.rpc("reap_stuck_group_posts");
+    if (reaped) console.info("GROUP_POSTS_REAPED", reaped);
+
     let published = 0;
     let failed = 0;
     for (const post of (claimed ?? []) as GroupPost[]) {

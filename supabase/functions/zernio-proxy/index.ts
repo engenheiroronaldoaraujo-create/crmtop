@@ -299,7 +299,9 @@ async function setupWebhook(
 async function actionSetupWebhook(supabase: Supabase): Promise<Response> {
   const conn = await requireConnected(supabase);
   const result = await setupWebhook(supabase, conn.profile_id!);
-  return jsonResponse(200, { ok: true, url: result.url });
+  // Não devolve a URL com o token: ela é o segredo do webhook e ia parar no
+  // browser do admin (e em qualquer log de proxy no caminho).
+  return jsonResponse(200, { ok: true, webhook_id: result.webhook_id });
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1328,10 @@ const ADMIN_ACTIONS = new Set([
   "campaign-schedule",
   "campaign-cancel",
   "campaign-test",
+  // Sincroniza os destinatários com o status real na Meta. Antes NÃO era
+  // admin: qualquer vendedor autenticado disparava chamadas para a API da
+  // Meta (custo +有可能 bloqueio de rate limit da conta).
+  "campaign-sync",
 ]);
 
 Deno.serve(async (req) => {

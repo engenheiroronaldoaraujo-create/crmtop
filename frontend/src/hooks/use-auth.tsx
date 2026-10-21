@@ -39,20 +39,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true
 
-    supabase.auth.getSession().then(({ data }) => {
+    // O profile precisa estar carregado ANTES de `loading` virar false.
+    //
+    // Antes o `fetchProfile` não era aguardado: existia uma janela em que
+    // `loading === false` e `profile === null`. O `RequireAdmin` avalia
+    // `profile?.role !== "admin"` nessa janela e expulsava o admin da rota
+    // (`/settings`, `/campaigns`, `/groups`, `/automations`) com `replace` —
+    // sem volta atrás. Bastava recarregar a página para ser jogado para "/".
+    supabase.auth.getSession().then(async ({ data }) => {
       if (!active) return
       setUser(data.session?.user ?? null)
       if (data.session?.user) {
-        fetchProfile(data.session.user.id)
+        await fetchProfile(data.session.user.id)
+        if (!active) return
       }
       setLoading(false)
     })
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (!active) return
       setUser(session?.user ?? null)
       if (session?.user) {
-        fetchProfile(session.user.id)
+        await fetchProfile(session.user.id)
+        if (!active) return
       } else {
         setProfile(null)
       }

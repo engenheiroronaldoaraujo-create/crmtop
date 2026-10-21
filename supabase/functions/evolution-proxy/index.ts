@@ -19,6 +19,7 @@ import {
   validateAudioUpload,
 } from "../_shared/audio.ts";
 import { isOgg, isWebm, remuxWebmToOgg } from "../_shared/ogg-remux.ts";
+import { recordOutboundMessage as recordOutboundShared } from "../_shared/outbound.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -159,8 +160,10 @@ function sanitizePhone(phone: string): string {
 // evolution_message_id) so that if the webhook echo won the race first, we
 // still attach the correct sender_profile_id. `status` is explicit: 'sent'
 // only after the Evolution API confirmed, 'failed' otherwise — never before
-// confirmation. O bump_conversation roda em background (não bloqueia a
-// resposta; o eco do webhook refaz o bump se o isolate congelar).
+// confirmation.
+//
+// O caminho canônico está em `_shared/outbound.ts` (mesma semântica de
+// dedup, bump e toque da régua para todos os outros envios).
 async function recordOutboundMessage(
   supabase: Supabase,
   instanceId: string,
@@ -180,49 +183,23 @@ async function recordOutboundMessage(
   const contactId = await upsertContact(supabase, phone, lid, null);
   const conversationId = await upsertConversation(supabase, contactId, instanceId);
 
-  // Postgres trata NULL como distinto (NULL != NULL): upsert com
-  // evolution_message_id NULL nunca dedup e cada retry cria linha duplicada.
-  // Normaliza falhas para um id único por tentativa.
-  const evolutionMessageId = msg.evolutionId ?? `failed-${crypto.randomUUID()}`;
-  const { data: msgRow } = await supabase.from("messages").upsert(
+  const { messageId, error } = await recordOutboundShared(
+    supabase,
     {
-      conversation_id: conversationId,
-      evolution_message_id: evolutionMessageId,
-      direction: "outbound",
-      sender_profile_id: userId,
+      conversationId,
+      evolutionMessageId: msg.evolutionId,
       type: msg.type,
       content: msg.content,
-      media_url: msg.mediaUrl,
-      sent_at: msg.sentAt,
-      status,
-      send_error: msg.sendError ?? null,
+      mediaUrl: msg.mediaUrl,
+      senderProfileId: userId,
+      sentAt: msg.sentAt,
+      sendError: msg.sendError ?? null,
     },
-    { onConflict: "conversation_id, evolution_message_id" },
-  ).select("id").maybeSingle();
+    status,
+  );
+  if (error) console.error("OUTBOUND_PERSIST_FAILED", error);
 
-  void (async () => {
-    const { error } = await supabase.rpc("bump_conversation", {
-      p_id: conversationId,
-      p_sent_at: msg.sentAt,
-      p_preview: (msg.content ?? `[${msg.type}]`).slice(0, 140),
-      p_inbound: false,
-    });
-    if (error) console.error("BUMP_CONVERSATION_FAILED", error.message);
-
-    // Régua "sem resposta": mensagem manual do SDR reinicia o relógio da régua
-    // ativa (a próxima tentativa é reagendada a partir de agora). As tentativas
-    // NÃO zeram — mensagem manual não devolve ao lead um ciclo novo. Envios
-    // com falha não tocam a régua (o lead não recebeu nada).
-    if (status === "sent") {
-      const { error: nrErr } = await supabase.rpc("noreply_touch", {
-        p_conversation_id: conversationId,
-        p_sent_at: msg.sentAt,
-      });
-      if (nrErr) console.error("NOREPLY_TOUCH_FAILED", nrErr.message);
-    }
-  })();
-
-  return { conversationId, messageId: msgRow?.id ?? null };
+  return { conversationId, messageId };
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +324,14 @@ async function actionGetStatus(
 async function findContactByNumber(
   supabase: Supabase,
   phoneDigits: string,
-): Promise<{ id: string; phone: string | null; lid: string | null; jid: string | null } | null> {
+): Promise<{ id: string; phone: string | null; lid: string | null; jid: string | null; opted_out: boolean } | null> {
   const variants = phoneLookupVariants(phoneDigits);
   const orClauses: string[] = [];
   for (const v of variants) orClauses.push(`phone.eq.${v}`);
   orClauses.push(`lid.eq.lid:${phoneDigits}`);
   const { data } = await supabase
     .from("contacts")
-    .select("id, phone, lid, jid")
+    .select("id, phone, lid, jid, opted_out")
     .or(orClauses.join(","))
     .maybeSingle();
   return data ?? null;
@@ -380,6 +357,12 @@ async function actionSendText(
   const contact = await findContactByNumber(supabase, phoneDigits);
   const contactPhone = contact?.phone ?? null;
   const contactLid = contact?.lid ?? null;
+
+  // Opt-out: contato que pediu para não receber não é contatado — nem
+  // manualmente. Antes só os runners automáticos checavam.
+  if (contact?.opted_out) {
+    return jsonResponse(409, { error: "contato com opt-out ativo — envio bloqueado" });
+  }
 
   // Destino de envio pela camada central: JID confirmado > phone > LID.
   // Nunca inventa número quando só existe LID.
@@ -1443,7 +1426,11 @@ async function actionSyncMessages(
     .eq("id", instance_id)
     .single();
   let page = (inst?.sync_page ?? 0) + 1;
-  const BUDGET = Math.min(body.max_pages ?? 500, 40); // keep each run under the timeout
+  // 10 páginas (≈500 mensagens) por rodada: cada mensagem passa por upsert de
+  // contato/conversa/mensagem e pode baixar mídia. Com 40 páginas a rodada
+  // estourava o wall-clock de 150s do runtime da Edge Function e o sync
+  // morria no meio (a progressão é retomada na próxima chamada).
+  const BUDGET = Math.min(body.max_pages ?? 500, 10); // keep each run under the timeout
   const pageCap = page + BUDGET;
 
   let importedMessages = 0;
@@ -1581,9 +1568,22 @@ async function actionSyncMessages(
       for (const c of existing ?? []) contactIds.set(c.lid, c.id);
     }
 
-    // Conversations: bulk create-or-ignore returning contact_id -> id.
+    // Conversations: cria as que faltam e busca o id de TODAS.
+    //
+    // BUG CRÍTICO (perda de dados): antes o id vinha só do RETURNING do
+    // upsert com `ignoreDuplicates: true` — e o Postgres só retorna as linhas
+    // INSERIDAS. As conversas que já existiam ficavam fora do `convByKey` e
+    // TODAS as mensagens delas eram descartadas logo abaixo
+    // (`if (!convId) continue`). Na prática, o import de histórico perdia
+    // qualquer mensagem de conversa já conhecida.
+    //
+    // Agora: o upsert cria as novas (contando quantas foram realmente
+    // criadas) e um SELECT traz o id de todas — antigas e novas.
     const convRows = [...contactIds.entries()].map(([, contactId]) => ({ contact_id: contactId, instance_id }));
     const convByKey = new Map<string, string>();
+    const idByContact = new Map<string, string>();
+    for (const [key, contactId] of contactIds) idByContact.set(contactId, key);
+
     for (let i = 0; i < convRows.length; i += 200) {
       const chunk = convRows.slice(i, i + 200);
       const { data: convData, error } = await supabase
@@ -1591,12 +1591,25 @@ async function actionSyncMessages(
         .upsert(chunk, { onConflict: "contact_id,instance_id", ignoreDuplicates: true })
         .select("id,contact_id");
       if (error) return jsonResponse(500, { error: `conversations upsert: ${error.message}` });
-      const idByContact = new Map<string, string>();
-      for (const [key, contactId] of contactIds) idByContact.set(contactId, key);
-      for (const row of convData ?? []) {
-        newConversations += 1;
-        const key = idByContact.get(row.contact_id);
-        if (key) convByKey.set(key, row.id);
+      // `ignoreDuplicates` → RETURNING traz só as inseridas (contador honesto).
+      newConversations += (convData ?? []).length;
+    }
+
+    // SELECT final: cobre conversas novas E preexistentes.
+    if (contactIds.size > 0) {
+      const contactIdList = [...contactIds.values()];
+      for (let i = 0; i < contactIdList.length; i += 200) {
+        const chunk = contactIdList.slice(i, i + 200);
+        const { data: allConvs, error } = await supabase
+          .from("conversations")
+          .select("id,contact_id")
+          .eq("instance_id", instance_id)
+          .in("contact_id", chunk);
+        if (error) return jsonResponse(500, { error: `conversations select: ${error.message}` });
+        for (const row of allConvs ?? []) {
+          const key = idByContact.get(row.contact_id);
+          if (key) convByKey.set(key, row.id);
+        }
       }
     }
 
@@ -1658,12 +1671,15 @@ async function actionSyncMessages(
     }
     for (let i = 0; i < finalRows.length; i += 200) {
       const chunk = finalRows.slice(i, i + 200);
-      const { error } = await supabase.from("messages").upsert(chunk, {
+      // `select("id")` + ignoreDuplicates: o RETURNING traz só as linhas
+      // realmente inseridas — o contador de "importadas" agora é honesto
+      // (antes contava as ignoradas pelo dedup).
+      const { data: inserted, error } = await supabase.from("messages").upsert(chunk, {
         onConflict: "conversation_id,evolution_message_id",
         ignoreDuplicates: true,
-      });
+      }).select("id");
       if (error) return jsonResponse(500, { error: `messages upsert: ${error.message}` });
-      importedMessages += chunk.length;
+      importedMessages += (inserted ?? []).length;
     }
 
     // Diagnóstico temporário (migration 025): grava os LIDs sem phone desta
@@ -1712,10 +1728,13 @@ async function actionSyncNames(
 
   const { data: inst } = await supabase
     .from("whatsapp_instances")
-    .select("sync_page")
+    .select("sync_page_names")
     .eq("id", instance_id)
     .single();
-  let page = body.reset ? 1 : (inst?.sync_page ?? 0) + 1;
+  // Cursor SEPARADO do sync de mensagens: antes os dois usavam
+  // `sync_page` e o painel chamava `sync-names` com `reset:true`, zerando o
+  // progresso do import de mensagens (as duas rotinas se sobrescreviam).
+  let page = body.reset ? 1 : (inst?.sync_page_names ?? 0) + 1;
   const BUDGET = Math.min(body.max_pages ?? 500, 60);
   const pageCap = page + BUDGET;
 
@@ -1796,12 +1815,12 @@ async function actionSyncNames(
       }
     }
 
-    await supabase.from("whatsapp_instances").update({ sync_page: page }).eq("id", instance_id);
+    await supabase.from("whatsapp_instances").update({ sync_page_names: page }).eq("id", instance_id);
     page += 1;
   }
 
   if (done) {
-    await supabase.from("whatsapp_instances").update({ sync_page: Math.max(page, pages) }).eq("id", instance_id);
+    await supabase.from("whatsapp_instances").update({ sync_page_names: Math.max(page, pages) }).eq("id", instance_id);
   }
 
   return jsonResponse(200, { ok: true, done, page, totalPages: pages, named, lastError });
@@ -1888,6 +1907,56 @@ async function actionSyncMedia(
 // Links a conversation to a phone number the operator knows. If a contact with
 // that phone exists, the LID contact is merged into it (conversations, messages
 // and the LID move over). Otherwise the phone is set directly on the contact.
+/**
+ * Move as mensagens de uma conversa para outra.
+ *
+ * Usado ao mesclar contatos: a conversa de origem é removida depois, então
+ * as mensagens precisam ir junto — senão o histórico some do CRM.
+ *
+ * O UNIQUE (conversation_id, evolution_message_id) impede o move quando a
+ * mesma mensagem já existe no destino (mesma mensagem importada duas vezes
+ * em conversas diferentes): nesses casos a cópia da origem é descartada e
+ * a do destino é preservada.
+ */
+async function moveMessagesToConversation(
+  supabase: Supabase,
+  fromConversationId: string,
+  toConversationId: string,
+): Promise<void> {
+  const { data: source } = await supabase
+    .from("messages")
+    .select("id, evolution_message_id")
+    .eq("conversation_id", fromConversationId);
+  if (!source || source.length === 0) return;
+
+  const { data: target } = await supabase
+    .from("messages")
+    .select("evolution_message_id")
+    .eq("conversation_id", toConversationId);
+  const targetIds = new Set(
+    (target ?? []).map((t: any) => t.evolution_message_id).filter((v: unknown): v is string => typeof v === "string"),
+  );
+
+  const duplicates = source
+    .filter((m: any) => m.evolution_message_id && targetIds.has(m.evolution_message_id))
+    .map((m: any) => m.id);
+  if (duplicates.length > 0) {
+    await supabase.from("messages").delete().in("id", duplicates);
+  }
+
+  const movable = source.filter((m: any) => !duplicates.includes(m.id)).map((m: any) => m.id);
+  if (movable.length === 0) return;
+
+  for (let i = 0; i < movable.length; i += 200) {
+    const chunk = movable.slice(i, i + 200);
+    const { error } = await supabase
+      .from("messages")
+      .update({ conversation_id: toConversationId })
+      .in("id", chunk);
+    if (error) console.error("MOVE_MESSAGES_FAILED", fromConversationId, toConversationId, error.message);
+  }
+}
+
 async function actionLinkConversationPhone(
   supabase: Supabase,
   body: { conversation_id?: string; phone?: string },
@@ -1933,6 +2002,10 @@ async function actionLinkConversationPhone(
       for (const c of convs ?? []) {
         const target = byInstance.get(c.instance_id);
         if (target) {
+          // Move as mensagens para a conversa destino ANTES de remover a
+          // origem. Antes a conversa de origem era DELETADA com tudo
+          // dentro — o histórico do chat desaparecia do CRM.
+          await moveMessagesToConversation(supabase, c.id, target);
           await supabase.from("conversations").delete().eq("id", c.id);
         } else {
           await supabase.from("conversations").update({ contact_id: phoneContact.id }).eq("id", c.id);

@@ -22,6 +22,7 @@
 
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient } from "../_shared/contacts.ts";
+import { recordOutboundMessage } from "../_shared/outbound.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
 import {
@@ -68,6 +69,7 @@ interface NoreplyState {
   next_delay_hours: number | null;
   last_outbound_at: string | null;
   started_at: string;
+  locked_until?: string | null;
 }
 
 interface ConversationRow {
@@ -146,22 +148,33 @@ async function callEvolution(
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; data: any; text: string }> {
-  const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
-    method: body !== undefined ? "POST" : "GET",
-    headers: {
-      apikey: EVOLUTION_API_KEY,
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data: any = null;
+  // Timeout: sem AbortSignal, uma Evolution travada segura o isolate até o
+  // limite da plataforma.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
+    const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
+      method: body !== undefined ? "POST" : "GET",
+      headers: {
+        apikey: EVOLUTION_API_KEY,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    return { ok: res.ok, data, text };
+  } catch (e) {
+    return { ok: false, data: null, text: `evolution request failed: ${String(e).slice(0, 200)}` };
+  } finally {
+    clearTimeout(timeout);
   }
-  return { ok: res.ok, data, text };
 }
 
 // Cache de conectividade por instância com TTL curto: evita N chamadas à
@@ -280,7 +293,7 @@ async function sdrOwnsConversation(conversationId: string): Promise<boolean> {
 async function cancelState(state: NoreplyState, reason: string): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
-    .update({ status: "cancelled", ended_at: new Date().toISOString(), next_check_at: null })
+    .update({ status: "cancelled", ended_at: new Date().toISOString(), next_check_at: null, locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_CANCEL_FAILED", state.id, error.message);
@@ -290,7 +303,7 @@ async function cancelState(state: NoreplyState, reason: string): Promise<void> {
 async function markReplied(state: NoreplyState): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
-    .update({ status: "replied", ended_at: new Date().toISOString(), next_check_at: null })
+    .update({ status: "replied", ended_at: new Date().toISOString(), next_check_at: null, locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_REPLIED_FAILED", state.id, error.message);
@@ -300,7 +313,7 @@ async function markReplied(state: NoreplyState): Promise<void> {
 async function rescheduleState(state: NoreplyState, nextCheckAt: Date, reason: string): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
-    .update({ next_check_at: nextCheckAt.toISOString() })
+    .update({ next_check_at: nextCheckAt.toISOString(), locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_RESCHEDULE_FAILED", state.id, error.message);
@@ -439,37 +452,23 @@ async function sendAttemptMessage(
 
   if (!ok) return { messageId: null, error: `evolution sendText failed: ${respText.slice(0, 300)}` };
 
-  const { data: msgRow } = await supabase
-    .from("messages")
-    .upsert(
-      {
-        conversation_id: conversation.id,
-        evolution_message_id: data?.key?.id ?? null,
-        direction: "outbound",
-        sender_profile_id: null,
-        type: "text",
-        content: text,
-        media_url: null,
-        sent_at: sentAt,
-        status: "sent",
-        send_error: null,
-      },
-      { onConflict: "conversation_id, evolution_message_id" },
-    )
-    .select("id")
-    .maybeSingle();
+  // Caminho único de registro (evita bolha duplicada em retry e reposiciona
+  // a régua — o runner é quem manda a tentativa, então o toque é correto).
+  const { messageId, error: dbError } = await recordOutboundMessage(
+    supabase,
+    {
+      conversationId: conversation.id,
+      evolutionMessageId: data?.key?.id ?? null,
+      type: "text",
+      content: text,
+      senderProfileId: null,
+      sentAt,
+    },
+    "sent",
+  );
+  if (dbError) console.error("NOREPLY_MESSAGE_PERSIST_FAILED", dbError);
 
-  void (async () => {
-    const { error } = await supabase.rpc("bump_conversation", {
-      p_id: conversation.id,
-      p_sent_at: sentAt,
-      p_preview: text.slice(0, 140),
-      p_inbound: false,
-    });
-    if (error) console.error("BUMP_CONVERSATION_FAILED", error.message);
-  })();
-
-  return { messageId: msgRow?.id ?? null, error: null };
+  return { messageId, error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -485,14 +484,18 @@ async function executeDues(
   let failed = 0;
   let skipped = 0;
 
-  const { data: dues } = await supabase
-    .from("noreply_states")
-    .select("*")
-    .eq("status", "active")
-    .lte("next_check_at", new Date().toISOString())
-    .order("next_check_at")
-    .limit(50);
-  if (!dues || dues.length === 0) return { sent, exhausted, failed, skipped };
+  // Claim atômico: `pg_cron` dispara o runner por HTTP e a execução anterior
+  // pode ainda estar viva. O claim reserva o estado (locked_until) para uma
+  // única execução — sem ele, duas rodadas mandavam o mesmo follow-up 2x.
+  const { data: dueRows, error: claimError } = await supabase.rpc("claim_noreply_states", {
+    p_limit: 50,
+  });
+  if (claimError) {
+    console.error("NOREPLY_CLAIM_FAILED", claimError.message);
+    return { sent, exhausted, failed, skipped };
+  }
+  const dues = (dueRows ?? []) as NoreplyState[];
+  if (dues.length === 0) return { sent, exhausted, failed, skipped };
 
   for (const state of dues as NoreplyState[]) {
     try {
@@ -541,8 +544,14 @@ async function executeDues(
         continue;
       }
 
-      const attemptIndex = state.attempts_made; // próxima tentativa = attempts_made + 1
-      if (attemptIndex >= attempts.length) {
+      // Próxima tentativa: a primeira ATIVA cujo número é maior que o da
+      // última enviada.
+      //
+      // Antes o mapeamento era POSICIONAL (`attempts[attempts_made]`) e o
+      // admin podia desativar a tentativa 2 na UI: o array ficava [1,3] e a
+      // 2ª mensagem enviada usava o template e o delay da tentativa 3.
+      const pending = attempts.filter((a) => a.attempt_number > state.attempts_made);
+      if (pending.length === 0) {
         // Todas as tentativas enviadas e o prazo final passou → esgotar.
         const done = await exhaustState(state, settings);
         if (done) exhausted++;
@@ -550,27 +559,43 @@ async function executeDues(
         continue;
       }
 
-      const attempt = attempts[attemptIndex];
+      const attempt = pending[0];
 
       // Janelas de envio: horário comercial e fim de semana.
       const now = new Date();
       if (settings.skip_weekends && isWeekend(now)) {
         skipped++;
+        // Libera o lock: a tentativa fica pendente, não reservada.
+        await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
         continue; // mantém next_check_at vencido; o próximo run em dia útil envia
       }
       if (settings.business_hours_only && !(await withinBusinessHours())) {
         skipped++;
+        await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
         continue;
       }
 
       const result = await sendAttemptMessage(attempt, conversation, contact);
       if (result.error) {
         failed++;
-        await logEvent(state.id, "send_failed", state.attempts_made + 1, null, {
+        await logEvent(state.id, "send_failed", attempt.attempt_number, null, {
           error: result.error,
         });
-        // Falha não conta como tentativa. 3 falhas seguidas desistem da régua.
-        const sinceIso = state.last_outbound_at ?? state.started_at;
+        // Falha não conta como tentativa. 3 falhas SEGUIDAS desistem da régua.
+        //
+        // A janela precisa ser desde o último ENVIO BEM-SUCEDIDO, não desde o
+        // `last_outbound_at`: esse campo é atualizado a cada envio, então a
+        // janela anterior era zerada a cada tentativa e a regra das 3 falhas
+        // nunca disparava a partir da 2ª.
+        const { data: lastSent } = await supabase
+          .from("noreply_events")
+          .select("created_at")
+          .eq("state_id", state.id)
+          .eq("event_type", "attempt_sent")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const sinceIso = (lastSent as { created_at?: string } | null)?.created_at ?? state.started_at;
         const { count: failCount } = await supabase
           .from("noreply_events")
           .select("id", { count: "exact", head: true })
@@ -590,7 +615,7 @@ async function executeDues(
       }
 
       // Sucesso: conta a tentativa e agenda a próxima (ou o prazo final).
-      const nextAttempt = attempts[attemptIndex + 1];
+      const nextAttempt = pending[1] ?? null;
       const nextCheck = skipToBusinessDay(
         new Date(
           Date.now() +
@@ -601,11 +626,15 @@ async function executeDues(
       const { error: updErr } = await supabase
         .from("noreply_states")
         .update({
-          attempts_made: state.attempts_made + 1,
+          // Guarda o NÚMERO da tentativa enviada (não a contagem): com a
+          // tentativa 2 desativada, o número salta e o badge continua
+          // coerente com a tentativa realmente usada.
+          attempts_made: attempt.attempt_number,
           next_check_at: nextCheck.toISOString(),
           // Delay da próxima tentativa — o noreply_touch usa este valor.
           next_delay_hours: nextAttempt ? nextAttempt.delay_hours : null,
           last_outbound_at: new Date().toISOString(),
+          locked_until: null,
         })
         .eq("id", state.id)
         .eq("status", "active");
@@ -615,7 +644,7 @@ async function executeDues(
         continue;
       }
 
-      await logEvent(state.id, "attempt_sent", state.attempts_made + 1, result.messageId, {
+      await logEvent(state.id, "attempt_sent", attempt.attempt_number, result.messageId, {
         attempt_number: attempt.attempt_number,
         next_check_at: nextCheck.toISOString(),
       });
@@ -623,6 +652,8 @@ async function executeDues(
     } catch (e) {
       failed++;
       console.error("NOREPLY_EXECUTION_ERROR", state.id, e);
+      // Libera o lock para a próxima rodada não travar a régua.
+      await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
     }
   }
 
@@ -673,7 +704,7 @@ async function exhaustState(state: NoreplyState, settings: NoreplySettings): Pro
   const nowIso = new Date().toISOString();
   const { error } = await supabase
     .from("noreply_states")
-    .update({ status: "exhausted", ended_at: nowIso, next_check_at: null })
+    .update({ status: "exhausted", ended_at: nowIso, next_check_at: null, locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) {

@@ -13,6 +13,7 @@
 
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, upsertConversation } from "../_shared/contacts.ts";
+import { recordOutboundMessage } from "../_shared/outbound.ts";
 import { isWeekend, localParts, substituteVariables, timeToMinutes } from "../_shared/noreply-schedule.ts";
 import { renderGroupDm } from "../_shared/group-posts.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
@@ -186,33 +187,25 @@ async function sendDm(
   );
   if (!ok) return { messageId: null, error: `evolution sendText failed: ${respText.slice(0, 300)}` };
 
-  const { data: msgRow } = await supabase.from("messages").upsert(
+  // Caminho único de registro: normaliza o evolution_message_id (evita
+  // bolha duplicada), atualiza o preview e REPOSICIONA a régua de
+  // follow-up. Sem o `noreply_touch`, a régua matriculava esta conversa e
+  // mandava um follow-up automático logo depois da DM do grupo.
+  const { messageId, error: dbError } = await recordOutboundMessage(
+    supabase,
     {
-      conversation_id: conversationId,
-      evolution_message_id: data?.key?.id ?? `group-dm-${crypto.randomUUID()}`,
-      direction: "outbound",
-      sender_profile_id: null,
+      conversationId,
+      evolutionMessageId: data?.key?.id ?? null,
       type: "text",
       content: text,
-      media_url: null,
-      sent_at: sentAt,
-      status: "sent",
-      send_error: null,
+      senderProfileId: null,
+      sentAt,
     },
-    { onConflict: "conversation_id, evolution_message_id" },
-  ).select("id").maybeSingle();
+    "sent",
+  );
+  if (dbError) console.error("GROUP_DM_PERSIST_FAILED", dbError);
 
-  void (async () => {
-    const { error } = await supabase.rpc("bump_conversation", {
-      p_id: conversationId,
-      p_sent_at: sentAt,
-      p_preview: text.slice(0, 140),
-      p_inbound: false,
-    });
-    if (error) console.error("GROUP_DM_BUMP_FAILED", error.message);
-  })();
-
-  return { messageId: msgRow?.id ?? null, error: null };
+  return { messageId, error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +228,12 @@ Deno.serve(async (req) => {
     }
 
     const { data: dues } = await supabase.rpc("claim_group_dms", { p_limit: 50 });
+
+    // Reaper: engajamentos presos em 'sending' (runner morreu no meio)
+    // voltam para 'pending'. Sem isso a DM ficava travada para sempre.
+    const { data: reaped } = await supabase.rpc("reap_stuck_group_dms");
+    if (reaped) console.info("GROUP_DMS_REAPED", reaped);
+
     let sent = 0;
     let deferred = 0;
     let failed = 0;

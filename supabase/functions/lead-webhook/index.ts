@@ -21,11 +21,8 @@
 // GET sem body = healthcheck (exige token também).
 
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
-import { serviceClient } from "../_shared/contacts.ts";
-import {
-  normalizePhoneStrict,
-  phoneLookupVariants,
-} from "../_shared/evolution-identity.ts";
+import { serviceClient, upsertContact } from "../_shared/contacts.ts";
+import { normalizePhoneStrict } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
 
 const LEAD_SECRET = Deno.env.get("LEAD_WEBHOOK_SECRET") ??
@@ -129,55 +126,37 @@ Deno.serve(async (req) => {
   }
 
   // --- 1. Upsert contato (merge-aware, sem duplicar por variante do 9º dígito) ---
+  //
+  // Usa o `upsertContact` compartilhado: ele resolve a identidade por LID e
+  // por telefone (com as variantes do nono dígito) e faz merge. A versão
+  // anterior só buscava por telefone — um lead que já existia no CRM só
+  // como LID (sem phone) ganhava um contato DUPLICADO, que é exatamente o
+  // que o `upsertContact` foi escrito para evitar.
   let contactId: string | null = null;
   let contactIsNew = false;
   try {
-    let existing: {
-      id: string;
-      name: string | null;
-      email: string | null;
-      notes: string | null;
-      source: string | null;
-    } | null = null;
-    for (const variant of phoneLookupVariants(phone)) {
-      const { data } = await supabase
-        .from("contacts")
-        .select("id, name, email, notes, source")
-        .eq("phone", variant)
-        .maybeSingle();
-      if (data) {
-        existing = data;
-        break;
-      }
-    }
+    const existing = await upsertContact(supabase, phone, null, null);
 
-    if (existing) {
-      contactId = existing.id;
+    const { data: current } = await supabase
+      .from("contacts")
+      .select("id, name, email, notes, source")
+      .eq("id", existing)
+      .maybeSingle();
+
+    contactId = existing;
+    if (!current) {
+      contactIsNew = true;
+    } else {
       const patch: Record<string, unknown> = {};
-      if (name && !existing.name) patch.name = name;
-      if (email && !existing.email) patch.email = email;
-      if (notes && !existing.notes) patch.notes = notes;
+      if (name && !current.name) patch.name = name;
+      if (email && !current.email) patch.email = email;
+      if (notes && !current.notes) patch.notes = notes;
       // Lead de landing tem origem mais valiosa que 'whatsapp' orgânico;
       // contato 'manual' do CRM é preservado.
-      if (existing.source === "whatsapp") patch.source = "landing";
+      if (current.source === "whatsapp") patch.source = "landing";
       if (Object.keys(patch).length > 0) {
-        await supabase.from("contacts").update(patch).eq("id", existing.id);
+        await supabase.from("contacts").update(patch).eq("id", existing);
       }
-    } else {
-      const { data, error } = await supabase
-        .from("contacts")
-        .insert({
-          phone,
-          name: name || null,
-          email: email || null,
-          notes: notes || null,
-          source: "landing",
-        })
-        .select("id")
-        .single();
-      if (error || !data) throw new Error(error?.message ?? "contact insert failed");
-      contactId = data.id;
-      contactIsNew = true;
     }
   } catch (e) {
     console.error("LEAD_CONTACT_UPSERT_FAILED", String(e));
@@ -247,45 +226,30 @@ Deno.serve(async (req) => {
       stageName = first.name;
     }
 
-    // Idempotência: já existe oportunidade aberta p/ contato+pipeline?
-    const { data: open } = await supabase
-      .from("opportunities")
-      .select("id, stage_id, conversation_id")
-      .eq("contact_id", contactId)
-      .eq("pipeline_id", pipelineId)
-      .eq("status", "open")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (open) {
-      deduplicated = true;
-      opportunityId = open.id;
-    } else {
-      const title = name ? `${name}` : phone;
-      const { data: opp, error: oppErr } = await supabase
-        .from("opportunities")
-        .insert({
-          contact_id: contactId,
-          pipeline_id: pipelineId,
-          stage_id: stageId,
-          title,
-          description: notes || null,
-          status: "open",
-          metadata: { source: "landing", created_via: "lead-webhook", ...utm },
-        })
-        .select("id")
-        .single();
-      if (oppErr || !opp) throw new Error(oppErr?.message ?? "opportunity insert failed");
-      opportunityId = opp.id;
+    // Idempotência atômica: `lead_ensure_opportunity` trava o contato e faz
+    // "get-or-create" numa transação. Antes o código fazia SELECT e depois
+    // INSERT — dois POSTs simultâneos criavam DOIS cards para o mesmo lead.
+    const title = name ? `${name}` : phone;
+    const { data: result, error: oppErr } = await supabase.rpc("lead_ensure_opportunity", {
+      p_contact_id: contactId,
+      p_pipeline_id: pipelineId,
+      p_stage_id: stageId,
+      p_title: title,
+      p_description: notes || null,
+      p_metadata: { source: "landing", created_via: "lead-webhook", ...utm },
+    });
+    if (oppErr || !result) throw new Error(oppErr?.message ?? "opportunity upsert failed");
+    const payload = result as { id: string; created: boolean };
+    opportunityId = payload.id;
+    deduplicated = !payload.created;
 
-      // Auditoria (best-effort).
-      await supabase.from("activity_log").insert({
-        entity_type: "opportunity",
-        entity_id: opp.id,
-        action: "LEAD_WEBHOOK_CREATED",
-        new_data: { contact_id: contactId, pipeline_id: pipelineId, stage_id: stageId, ...utm },
-      }).then(() => {}, () => {});
-    }
+    // Auditoria (best-effort).
+    await supabase.from("activity_log").insert({
+      entity_type: "opportunity",
+      entity_id: opportunityId,
+      action: payload.created ? "LEAD_WEBHOOK_CREATED" : "LEAD_WEBHOOK_DEDUPLICATED",
+      new_data: { contact_id: contactId, pipeline_id: pipelineId, stage_id: stageId, ...utm },
+    }).then(() => {}, () => {});
   } catch (e) {
     console.error("LEAD_OPPORTUNITY_FAILED", String(e));
     return jsonResponse(500, { error: "falha ao criar oportunidade" });

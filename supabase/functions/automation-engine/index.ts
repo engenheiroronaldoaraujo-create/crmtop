@@ -1,6 +1,8 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
+import { resolveSendTarget } from "../_shared/evolution-identity.ts";
+import { recordOutboundMessage } from "../_shared/outbound.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
@@ -113,12 +115,122 @@ async function isBusinessHours(supabase: Supabase, timezone: string = "America/S
     .from("business_hours")
     .select("is_active, start_time, end_time")
     .eq("day_of_week", dayOfWeek)
-    .single();
+    .maybeSingle();
 
   if (!hours || !hours.is_active) return false;
 
-  const localTime = now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: timezone });
-  return localTime >= hours.start_time && localTime <= hours.end_time;
+  // Minutos do dia local — comparar strings ("09:00" <= "18:00") funciona
+  // para o formato HH:MM, mas a janela pode ATRAVESSAR a meia-noite
+  // (ex.: 22:00 → 02:00), caso em que a comparação de string é sempre falsa.
+  const localTime = now.toLocaleTimeString("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: timezone,
+  });
+  const toMinutes = (t: string) => {
+    const [h, m] = t.split(":").map((v) => Number(v));
+    return (h || 0) * 60 + (m || 0);
+  };
+  const nowMin = toMinutes(localTime);
+  const startMin = toMinutes(hours.start_time);
+  const endMin = toMinutes(hours.end_time);
+
+  if (startMin <= endMin) return nowMin >= startMin && nowMin <= endMin;
+  // Janela que atravessa a meia-noite.
+  return nowMin >= startMin || nowMin <= endMin;
+}
+
+// ---------------------------------------------------------------------------
+// Action: enviar mensagem de WhatsApp
+// ---------------------------------------------------------------------------
+
+/**
+ * Envia uma mensagem de WhatsApp para o contato do contexto.
+ *
+ * Esta ação NÃO existia: a UI oferecia "Enviar mensagem WhatsApp" e a regra
+ * seedada "Fora do Horário - Resposta Automática" a usava, mas o motor
+ * caía no `default` e registrava `AUTOMATION_ACTION_FAILED` — a execução
+ * ainda era gravada como "completed", então o histórico mentia.
+ */
+async function actionSendWhatsAppMessage(
+  supabase: Supabase,
+  params: Record<string, unknown>,
+  context: Record<string, unknown>,
+): Promise<{ success: boolean; result?: unknown; error?: string }> {
+  const contact = context.contact as Record<string, unknown> | undefined;
+  const conversation = context.conversation as Record<string, unknown> | undefined;
+  if (!contact?.id) return { success: false, error: "No contact in context" };
+
+  // Opt-out: nunca enviar para quem pediu para não receber.
+  if (contact.opted_out === true) {
+    return { success: false, error: "contact opted out" };
+  }
+
+  const text = substituteVariables(String(params.message ?? ""), context).trim();
+  if (!text) return { success: false, error: "empty message" };
+
+  const sendTarget = resolveSendTarget({
+    phone: (contact.phone as string | null) ?? null,
+    lid: (contact.lid as string | null) ?? null,
+    jid: (contact.jid as string | null) ?? null,
+  }).target;
+  if (!sendTarget) return { success: false, error: "contact has no reliable send target" };
+
+  // Instância: a da conversa do contexto; senão a primeira conectada.
+  let instanceName = (conversation?.instance as { instance_name?: string } | undefined)?.instance_name ?? null;
+  let instanceId = (conversation?.instance_id as string | null) ?? null;
+  if (!instanceName) {
+    const { data: inst } = await supabase
+      .from("whatsapp_instances")
+      .select("id, instance_name")
+      .eq("status", "connected")
+      .order("created_at")
+      .limit(1)
+      .maybeSingle();
+    if (!inst) return { success: false, error: "no connected WhatsApp instance" };
+    instanceName = inst.instance_name;
+    instanceId = inst.id;
+  }
+
+  const apiUrl = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
+  const apiKey = Deno.env.get("EVOLUTION_API_KEY") ?? "";
+  if (!apiUrl || !apiKey) return { success: false, error: "Evolution API not configured" };
+
+  let ok = false;
+  let respText = "";
+  try {
+    const res = await fetch(`${apiUrl}/message/sendText/${instanceName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: apiKey },
+      body: JSON.stringify({ number: sendTarget, text }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    ok = res.ok;
+    if (!ok) respText = (await res.text()).slice(0, 300);
+  } catch (e) {
+    return { success: false, error: `evolution sendText failed: ${String(e).slice(0, 200)}` };
+  }
+  if (!ok) return { success: false, error: `evolution sendText failed: ${respText}` };
+
+  // Registra no chat (caminho único de outbound) e reposiciona a régua.
+  const conversationId = conversation?.id as string | undefined;
+  if (conversationId) {
+    await recordOutboundMessage(
+      supabase,
+      {
+        conversationId,
+        evolutionMessageId: null,
+        type: "text",
+        content: text,
+        senderProfileId: null,
+        sentAt: new Date().toISOString(),
+      },
+      "sent",
+    );
+  }
+
+  return { success: true, result: { sent: true, to: sendTarget } };
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +270,8 @@ async function executeAction(
         return await actionCreateActivityLog(supabase, action.params, context);
       case "NOTIFY_USER":
         return await actionNotifyUser(supabase, action.params, context);
+      case "SEND_WHATSAPP_MESSAGE":
+        return await actionSendWhatsAppMessage(supabase, action.params, context);
       default:
         return { success: false, error: `Unknown action type: ${action.type}` };
     }
@@ -647,11 +761,19 @@ async function processRule(
       }
     }
 
-    // Update execution
+    // Update execution.
+    //
+    // O status NÃO pode ser "completed" quando alguma ação falhou: o histórico
+    // dizia "completed" para uma regra que nunca mandou nada (ex.: a ação
+    // SEND_WHATSAPP_MESSAGE, que não existia no motor).
+    const anyFailed = actionsLog.some((a) => a.status === "failed");
     await supabase
       .from("automation_executions")
       .update({
-        status: "completed",
+        status: anyFailed ? "failed" : "completed",
+        error: anyFailed
+          ? actionsLog.filter((a) => a.status === "failed").map((a) => `${a.type}: ${a.error ?? "erro"}`).join("; ").slice(0, 500)
+          : null,
         actions_log: actionsLog,
         finished_at: new Date().toISOString(),
       })
@@ -692,11 +814,17 @@ Deno.serve(async (req) => {
 
     const supabase = serviceClient();
 
-    // Autorização: token do webhook (query ?token=WEBHOOK_SECRET) — caminho
-    // das mensagens — OU token interno do pg_cron no body, aceito SOMENTE
-    // para event = WATCHDOG_IDLE (o cron não tem o segredo de env; o token
-    // vive em app_secrets e falha fechado se ausente/diferente).
-    let authorized = timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET);
+    // Autorização: token do webhook — caminho das mensagens — OU token
+    // interno do pg_cron no body, aceito SOMENTE para event = WATCHDOG_IDLE
+    // (o cron não tem o segredo de env; o token vive em app_secrets e falha
+    // fechado se ausente/diferente).
+    //
+    // O token pode vir no header `x-webhook-token` (caminho preferido: não
+    // aparece em access log, `Referer` nem histórico) ou na query string
+    // (compatibilidade com a URL já registrada na Evolution).
+    const headerToken = req.headers.get("x-webhook-token") ?? "";
+    let authorized = timingSafeEqual(headerToken, WEBHOOK_SECRET) ||
+      timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET);
     if (!authorized && event === "WATCHDOG_IDLE") {
       const internalToken = String(payload?.internal_token ?? "").trim();
       if (internalToken) {
@@ -768,14 +896,17 @@ Deno.serve(async (req) => {
       contactId = conv?.contact_id ?? null;
     }
 
-    // FIRST_MESSAGE_RECEIVED quando é o 1º inbound da conversa (esta já conta).
+    // FIRST_MESSAGE_RECEIVED: o primeiro inbound RESERVA o gatilho de forma
+    // atômica (UPDATE condicional no banco).
+    //
+    // Antes era decidido por contagem (`count(inbound) <= 1`): duas mensagens
+    // em paralelo viam ambas count=2 e a regra nunca disparava; depois de um
+    // sync de histórico, o count já era >1 e nunca mais disparava.
     let eventType = "MESSAGE_RECEIVED";
-    const { count: inboundCount } = await supabase
-      .from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("conversation_id", conversationId)
-      .eq("direction", "inbound");
-    if ((inboundCount ?? 0) <= 1) eventType = "FIRST_MESSAGE_RECEIVED";
+    const { data: firstClaimed } = await supabase.rpc("claim_first_message", {
+      p_conversation_id: conversationId,
+    });
+    if (firstClaimed === true) eventType = "FIRST_MESSAGE_RECEIVED";
 
     const triggerEvent: TriggerEvent = {
       event_type: eventType,
@@ -787,6 +918,11 @@ Deno.serve(async (req) => {
         contact_id: contactId,
         text: data?.text ?? "",
         media_type: data?.media_type ?? "text",
+        // Direção da mensagem que disparou o evento. A regra seedada
+        // "Fora do Horário" filtra por `message_direction equals inbound` —
+        // sem este campo a condição nunca era verdadeira e a regra nunca
+        // casava.
+        message_direction: "inbound",
       },
     };
 

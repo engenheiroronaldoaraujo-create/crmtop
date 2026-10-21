@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, upsertConversation } from "../_shared/contacts.ts";
+import { recordOutboundMessage } from "../_shared/outbound.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
 
@@ -53,6 +54,7 @@ interface Enrollment {
   completed_at: string | null;
   cancelled_at: string | null;
   assigned_to: string | null;
+  locked_until?: string | null;
 }
 
 interface Contact {
@@ -62,6 +64,7 @@ interface Contact {
   phone: string | null;
   lid: string | null;
   jid: string | null;
+  opted_out: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,22 +134,33 @@ async function callEvolution(
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; data: any; text: string }> {
-  const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
-    method: body !== undefined ? "POST" : "GET",
-    headers: {
-      apikey: EVOLUTION_API_KEY,
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data: any = null;
+  // Timeout: sem AbortSignal, uma Evolution travada segura o isolate até o
+  // limite da plataforma e o cron enfileira a próxima rodada por cima.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
+    const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
+      method: body !== undefined ? "POST" : "GET",
+      headers: {
+        apikey: EVOLUTION_API_KEY,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    return { ok: res.ok, data, text };
+  } catch (e) {
+    return { ok: false, data: null, text: `evolution request failed: ${String(e).slice(0, 200)}` };
+  } finally {
+    clearTimeout(timeout);
   }
-  return { ok: res.ok, data, text };
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +202,25 @@ async function loadOpportunity(oppId: string): Promise<Opportunity | null> {
 async function loadContact(contactId: string): Promise<Contact | null> {
   const { data } = await supabase
     .from("contacts")
-    .select("id, name, push_name, phone, lid, jid")
+    .select("id, name, push_name, phone, lid, jid, opted_out")
     .eq("id", contactId)
     .maybeSingle();
   return (data as Contact) ?? null;
+}
+
+/**
+ * O lead respondeu desde a última mensagem da cadência?
+ *
+ * A cadência só checava `opportunity.status === 'open'` — um lead que já
+ * respondeu continuava recebendo a sequência automática. O CRM marca a
+ * última mensagem recebida em `conversations.last_message_inbound`.
+ */
+async function leadReplied(opp: Opportunity): Promise<boolean> {
+  const { data: convs } = await supabase
+    .from("conversations")
+    .select("id, last_message_inbound")
+    .eq("contact_id", opp.contact_id);
+  return (convs ?? []).some((c: any) => c.last_message_inbound === true);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,39 +322,30 @@ async function sendStepMessage(
     text,
   });
 
-  // Persiste a mensagem (upsert por evolution_message_id; falha registrada).
+  // Persiste a mensagem. `recordOutboundMessage` normaliza o
+  // evolution_message_id (evita bolha duplicada em retry) e reposiciona a
+  // régua de follow-up — sem isso, a cadência e a régua noreply competiam
+  // pelo mesmo lead.
   const conversationId = await upsertConversation(supabase, contact.id, owner.instance_id);
-  const { data: msgRow } = await supabase
-    .from("messages")
-    .upsert(
-      {
-        conversation_id: conversationId,
-        evolution_message_id: data?.key?.id ?? null,
-        direction: "outbound",
-        sender_profile_id: null,
-        type: "text",
-        content: text,
-        media_url: null,
-        sent_at: sentAt,
-        status: ok ? "sent" : "failed",
-        send_error: ok ? null : respText.slice(0, 300),
-      },
-      { onConflict: "conversation_id, evolution_message_id" },
-    )
-    .select("id")
-    .maybeSingle();
+  const { messageId, error: dbError } = await recordOutboundMessage(
+    supabase,
+    {
+      conversationId,
+      evolutionMessageId: data?.key?.id ?? null,
+      type: "text",
+      content: text,
+      senderProfileId: null,
+      sentAt,
+      sendError: ok ? null : respText.slice(0, 300),
+    },
+    ok ? "sent" : "failed",
+  );
 
-  void (async () => {
-    const { error } = await supabase.rpc("bump_conversation", {
-      p_id: conversationId,
-      p_sent_at: sentAt,
-      p_preview: text.slice(0, 140),
-      p_inbound: false,
-    });
-    if (error) console.error("BUMP_CONVERSATION_FAILED", error.message);
-  })();
+  if (dbError) {
+    console.error("CADENCE_MESSAGE_PERSIST_FAILED", dbError);
+  }
 
-  return { messageId: msgRow?.id ?? null, error: ok ? null : `evolution sendText failed: ${respText}` };
+  return { messageId, error: ok ? null : `evolution sendText failed: ${respText}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -384,16 +404,20 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
 
   const cadenceById = new Map(cadences.map((c) => [c.id, c]));
 
-  const { data: dues } = await supabase
-    .from("cadence_enrollments")
-    .select("*")
-    .eq("status", "active")
-    .lte("next_run_at", new Date().toISOString())
-    .order("next_run_at")
-    .limit(50);
-  if (!dues || dues.length === 0) return { executed, failed };
+  // Claim atômico: `pg_cron` dispara o runner por HTTP e a execução anterior
+  // pode ainda estar viva. O claim reserva a matrícula (locked_until) para uma
+  // única execução — sem ele, duas rodadas mandavam a mesma mensagem 2x.
+  const { data: dueRows, error: claimError } = await supabase.rpc("claim_cadence_enrollments", {
+    p_limit: 50,
+  });
+  if (claimError) {
+    console.error("CADENCE_CLAIM_FAILED", claimError.message);
+    return { executed, failed };
+  }
+  const dues = (dueRows ?? []) as Enrollment[];
+  if (dues.length === 0) return { executed, failed };
 
-  for (const enr of dues as Enrollment[]) {
+  for (const enr of dues) {
     try {
       const cadence = cadenceById.get(enr.cadence_id);
       // Cadência desativada/deletada: pausa (não cancela, admin pode reativar).
@@ -403,8 +427,36 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
       if (!opp || opp.status !== "open") {
         await supabase
           .from("cadence_enrollments")
-          .update({ status: "cancelled", cancelled_at: new Date().toISOString(), next_run_at: null })
+          .update({ status: "cancelled", cancelled_at: new Date().toISOString(), next_run_at: null, locked_until: null })
           .eq("id", enr.id);
+        continue;
+      }
+
+      // O lead respondeu? A cadência é para lead mudo — se ele respondeu, o
+      // vendedor (ou a IA) assumiu a conversa e a sequência deve parar.
+      if (await leadReplied(opp)) {
+        await supabase
+          .from("cadence_enrollments")
+          .update({ status: "cancelled", cancelled_at: new Date().toISOString(), next_run_at: null, locked_until: null })
+          .eq("id", enr.id);
+        await supabase.from("cadence_executions").insert({
+          enrollment_id: enr.id, status: "skipped",
+          details: { reason: "lead_respondeu" },
+        });
+        continue;
+      }
+
+      // Opt-out: contato que pediu para não receber nunca é contatado.
+      const contact = opp.contact_id ? await loadContact(opp.contact_id) : null;
+      if (contact?.opted_out) {
+        await supabase
+          .from("cadence_enrollments")
+          .update({ status: "cancelled", cancelled_at: new Date().toISOString(), next_run_at: null, locked_until: null })
+          .eq("id", enr.id);
+        await supabase.from("cadence_executions").insert({
+          enrollment_id: enr.id, status: "skipped",
+          details: { reason: "opted_out" },
+        });
         continue;
       }
 
@@ -413,7 +465,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
         // Sem etapa: completa e encerra.
         await supabase
           .from("cadence_enrollments")
-          .update({ status: "completed", completed_at: new Date().toISOString(), next_run_at: null })
+          .update({ status: "completed", completed_at: new Date().toISOString(), next_run_at: null, locked_until: null })
           .eq("id", enr.id);
         continue;
       }
@@ -432,6 +484,11 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
             enrollment_id: enr.id, step_id: step.id, step_order: step.step_order,
             status: "failed", error: `move stage: ${moveErr.message}`,
           });
+          // Não avança a etapa: tenta de novo em 1h.
+          await supabase
+            .from("cadence_enrollments")
+            .update({ next_run_at: new Date(Date.now() + 3600_000).toISOString(), locked_until: null })
+            .eq("id", enr.id);
           continue;
         }
       }
@@ -440,19 +497,35 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
       let messageId: string | null = null;
       let sendError: string | null = null;
       if (step.send_message) {
-        const contact = opp.contact_id ? await loadContact(opp.contact_id) : null;
-        if (contact) {
+        if (!contact) {
+          sendError = "contato não encontrado";
+        } else {
           const sent = await sendStepMessage(cadence, step, opp, contact);
           messageId = sent.messageId;
           sendError = sent.error;
-        } else {
-          sendError = "contato não encontrado";
         }
+      }
+
+      // Falha de envio NÃO avança a etapa: a mensagem que falhou precisa ser
+      // reenviada. Antes a cadência passava para a etapa seguinte e o lead
+      // nunca recebia aquele conteúdo.
+      if (sendError) {
+        failed++;
+        await supabase.from("cadence_executions").insert({
+          enrollment_id: enr.id, step_id: step.id, step_order: step.step_order,
+          status: "failed", message_id: messageId, error: sendError,
+          details: { stageMoved: opp.stage_id !== step.stage_id, cadence: cadence.name, retry: true },
+        });
+        await supabase
+          .from("cadence_enrollments")
+          .update({ next_run_at: new Date(Date.now() + 3600_000).toISOString(), locked_until: null })
+          .eq("id", enr.id);
+        continue;
       }
 
       // Avança: próxima etapa (delay dela) ou completa.
       const nextStep = cadence.steps[enr.current_step + 1];
-      const updates: Partial<Enrollment> = { current_step: enr.current_step + 1 };
+      const updates: Partial<Enrollment> = { current_step: enr.current_step + 1, locked_until: null };
       if (nextStep) {
         updates.next_run_at = nextRunAt(cadence, nextStep);
       } else {
@@ -469,17 +542,19 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
         enrollment_id: enr.id,
         step_id: step.id,
         step_order: step.step_order,
-        status: sendError ? (updErr || moveErr ? "failed" : "completed") : "completed",
+        status: updErr ? "failed" : "completed",
         message_id: messageId,
-        error: sendError ?? updErr?.message ?? null,
+        error: updErr?.message ?? null,
         details: { stageMoved: opp.stage_id !== step.stage_id, cadence: cadence.name },
       });
 
-      if (sendError || updErr) failed++;
+      if (updErr) failed++;
       else executed++;
     } catch (e) {
       failed++;
       console.error("CADENCE_EXECUTION_ERROR", enr.id, e);
+      // Libera o lock para a próxima rodada não travar a matrícula.
+      await supabase.from("cadence_enrollments").update({ locked_until: null }).eq("id", enr.id);
     }
   }
 
@@ -500,6 +575,7 @@ async function reconcile(cadences: Cadence[]): Promise<{ synced: number; cancell
     .from("cadence_enrollments")
     .select("*")
     .in("status", ["active", "paused"])
+    .or(`locked_until.is.null,locked_until.lt.${new Date().toISOString()}`)
     .limit(500);
   if (!actives || actives.length === 0) return { synced, cancelled };
 
