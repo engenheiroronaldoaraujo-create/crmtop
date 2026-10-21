@@ -184,33 +184,42 @@ create policy "conversations_update" on public.conversations
 -- ---------------------------------------------------------------------------
 -- 3. CHECK de formato em contacts (identidade canônica no banco)
 -- ---------------------------------------------------------------------------
+--
+-- As constraints entram como `NOT VALID`: o Postgres passa a rejeitar
+-- telefone/LID inválido em linhas novas e atualizadas, mas NÃO varre as
+-- linhas existentes. Sem isso, `supabase db push` quebraria se ainda
+-- restasse lixo das 13 migrations de reparo (013, 016..024, 040, 042) — e
+-- um push que falha bloqueia todas as migrations seguintes.
+--
+-- A contagem do que sobrou é logada; a limpeza é o passo seguinte
+-- (revisar o que for normalizável e apagar o que for lixo).
 
 do $$
 declare
-  bad_count int;
+  bad_phones int;
+  bad_lids   int;
 begin
-  -- Telefone vazio não pode existir (o UNIQUE permitiria só um).
-  select count(*) into bad_count
+  select count(*) into bad_phones
   from public.contacts
-  where phone = '' or (phone is not null and phone !~ '^[0-9]{10,13}$');
-  if bad_count > 0 then
-    raise exception
-      'contacts com telefone inválido: %. Rode a limpeza antes (migrations 013/022/040/042).',
-      bad_count;
-  end if;
+  where phone is not null and phone !~ '^[0-9]{10,13}$';
+  select count(*) into bad_lids
+  from public.contacts
+  where lid is not null and lid not like 'lid:%';
+  raise notice 'contacts com telefone fora do padrão: % | lid fora do padrão: %',
+    bad_phones, bad_lids;
 end $$;
 
 alter table public.contacts
   drop constraint if exists contacts_phone_format;
 alter table public.contacts
   add constraint contacts_phone_format
-  check (phone is null or phone ~ '^[0-9]{10,13}$');
+  check (phone is null or phone ~ '^[0-9]{10,13}$') not valid;
 
 alter table public.contacts
   drop constraint if exists contacts_lid_format;
 alter table public.contacts
   add constraint contacts_lid_format
-  check (lid is null or lid like 'lid:%');
+  check (lid is null or lid like 'lid:%') not valid;
 
 -- ---------------------------------------------------------------------------
 -- 4. FKs com ON DELETE coerente (as policies de DELETE passam a funcionar)

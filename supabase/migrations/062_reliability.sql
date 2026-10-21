@@ -45,6 +45,12 @@ alter table public.noreply_states
 alter table public.whatsapp_instances
   add column if not exists sync_page_names int;
 
+-- Backfill: o cursor antigo (`sync_page`) era compartilhado. O do sync de
+-- nomes começa de onde o compartilhado estava.
+update public.whatsapp_instances
+   set sync_page_names = coalesce(sync_page_names, sync_page)
+ where sync_page_names is null;
+
 create index if not exists cadence_enrollments_locked_idx
   on public.cadence_enrollments (locked_until)
   where status = 'active';
@@ -387,6 +393,18 @@ end $$;
 -- atômica (UPDATE condicional) e só ele dispara.
 alter table public.conversations
   add column if not exists first_inbound_seen boolean not null default false;
+
+-- Backfill: conversas que JÁ têm mensagem inbound não podem disparar o
+-- gatilho "primeira mensagem" de novo. Sem isto, o próximo inbound de cada
+-- conversa existente dispararia a regra uma vez (falso positivo).
+update public.conversations c
+   set first_inbound_seen = true
+ where c.first_inbound_seen = false
+   and exists (
+     select 1 from public.messages m
+      where m.conversation_id = c.id
+        and m.direction = 'inbound'
+   );
 
 create or replace function public.claim_first_message(p_conversation_id uuid)
 returns boolean
