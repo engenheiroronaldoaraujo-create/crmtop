@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { supabase } from "@/lib/supabase"
+import { escapePostgrestSearch } from "@/lib/utils"
 import type { Tag } from "@/lib/types"
 
 // ---------------------------------------------------------------------------
@@ -9,15 +10,24 @@ import type { Tag } from "@/lib/types"
 export function useTags() {
   const [tags, setTags] = useState<Tag[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("tags")
       .select("*")
       .eq("is_active", true)
       .order("name")
-    setTags((data as Tag[]) ?? [])
+    // Erro descartado = lista vazia silenciosa (o usuário não distingue
+    // "sem etiquetas" de "a query falhou").
+    if (queryError) {
+      console.error("useTags failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setTags((data as Tag[]) ?? [])
+    }
     setLoading(false)
   }, [])
 
@@ -49,7 +59,7 @@ export function useTags() {
     await update(id, { is_active: true })
   }, [update])
 
-  return { tags, loading, refresh, create, update, deactivate, reactivate }
+  return { tags, loading, error, refresh, create, update, deactivate, reactivate }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +184,8 @@ export function useGlobalSearch() {
     }
     // PostgREST `or=` usa vírgula/parênteses como separadores e `%`/`_` como
     // curingas: sanitize para não quebrar a query nem virar wildcard.
-    const sanitized = raw.replace(/[%_,()"'*\\]/g, "").replace(/\s+/g, " ").trim()
+    // O mesmo escape é usado na busca de contatos (escapePostgrestSearch).
+    const sanitized = escapePostgrestSearch(raw).replace(/\s+/g, " ")
     if (!sanitized) {
       setResults({ contacts: [], opportunities: [], conversations: [] })
       return

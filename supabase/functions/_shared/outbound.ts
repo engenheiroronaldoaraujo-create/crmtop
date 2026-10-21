@@ -42,7 +42,9 @@ export interface OutboundResult {
  * retry de envio cria uma linha duplicada no chat. Falhas usam um id único
  * por tentativa (`failed-<uuid>`) — assim o retry é rastreável e não colide.
  */
-export function normalizeEvolutionMessageId(id: string | null | undefined): string {
+export function normalizeEvolutionMessageId(
+  id: string | null | undefined,
+): string {
   const trimmed = (id ?? "").trim();
   if (!trimmed) return `failed-${crypto.randomUUID()}`;
   return trimmed;
@@ -61,7 +63,9 @@ export async function recordOutboundMessage(
   status: MessageStatus = "sent",
   opts: { touchNoreply?: boolean } = {},
 ): Promise<OutboundResult> {
-  const evolutionMessageId = normalizeEvolutionMessageId(input.evolutionMessageId);
+  const evolutionMessageId = normalizeEvolutionMessageId(
+    input.evolutionMessageId,
+  );
 
   const { data: msgRow, error } = await supabase
     .from("messages")

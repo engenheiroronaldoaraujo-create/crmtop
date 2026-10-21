@@ -43,27 +43,48 @@ export default function MyAccountPage() {
 
   async function handleChangePassword(e: FormEvent) {
     e.preventDefault()
-    if (newPassword.length < 6) {
-      toast.error("A nova senha precisa de pelo menos 6 caracteres")
+    if (newPassword.length < 8) {
+      toast.error("A nova senha precisa de pelo menos 8 caracteres")
       return
     }
     if (newPassword !== confirmPassword) {
       toast.error("A confirmação não confere")
       return
     }
-    setSavingPassword(true)
-    const { error } = await supabase.auth.updateUser({
-      password: newPassword,
-    })
-    setSavingPassword(false)
-    if (error) {
-      toast.error(error.message)
+    if (!user?.email) {
+      toast.error("Não foi possível identificar o usuário")
       return
     }
-    setCurrentPassword("")
-    setNewPassword("")
-    setConfirmPassword("")
-    toast.success("Senha alterada com sucesso")
+    setSavingPassword(true)
+    try {
+      // REAUTENTICAÇÃO.
+      //
+      // Antes a senha atual era coletada e NUNCA validada: bastava ter uma
+      // sessão (sequestrada ou de um navegador logado) para trocar a senha
+      // da conta. Agora exigimos a senha atual antes de trocar.
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: currentPassword,
+      })
+      if (signInError) {
+        toast.error("Senha atual incorreta")
+        return
+      }
+
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      })
+      if (error) {
+        toast.error(error.message)
+        return
+      }
+      setCurrentPassword("")
+      setNewPassword("")
+      setConfirmPassword("")
+      toast.success("Senha alterada com sucesso")
+    } finally {
+      setSavingPassword(false)
+    }
   }
 
   return (
@@ -120,7 +141,7 @@ export default function MyAccountPage() {
                   id="acc-new"
                   type="password"
                   required
-                  minLength={6}
+                  minLength={8}
                   autoComplete="new-password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
@@ -132,7 +153,7 @@ export default function MyAccountPage() {
                   id="acc-confirm"
                   type="password"
                   required
-                  minLength={6}
+                  minLength={8}
                   autoComplete="new-password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}

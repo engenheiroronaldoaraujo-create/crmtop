@@ -3,8 +3,9 @@
   "specifiers": {
     "jsr:@deno/installer-shell-setup@*": "0.3.4",
     "jsr:@std/assert@*": "1.0.19",
+    "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
-    "npm:mediabunny@1.60.0": "1.60.0"
+    "npm:mediabunny@1.61.0": "1.61.0"
   },
   "jsr": {
     "@deno/installer-shell-setup@0.3.4": {
@@ -30,8 +31,8 @@
     "@types/dom-webcodecs@0.1.13": {
       "integrity": "sha512-O5hkiFIcjjszPIYyUSyvScyvrBoV3NOEEZx/pMlsu44TKzWNkLVBBxnxJz42in5n3QIolYOcBYFCPZZ0h8SkwQ=="
     },
-    "mediabunny@1.60.0": {
-      "integrity": "sha512-CRQ/2D+qUF9w2IyjbjTxxSLEG+PeWeD4whb43UpUBpeNomWb/ffn+ngKgqJSPZ+bmO66MX2yBJQITZ6ijfRjug==",
+    "mediabunny@1.61.0": {
+      "integrity": "sha512-WciPOYwKZwgYkoBKcEK6JzzIf+w5whypPzFdOihOylZ/5Qv19FmNfRnTcaprH+jD136YpEASU30Eb6VNCJiz3A==",
       "dependencies": [
         "@types/dom-mediacapture-transform",
         "@types/dom-webcodecs"

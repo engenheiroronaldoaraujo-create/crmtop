@@ -131,9 +131,13 @@ export default function WhatsAppSettings() {
     setQrLoading(false)
   }, [fetchQr])
 
-  // Poll de status a cada 3s; QR só quando desconectado e no máximo a cada
-  // 20s (chamar /connect em excesso atrapalha o pareamento). Erro de QR vira
-  // toast no máximo a cada 30s (sem spam).
+  // Poll de status; QR só quando desconectado e no máximo a cada 20s (chamar
+  // /connect em excesso atrapalha o pareamento). Erro de QR vira toast no
+  // máximo a cada 30s (sem spam).
+  //
+  // Quando a instância está CONECTADA, o poll afrouxa para 15s: a 3s eram
+  // ~28.800 chamadas/dia para a Evolution com o painel aberto o dia todo,
+  // sem nenhum ganho (o QR não é buscado nesse estado).
   useEffect(() => {
     if (!instance?.id) return
     let active = true
@@ -173,12 +177,23 @@ export default function WhatsAppSettings() {
       }
     }
     tick()
-    const iv = window.setInterval(tick, 3000)
+    // Intervalo adaptativo: 3s enquanto não conectado (precisa do QR rápido),
+    // 15s quando conectado (só quer saber se caiu).
+    let iv = window.setInterval(tick, 3000)
+    const adjust = window.setInterval(() => {
+      const connected = instance?.status === "connected"
+      const current = connected ? 15000 : 3000
+      if (Number(iv) !== current) {
+        window.clearInterval(iv)
+        iv = window.setInterval(tick, current)
+      }
+    }, 5000)
     return () => {
       active = false
       window.clearInterval(iv)
+      window.clearInterval(adjust)
     }
-  }, [instance?.id, refreshStatus])
+  }, [instance?.id, instance?.status, refreshStatus])
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault()

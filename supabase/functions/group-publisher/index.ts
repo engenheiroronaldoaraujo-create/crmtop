@@ -58,22 +58,33 @@ async function callEvolution(
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; data: any; text: string }> {
-  const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
-    method: body !== undefined ? "POST" : "GET",
-    headers: {
-      apikey: EVOLUTION_API_KEY,
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data: any = null;
+  // Timeout: sem AbortSignal, uma Evolution travada segura o isolate até o
+  // limite da plataforma.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
+    const res = await fetch(`${EVOLUTION_API_URL}${path}`, {
+      method: body !== undefined ? "POST" : "GET",
+      headers: {
+        apikey: EVOLUTION_API_KEY,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    return { ok: res.ok, data, text };
+  } catch (e) {
+    return { ok: false, data: null, text: `evolution request failed: ${String(e).slice(0, 200)}` };
+  } finally {
+    clearTimeout(timeout);
   }
-  return { ok: res.ok, data, text };
 }
 
 const instanceStateCache = new Map<string, { connected: boolean; at: number }>();

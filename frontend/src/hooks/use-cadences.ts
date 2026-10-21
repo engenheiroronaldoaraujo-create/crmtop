@@ -9,14 +9,21 @@ import type { Cadence, CadenceEnrollment, CadenceStep } from "@/lib/types"
 export function useCadences() {
   const [cadences, setCadences] = useState<Cadence[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("cadences")
       .select("*, pipeline:pipelines(*), trigger_stage:pipeline_stages(*)")
       .order("created_at", { ascending: false })
-    setCadences((data as Cadence[]) ?? [])
+    if (queryError) {
+      console.error("useCadences failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setCadences((data as Cadence[]) ?? [])
+    }
     setLoading(false)
   }, [])
 
@@ -53,7 +60,7 @@ export function useCadences() {
     await refresh()
   }, [refresh])
 
-  return { cadences, loading, refresh, create, update, remove }
+  return { cadences, loading, error, refresh, create, update, remove }
 }
 
 // ---------------------------------------------------------------------------

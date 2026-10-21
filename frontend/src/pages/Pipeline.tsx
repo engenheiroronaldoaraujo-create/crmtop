@@ -35,7 +35,7 @@ import {
   useOpportunities,
 } from "@/hooks/use-commercial"
 import { useCadenceEnrollments } from "@/hooks/use-cadences"
-import { contactDisplayName, cn, formatPhone, isRealPhone } from "@/lib/utils"
+import { contactDisplayName, cn, escapePostgrestSearch, formatPhone, isRealPhone } from "@/lib/utils"
 import type { Opportunity, PipelineStage, Profile, CadenceEnrollment } from "@/lib/types"
 import { DealInspectorDialog } from "@/components/DealInspectorDialog"
 import { Button } from "@/components/ui/button"
@@ -262,7 +262,7 @@ function OpportunityCard({
                 </div>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0">
+                    <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" title="Mais ações" aria-label="Mais ações">
                       <MoreHorizontal className="h-3 w-3" />
                     </Button>
                   </DropdownMenuTrigger>
@@ -510,6 +510,8 @@ function OpportunityDialog({
   pipelineId,
   stages,
   contacts,
+  contactResults,
+  onSearchContacts,
   profiles,
   onSave,
   defaultContactId,
@@ -520,6 +522,9 @@ function OpportunityDialog({
   pipelineId: string
   stages: PipelineStage[]
   contacts: any[]
+  /** Resultado da busca no servidor (null = sem busca ativa). */
+  contactResults: any[] | null
+  onSearchContacts: (q: string) => void
   profiles: Profile[]
   onSave: (data: any) => Promise<void>
   defaultContactId?: string
@@ -548,10 +553,22 @@ function OpportunityDialog({
     }
   }, [open, opportunity, stages, defaultContactId])
 
+  // Busca de contato no SERVIDOR.
+  //
+  // Antes a página carregava TODOS os contatos (sem limite) só para popular
+  // um dropdown que mostra no máximo 20 — e a busca era client-side sobre
+  // essa lista inteira. Com 50k contatos, abrir o Pipeline baixava megabytes.
+  // Agora: lista inicial limitada + busca no servidor quando o usuário digita.
+  useEffect(() => {
+    const t = window.setTimeout(() => onSearchContacts(contactSearch), 300)
+    return () => window.clearTimeout(t)
+  }, [contactSearch, onSearchContacts])
+
   const filteredContacts = useMemo(() => {
-    if (!contactSearch) return contacts.slice(0, 20)
+    const source = contactResults ?? contacts
+    if (!contactSearch) return source.slice(0, 20)
     const q = contactSearch.toLowerCase()
-    return contacts
+    return source
       .filter(
         (c) =>
           c.name?.toLowerCase().includes(q) ||
@@ -559,9 +576,11 @@ function OpportunityDialog({
           c.phone?.includes(q)
       )
       .slice(0, 20)
-  }, [contacts, contactSearch])
+  }, [contacts, contactResults, contactSearch])
 
-  const selectedContact = contacts.find((c) => c.id === contactId)
+  const selectedContact =
+    contacts.find((c) => c.id === contactId) ??
+    contactResults?.find((c) => c.id === contactId)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1195,6 +1214,7 @@ function StageManagerDialog({
                   disabled={idx === 0 || reordering !== null || saving}
                   onClick={() => handleMove(stage, -1)}
                   title="Mover para cima"
+                  aria-label="Mover etapa para cima"
                 >
                   {reordering === stage.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronUp className="h-3 w-3" />}
                 </Button>
@@ -1205,14 +1225,29 @@ function StageManagerDialog({
                   disabled={idx === sortedStages.length - 1 || reordering !== null || saving}
                   onClick={() => handleMove(stage, 1)}
                   title="Mover para baixo"
+                  aria-label="Mover etapa para baixo"
                 >
                   <ChevronDown className="h-3 w-3" />
                 </Button>
               </div>
-              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setEditingStage(stage)}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => setEditingStage(stage)}
+                title="Editar etapa"
+                aria-label="Editar etapa"
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
-              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => handleDelete(stage)}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 text-destructive"
+                onClick={() => handleDelete(stage)}
+                title="Excluir etapa"
+                aria-label="Excluir etapa"
+              >
                 <Trash2 className="h-3 w-3" />
               </Button>
             </div>
@@ -1451,10 +1486,35 @@ export default function PipelinePage() {
     [cadenceByOpp, updateCadenceEnrollment]
   )
 
-  // Load contacts and profiles
+  // Load contacts and profiles.
+  //
+  // Contatos: lista LIMITADA. O dropdown mostra no máximo 20 e a busca é
+  // feita no servidor (ver `searchContacts`). Baixar todos os contatos era
+  // o maior custo de rede da página.
   useEffect(() => {
-    supabase.from("contacts").select("id, name, push_name, phone, lid, jid").order("name").then(({ data }) => setContacts(data ?? []))
+    supabase
+      .from("contacts")
+      .select("id, name, push_name, phone, lid, jid")
+      .order("name")
+      .limit(200)
+      .then(({ data }) => setContacts(data ?? []))
     supabase.from("profiles").select("id, full_name, role").order("full_name").then(({ data }) => setProfiles((data as Profile[]) ?? []))
+  }, [])
+
+  const [contactResults, setContactResults] = useState<any[] | null>(null)
+
+  const searchContacts = useCallback(async (query: string) => {
+    const q = escapePostgrestSearch(query)
+    if (q.length < 2) {
+      setContactResults(null)
+      return
+    }
+    const { data } = await supabase
+      .from("contacts")
+      .select("id, name, push_name, phone, lid, jid")
+      .or(`name.ilike.%${q}%,push_name.ilike.%${q}%,phone.ilike.%${q}%`)
+      .limit(20)
+    setContactResults(data ?? [])
   }, [])
 
   // Auto-select first pipeline
@@ -1465,15 +1525,25 @@ export default function PipelinePage() {
   }, [pipelines, selectedPipelineId])
 
   // Realtime
+  //
+  // Debounce de 1500ms: antes CADA evento de `opportunities` disparava a
+  // query completa (sem limite, com 4 joins) e ainda re-executava 3 effects
+  // derivados (tags, insights, última mensagem). Um único drag & drop virava
+  // ~5+N queries e N renders. O Chat já usava debounce; o Pipeline não.
   useEffect(() => {
     if (!selectedPipelineId) return
+    let timer: number | undefined
     const channel = supabase
       .channel("opportunities-changes")
       .on("postgres_changes", { event: "*", schema: "public", table: "opportunities" }, () => {
-        refreshOpps()
+        if (timer !== undefined) window.clearTimeout(timer)
+        timer = window.setTimeout(() => { refreshOpps() }, 1500)
       })
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      supabase.removeChannel(channel)
+    }
   }, [selectedPipelineId, refreshOpps])
 
   // Filtered opportunities
@@ -1815,6 +1885,8 @@ export default function PipelinePage() {
         pipelineId={selectedPipelineId ?? ""}
         stages={stages}
         contacts={contacts}
+        contactResults={contactResults}
+        onSearchContacts={searchContacts}
         profiles={profiles}
         onSave={handleCreate}
       />
@@ -1826,6 +1898,8 @@ export default function PipelinePage() {
         pipelineId={selectedPipelineId ?? ""}
         stages={stages}
         contacts={contacts}
+        contactResults={contactResults}
+        onSearchContacts={searchContacts}
         profiles={profiles}
         onSave={handleEdit}
       />

@@ -4,7 +4,7 @@ import { Pencil, Plus, Search, Trash2, MessageCircle } from "lucide-react"
 import { toast } from "sonner"
 
 import { supabase } from "@/lib/supabase"
-import { contactDisplayName, formatPhone, isRealPhone } from "@/lib/utils"
+import { contactDisplayName, escapePostgrestSearch, formatPhone, isRealPhone, isValidPhoneInput, normalizePhoneInput } from "@/lib/utils"
 import type { Contact } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { Button } from "@/components/ui/button"
@@ -57,6 +57,10 @@ export default function ContactsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [total, setTotal] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
+  // Declarado ANTES de `fetchContacts`: a função é chamada no useEffect
+  // (depois do render), mas referenciar uma const declarada abaixo na
+  // mesma função é uma armadilha de TDZ para qualquer refactor.
+  const [queryValue, setQueryValue] = useState("")
 
   const isAdmin = profile?.role === "admin"
   const PAGE_SIZE = 100
@@ -68,7 +72,10 @@ export default function ContactsPage() {
     let builder = supabase
       .from("contacts")
       .select("*", { count: "exact" })
-    const q = queryValue.trim()
+    // O termo entra CRU no filtro do PostgREST: digitar `,` ou `(` quebrava a
+    // query ("parse error") e `%`/`_` viravam curinga. `escapePostgrestSearch`
+    // remove os metacaracteres — o mesmo escape da busca global.
+    const q = escapePostgrestSearch(queryValue)
     if (q) {
       builder = builder.or(
         `name.ilike.%${q}%,push_name.ilike.%${q}%,phone.ilike.%${q}%,lid.ilike.%${q}%`,
@@ -80,9 +87,14 @@ export default function ContactsPage() {
     if (error) {
       toast.error(error.message)
     } else {
-      setContacts(
-        reset ? ((data as Contact[]) ?? []) : [...contacts, ...((data as Contact[]) ?? [])],
-      )
+      // Merge por id: dois cliques rápidos em "Carregar mais" liam o mesmo
+      // `contacts` do closure e duplicavam itens (ou pulavam).
+      setContacts((prev) => {
+        const rows = (data as Contact[]) ?? []
+        if (reset) return rows
+        const seen = new Set(prev.map((c) => c.id))
+        return [...prev, ...rows.filter((c) => !seen.has(c.id))]
+      })
       setTotal(count ?? 0)
     }
     setLoading(false)
@@ -90,7 +102,6 @@ export default function ContactsPage() {
   }
 
   // Debounced server-side search.
-  const [queryValue, setQueryValue] = useState("")
   useEffect(() => {
     const t = window.setTimeout(() => fetchContacts(true), 350)
     return () => window.clearTimeout(t)
@@ -122,8 +133,12 @@ export default function ContactsPage() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    const phone = form.phone.replace(/\D/g, "")
-    if (!/^\d{10,15}$/.test(phone)) {
+    // Validação única (isValidPhoneInput): a regra local `/^\d{10,15}$/`
+    // aceitava 10 dígitos (DDD + 8, sem o 9) — o contato era gravado e
+    // depois rejeitado por `isRealPhone`, aparecendo como "sem número" e
+    // bloqueando o envio.
+    const phone = normalizePhoneInput(form.phone)
+    if (!phone || !isValidPhoneInput(form.phone)) {
       toast.error("Telefone inválido — use apenas números com DDI (ex.: 5511999999999)")
       return
     }

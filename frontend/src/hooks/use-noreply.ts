@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { supabase } from "@/lib/supabase"
 import type {
   NoreplyAttempt,
@@ -14,16 +14,23 @@ import type {
 export function useNoreplySettings() {
   const [settings, setSettings] = useState<NoreplySettings | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("noreply_settings")
       .select("*")
       .order("created_at")
       .limit(1)
       .maybeSingle()
-    setSettings((data as NoreplySettings) ?? null)
+    if (queryError) {
+      console.error("useNoreplySettings failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setSettings((data as NoreplySettings) ?? null)
+    }
     setLoading(false)
   }, [])
 
@@ -42,7 +49,7 @@ export function useNoreplySettings() {
     return data
   }, [settings])
 
-  return { settings, loading, refresh, update }
+  return { settings, loading, error, refresh, update }
 }
 
 // ---------------------------------------------------------------------------
@@ -52,14 +59,21 @@ export function useNoreplySettings() {
 export function useNoreplyAttempts() {
   const [attempts, setAttempts] = useState<NoreplyAttempt[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("noreply_attempts")
       .select("*, template:message_templates(*)")
       .order("attempt_number")
-    setAttempts((data as NoreplyAttempt[]) ?? [])
+    if (queryError) {
+      console.error("useNoreplyAttempts failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setAttempts((data as NoreplyAttempt[]) ?? [])
+    }
     setLoading(false)
   }, [])
 
@@ -93,7 +107,7 @@ export function useNoreplyAttempts() {
     await refresh()
   }, [refresh])
 
-  return { attempts, loading, refresh, insert, update, remove }
+  return { attempts, loading, error, refresh, insert, update, remove }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,14 +117,21 @@ export function useNoreplyAttempts() {
 export function useNoreplyPipelineConfigs() {
   const [configs, setConfigs] = useState<NoreplyPipelineConfig[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("noreply_pipeline_configs")
       .select("*, pipeline:pipelines(*), target_stage:pipeline_stages(*)")
       .order("created_at")
-    setConfigs((data as NoreplyPipelineConfig[]) ?? [])
+    if (queryError) {
+      console.error("useNoreplyPipelineConfigs failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setConfigs((data as NoreplyPipelineConfig[]) ?? [])
+    }
     setLoading(false)
   }, [])
 
@@ -122,7 +143,7 @@ export function useNoreplyPipelineConfigs() {
     await refresh()
   }, [refresh])
 
-  return { configs, loading, refresh, update }
+  return { configs, loading, error, refresh, update }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +154,7 @@ export function useNoreplyActiveStates() {
   const [states, setStates] = useState<NoreplyState[]>([])
   const [maxAttempts, setMaxAttempts] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -148,8 +170,14 @@ export function useNoreplyActiveStates() {
         .select("attempt_number", { count: "exact", head: true })
         .eq("is_active", true),
     ])
-    setStates((statesRes.data as NoreplyState[]) ?? [])
-    setMaxAttempts(attemptsRes.count ?? 0)
+    if (statesRes.error) {
+      console.error("useNoreplyActiveStates failed", statesRes.error)
+      setError(statesRes.error.message)
+    } else {
+      setError(null)
+      setStates((statesRes.data as NoreplyState[]) ?? [])
+      setMaxAttempts(attemptsRes.count ?? 0)
+    }
     setLoading(false)
   }, [])
 
@@ -171,7 +199,12 @@ export function useNoreplyActiveStates() {
     await refresh()
   }, [refresh])
 
-  const byConversation = new Map(states.map((s) => [s.conversation_id, s]))
+  // Map memoizado: antes um Map NOVO a cada render invalidava qualquer
+  // useMemo/dependência que o usasse.
+  const byConversation = useMemo(
+    () => new Map(states.map((s) => [s.conversation_id, s])),
+    [states],
+  )
 
-  return { states, byConversation, maxAttempts, loading, refresh, cancel }
+  return { states, byConversation, maxAttempts, loading, error, refresh, cancel }
 }

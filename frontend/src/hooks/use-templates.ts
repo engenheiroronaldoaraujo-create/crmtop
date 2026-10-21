@@ -5,13 +5,20 @@ import type { MessageTemplate } from "@/lib/types"
 export function useTemplates(activeOnly = true) {
   const [templates, setTemplates] = useState<MessageTemplate[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     let query = supabase.from("message_templates").select("*").order("title")
     if (activeOnly) query = query.eq("is_active", true)
-    const { data } = await query
-    setTemplates((data as MessageTemplate[]) ?? [])
+    const { data, error: queryError } = await query
+    if (queryError) {
+      console.error("useTemplates failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setTemplates((data as MessageTemplate[]) ?? [])
+    }
     setLoading(false)
   }, [activeOnly])
 
@@ -38,5 +45,5 @@ export function useTemplates(activeOnly = true) {
     await refresh()
   }, [refresh])
 
-  return { templates, loading, refresh, create, update, remove }
+  return { templates, loading, error, refresh, create, update, remove }
 }

@@ -156,6 +156,21 @@ function sanitizePhone(phone: string): string {
   return phone.replace(/[^\d]/g, "");
 }
 
+/**
+ * A resposta da Evolution traz a chave da mensagem quando o envio foi
+ * concluído (`key.id`). Se a chave existe, a mensagem JÁ foi entregue —
+ * reenviar o mesmo payload entrega uma segunda mensagem ao lead.
+ */
+function evolutionDelivered(resText: string): boolean {
+  if (!resText) return false;
+  try {
+    const parsed = JSON.parse(resText);
+    return Boolean(parsed?.key?.id);
+  } catch {
+    return false;
+  }
+}
+
 // Records an outbound message. Uses upsert on (conversation_id,
 // evolution_message_id) so that if the webhook echo won the race first, we
 // still attach the correct sender_profile_id. `status` is explicit: 'sent'
@@ -346,10 +361,31 @@ async function actionSendText(
   if (!text) return jsonResponse(400, { error: "text is required" });
   if (!body.phone) return jsonResponse(400, { error: "phone is required" });
 
-  // Use instance_name directly if provided (avoids DB query)
+  // Resolve a instância SEMPRE pelos dois campos.
+  //
+  // Antes, quando o caller mandava só `instance_name`, o `instance_id`
+  // chegava `undefined` no `recordOutboundMessage` → o INSERT da conversa
+  // violava o NOT NULL e a mensagem (já entregue ao lead!) não aparecia no
+  // CRM. Além disso, sem validação, um vendedor podia direcionar o envio
+  // para qualquer instância registrada na Evolution.
   let instance_name = body.instance_name ?? "";
-  if (!instance_name) {
-    instance_name = await getInstanceName(supabase, body.instance_id ?? "");
+  let instance_id = body.instance_id ?? "";
+  if (!instance_id) {
+    const { data: inst } = await supabase
+      .from("whatsapp_instances")
+      .select("id, instance_name")
+      .eq("instance_name", instance_name)
+      .maybeSingle();
+    if (!inst) {
+      return jsonResponse(400, { error: "instância não encontrada" });
+    }
+    instance_id = inst.id;
+    instance_name = inst.instance_name;
+  } else {
+    instance_name = await getInstanceName(supabase, instance_id);
+  }
+  if (!instance_name || !instance_id) {
+    return jsonResponse(400, { error: "instância não encontrada" });
   }
 
   // Parallel DB queries
@@ -387,7 +423,7 @@ async function actionSendText(
     });
     if (!res.ok) {
       // Não perder a mensagem: registra como falha antes de responder o erro.
-      await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+      await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
         evolutionId: null,
         type: "text",
         content: text,
@@ -403,7 +439,7 @@ async function actionSendText(
     // Grava a mensagem antes de responder (3 round-trips rápidos de DB; o
     // bump já sai em background dentro de recordOutboundMessage). Assim a
     // linha persistida não depende do isolate sobreviver após a resposta.
-    await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+    const { messageId } = await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
       evolutionId,
       type: "text",
       content: text,
@@ -413,12 +449,12 @@ async function actionSendText(
 
     return jsonResponse(200, {
       ok: true,
-      message: { evolution_message_id: evolutionId, sent_at: sentAt },
+      message: { id: messageId ?? null, evolution_message_id: evolutionId, sent_at: sentAt },
     });
   } catch (err) {
     // Falha de rede/API: registra a mensagem como falha e propaga.
     try {
-      await recordOutboundMessage(supabase, body.instance_id!, contactPhone, contactLid, user.id, {
+      await recordOutboundMessage(supabase, instance_id, contactPhone, contactLid, user.id, {
         evolutionId: null,
         type: "text",
         content: text,
@@ -511,9 +547,16 @@ async function actionSendMedia(
         fileName,
         ...(caption ? { caption } : {}),
       }),
+      signal: AbortSignal.timeout(60_000),
     });
     resText = await res.text();
-    if (res.status >= 500) {
+    // Retry só quando NÃO há evidência de entrega.
+    //
+    // A Evolution pode entregar a mensagem e mesmo assim devolver 500 (a
+    // resposta quebra depois do envio). Reenviar nesse caso entrega a
+    // mensagem DUAS vezes ao lead. O retry só é seguro quando o corpo não
+    // traz a chave da mensagem — sinal de que nada foi entregue.
+    if (res.status >= 500 && !evolutionDelivered(resText)) {
       await new Promise((r) => setTimeout(r, 1200));
       res = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${instance_name}`, {
         method: "POST",
@@ -526,6 +569,7 @@ async function actionSendMedia(
           fileName,
           ...(caption ? { caption } : {}),
         }),
+        signal: AbortSignal.timeout(60_000),
       });
       resText = await res.text();
     }
@@ -605,7 +649,10 @@ async function actionSendMedia(
 
   return jsonResponse(200, {
     ok: true,
-    message: { evolution_message_id: evolutionId, sent_at: sentAt },
+    // `id` = id da linha no CRM. O frontend usa esse valor para decidir se
+    // pode remover a bolha otimista: sem ele, a mídia "enviava" e sumia da
+    // tela sem ter sido registrada.
+    message: { id: messageId ?? null, evolution_message_id: evolutionId, sent_at: sentAt },
   });
 }
 
@@ -750,6 +797,7 @@ async function actionSendAudio(
       method: "POST",
       headers: { apikey: EVOLUTION_API_KEY, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(60_000),
     });
 
   let res: Response;
@@ -757,7 +805,8 @@ async function actionSendAudio(
   try {
     res = await post();
     resText = await res.text();
-    if (res.status >= 500) {
+    // Retry só sem evidência de entrega (ver actionSendMedia).
+    if (res.status >= 500 && !evolutionDelivered(resText)) {
       await new Promise((r) => setTimeout(r, 1200));
       res = await post();
       resText = await res.text();
@@ -1834,12 +1883,34 @@ async function actionSyncMedia(
   const instance_name = await getInstanceName(supabase, body.instance_id ?? "");
   const limit = Math.min(body.limit ?? 50, 100);
 
-  // Find messages without media_url that have media types
+  // Find messages without media_url that have media types.
+  //
+  // O filtro precisa ser pela INSTÂNCIA: antes a query pegava mensagens de
+  // qualquer conversa do CRM (sem filtro de instância) e depois procurava o
+  // registro na store da instância pedida — a mídia de uma instância podia
+  // ser anexada à mensagem de outra, ou nunca encontrada.
+  const { data: instanceRow } = await supabase
+    .from("whatsapp_instances")
+    .select("id")
+    .eq("instance_name", instance_name)
+    .maybeSingle();
+  if (!instanceRow) return jsonResponse(404, { error: "instância não encontrada" });
+
+  const { data: convIds } = await supabase
+    .from("conversations")
+    .select("id")
+    .eq("instance_id", instanceRow.id);
+  const convIdList = (convIds ?? []).map((c: any) => c.id);
+  if (convIdList.length === 0) {
+    return jsonResponse(200, { ok: true, downloaded: 0, message: "No media to download" });
+  }
+
   const { data: msgs, error } = await supabase
     .from("messages")
     .select("id, evolution_message_id, type, conversation_id")
     .in("type", ["image", "audio", "video", "document", "sticker"])
     .is("media_url", null)
+    .in("conversation_id", convIdList)
     .order("created_at", { ascending: false })
     .limit(limit);
 

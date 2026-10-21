@@ -61,7 +61,10 @@ export async function remuxWebmToOgg(
 
   try {
     const { Input, Output, BufferTarget, OggOutputFormat, ALL_FORMATS, BlobSource, Conversion } =
-      await import("npm:mediabunny@1.60.0");
+      // Usa o alias do deno.json ("mediabunny": "npm:mediabunny@1.61.0").
+      // Antes a versão era hardcoded aqui (1.60.0) e o lockfile ficava
+      // internamente inconsistente (o alias 1.61.0 nunca era materializado).
+      await import("mediabunny");
 
     const input = new Input({
       // Uint8Array.buffer é ArrayBufferLike; Blob exige ArrayBuffer puro.

@@ -32,6 +32,10 @@ import {
   substituteVariables,
   timeToMinutes,
 } from "../_shared/noreply-schedule.ts";
+import {
+  selectFollowingAttempt,
+  selectNextAttempt,
+} from "../_shared/noreply-attempts.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -547,19 +551,18 @@ async function executeDues(
       // Próxima tentativa: a primeira ATIVA cujo número é maior que o da
       // última enviada.
       //
-      // Antes o mapeamento era POSICIONAL (`attempts[attempts_made]`) e o
-      // admin podia desativar a tentativa 2 na UI: o array ficava [1,3] e a
-      // 2ª mensagem enviada usava o template e o delay da tentativa 3.
-      const pending = attempts.filter((a) => a.attempt_number > state.attempts_made);
-      if (pending.length === 0) {
+      // O mapeamento é pelo `attempt_number`, nunca pela posição no array.
+      // Antes era posicional (`attempts[attempts_made]`) e, com a tentativa 2
+      // desativada na UI, o array ficava [1,3] e a 2ª mensagem usava o
+      // template e o delay da tentativa 3.
+      const attempt = selectNextAttempt(attempts, state.attempts_made);
+      if (!attempt) {
         // Todas as tentativas enviadas e o prazo final passou → esgotar.
         const done = await exhaustState(state, settings);
         if (done) exhausted++;
         else failed++;
         continue;
       }
-
-      const attempt = pending[0];
 
       // Janelas de envio: horário comercial e fim de semana.
       const now = new Date();
@@ -615,7 +618,7 @@ async function executeDues(
       }
 
       // Sucesso: conta a tentativa e agenda a próxima (ou o prazo final).
-      const nextAttempt = pending[1] ?? null;
+      const nextAttempt = selectFollowingAttempt(attempts, state.attempts_made);
       const nextCheck = skipToBusinessDay(
         new Date(
           Date.now() +

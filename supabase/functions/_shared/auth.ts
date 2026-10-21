@@ -26,7 +26,8 @@ export interface CallerProfile {
 
 /** Extrai o Bearer token do header Authorization. */
 export function bearerToken(req: Request): string {
-  return (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  return (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "")
+    .trim();
 }
 
 /**
@@ -68,14 +69,20 @@ export async function getCallerProfile(
 }
 
 /** Exige usuário autenticado. Lança a Response 401. */
-export async function requireUser(req: Request, supabase: Supabase): Promise<CallerProfile> {
+export async function requireUser(
+  req: Request,
+  supabase: Supabase,
+): Promise<CallerProfile> {
   const profile = await getCallerProfile(req, supabase);
   if (!profile) throw jsonResponse(401, { error: "unauthorized" });
   return profile;
 }
 
 /** Exige papel admin. Lança 401 (não autenticado) ou 403 (não admin). */
-export async function requireAdmin(req: Request, supabase: Supabase): Promise<CallerProfile> {
+export async function requireAdmin(
+  req: Request,
+  supabase: Supabase,
+): Promise<CallerProfile> {
   const profile = await requireUser(req, supabase);
   if (profile.role !== "admin") {
     throw jsonResponse(403, { error: "forbidden: admin role required" });

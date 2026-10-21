@@ -1,5 +1,5 @@
 {
-  "nodeModulesDir": false,
+  "nodeModulesDir": "none",
   "imports": {
     "mediabunny": "npm:mediabunny@1.61.0"
   },

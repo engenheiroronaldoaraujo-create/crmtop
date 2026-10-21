@@ -90,12 +90,15 @@ dois runners impede envio duplicado. Auditoria em `activity_log` (`GROUP_POST:*`
 
 ```
 supabase/
-  migrations/          001..057 (profiles → cadences, noreply follow-up)
+  migrations/          001..062 (profiles → cadences, noreply follow-up, hardening)
   functions/
-    _shared/           cors, evolution-identity (camada única de identidade LID/JID/phone),
+    _shared/           cors, auth (requireUser/requireAdmin server-side),
+                       evolution-identity (camada única de identidade LID/JID/phone),
                        contacts (upsert merge-aware), lid-phone-resolver (cache),
                        transcribe (OpenRouter audio), secrets (app_secrets),
-                       noreply-schedule (fuso BR/fim de semana p/ a régua)
+                       noreply-schedule (fuso BR/fim de semana p/ a régua),
+                       noreply-attempts (seleção da tentativa por número),
+                       outbound (caminho único de escrita de mensagem)
     admin-users/       gestão de usuários + config IA/segredos (admin, server-side)
     evolution-webhook  entrada dos eventos da Evolution (token na URL)
     evolution-proxy    proxy autenticado p/ Evolution (send-text/media, instâncias, syncs)
@@ -105,13 +108,20 @@ supabase/
     cadence-runner     cadências de vendas (pg_cron, 5 min)
     noreply-runner     régua de follow-up sem resposta (pg_cron, 10 min)
     deal-inspector     análise de deals parados
+    group-publisher    publica posts agendados em grupos (pg_cron, 5 min)
+    group-dm-runner    DM 1:1 para quem comentou (pg_cron, 5 min)
+    lead-webhook       intake de leads da landing page → contato + card no funil
+    zernio-proxy      conexão oficial Meta (campanhas, templates)
+    zernio-webhook     eventos da Zernio (status de mensagem/template)
 frontend/
   src/pages/           Chat, Contacts, Pipeline, Agenda, Automations, Dashboard,
-                       Settings (UsersAdmin/WhatsApp/AISettings/SDRSettings/Templates/
-                       CadencesSettings/NoreplySettings), MyAccount, Login
+                       Campaigns, Groups, Settings (UsersAdmin/WhatsApp/AISettings/
+                       SDRSettings/Templates/CadencesSettings/NoreplySettings),
+                       MyAccount, Login
   src/hooks/           use-auth, use-ai, use-tags, use-templates, use-commercial,
                        use-cadences, use-noreply
   src/lib/             supabase, api (Edge Functions), types, utils, media-cache
+  src/components/      Layout, ErrorBoundary, DealInspectorDialog, ui/ (shad/ui)
 ```
 
 ## Setup
@@ -136,13 +146,27 @@ Webhook: `https://<ref>.supabase.co/functions/v1/evolution-webhook?token=<WEBHOO
   a qualquer usuário autenticado).
 - RLS em tudo; admin checado por `public.is_admin()` (SECURITY DEFINER), nunca
   e-mail hardcoded.
+- **Funções privileged** (`SECURITY DEFINER`): todas com `revoke execute from
+  public` + `grant to service_role`. Sem isso o default privilege do Supabase
+  expunha `bump_conversation`, `claim_group_*`, `noreply_*` etc. para a anon key
+  (que é pública no bundle do front).
+- **Guard de rota ≠ autorização**: os guards do React são cosméticos. A proteção
+  real é a RLS + o `requireAdmin` server-side (`_shared/auth.ts`). Toda Edge
+  Function que serve o painel checa o papel — inclusive as que desligam
+  `verify_jwt` na plataforma (o cron/webhook não tem JWT de usuário).
+- **RLS restrita onde é PII**: `sdr_settings`, `sdr_logs`, `campaigns`,
+  `campaign_recipients` e `zernio_connections` só são legíveis por admin.
+- **Identidade do contato no banco**: `CHECK` de formato em `contacts.phone` e
+  `contacts.lid` (a regra de identidade precisa estar no banco, não só no app).
+- **Segredos fora da URL**: o `WEBHOOK_SECRET` vai no header `x-webhook-token`
+  nas chamadas internas (na query string ele ia para os logs).
 - `messages`: INSERT apenas via service role; usuários leem.
 - Credenciais da Evolution só vivem em secrets de Edge Function.
 
 ## Testes e CI
 
 ```bash
-npm test          # deno test supabase/functions/_shared/ (91 casos)
+npm test          # deno test --allow-env supabase/functions/_shared/ (116 casos)
 npm run build     # tsc + vite
 npm --prefix frontend run lint
 ```
@@ -162,7 +186,20 @@ Edge Functions, lint e build do frontend em cada push/PR.
 
 - Atualizações **majors** pendentes (avisadas pelo `npm audit`): vite 5→8 e
   react-router 6→7 (com testes), em branch dedicada.
-- `evolution-proxy` com ~1.7k linhas — dividir em módulos na próxima mudança grande.
+- `evolution-proxy` com ~2.2k linhas — dividir em módulos na próxima mudança grande.
+- `Chat.tsx` (~2.2k linhas, ~35 `useState`) e `Pipeline.tsx` (~1.9k) ainda
+  concentram componentes que deveriam viver em `components/chat/*` e
+  `components/pipeline/*`.
 - Regras de automação fora `MESSAGE_RECEIVED`/`FIRST_MESSAGE_RECEIVED`/`OPPORTUNITY_IDLE`
   ainda não têm emissor (ex.: `OPPORTUNITY_STAGE_CHANGED`, `TASK_OVERDUE`, `TASK_DUE`,
-  `FOLLOWUP_DUE` via cron).
+  `FOLLOWUP_DUE` via cron) — a UI oferece 21 gatilhos, só 3 disparam.
+- **Sem testes automatizados no frontend** (17k linhas, nenhum framework
+  instalado). Os testes Deno cobrem só `_shared/`; as Edge Functions de
+  negócio (SDR, cadências, régua) não têm cobertura.
+- **Deploy manual**: `supabase db push` e `supabase functions deploy` por
+  função. O CI não deploya nada, então nada denuncia drift entre a migration
+  aplicada e o código em produção.
+- `deno fmt`/`deno lint` não rodam no CI (o repositório tem 142 lint issues e
+  31 arquivos fora do padrão de formatação) — dívida pré-existente.
+- `messages`, `automation_executions` e `sdr_logs` crescem sem limite: não há
+  job de purga (a regra dos 60 dias só filtra no ingest).

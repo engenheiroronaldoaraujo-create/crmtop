@@ -20,7 +20,7 @@ import {
 } from "@/lib/api"
 import type { Campaign, CampaignRecipient, ZernioTemplate } from "@/lib/types"
 import { parseContactsFromFiles } from "@/lib/contacts-import"
-import { cn } from "@/lib/utils"
+import { cn, isValidPhoneInput } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -73,9 +73,12 @@ type ContactCandidate = {
   imported?: boolean
 }
 
+// Validação de telefone: usa a regra única do projeto (lib/utils).
+// A regra local (`/^\+?\d{10,15}$/`) aceitava '+' no valor, que era
+// gravado cru no banco e quebrava a comparação `phone.eq.<valor>`.
 function isValidPhone(phone: string | null): phone is string {
   if (!phone) return false
-  return /^\+?\d{10,15}$/.test(phone)
+  return isValidPhoneInput(phone)
 }
 
 function digits(phone: string): string {

@@ -271,7 +271,15 @@ export default function DashboardPage() {
       // 2. All opportunities
       let oppQ = supabase.from("opportunities").select("*, contact:contacts(name)")
       if (!isAdmin && userId) oppQ = oppQ.eq("assigned_to", userId)
-      const { data: allOpps } = await oppQ
+      const { data: allOpps, error: oppsError } = await oppQ
+      // O `try/catch` NÃO pegava erros do supabase-js: eles vêm em
+      // `{ error }` na resposta, não como exceção. O catch era código morto
+      // e uma falha de query virava um dashboard vazio sem aviso.
+      if (oppsError) {
+        console.error("Dashboard: falha ao carregar oportunidades", oppsError)
+        toast.error("Erro ao carregar dashboard")
+        return
+      }
 
       // 3. Period-filtered opportunities
       let periodOpps = allOpps ?? []
@@ -320,11 +328,17 @@ export default function DashboardPage() {
       ])
 
       // 6. Seller performance
+      //
+      // A conversão era calculada com um filter() sobre `allOpps` PARA CADA
+      // vendedor (O(V×O)) e o vendedor era casado por `full_name` — dois
+      // vendedores homônimos misturavam as conversão. Agora o `id` (que já
+      // está no mapa) é usado direto.
       const sellerMap = new Map<string, SellerPerformance>()
       const { data: profiles } = await supabase.from("profiles").select("id, full_name").eq("role", "vendedor")
       for (const p of profiles ?? []) {
         sellerMap.set(p.id, { name: p.full_name ?? "Sem nome", opportunities: 0, pipeline: 0, won: 0, wonValue: 0, conversion: 0 })
       }
+      const lostBySeller = new Map<string, number>()
       for (const o of allOpps ?? []) {
         if (!o.assigned_to) continue
         const s = sellerMap.get(o.assigned_to)
@@ -332,9 +346,12 @@ export default function DashboardPage() {
         s.opportunities++
         if (o.status === "open") s.pipeline += o.value ?? 0
         if (o.status === "won") { s.won++; s.wonValue += o.value ?? 0 }
+        if (o.status === "lost") {
+          lostBySeller.set(o.assigned_to, (lostBySeller.get(o.assigned_to) ?? 0) + 1)
+        }
       }
-      for (const s of sellerMap.values()) {
-        const closed = s.won + (allOpps ?? []).filter((o) => o.assigned_to === (profiles ?? []).find((p) => p.full_name === s.name)?.id && o.status === "lost").length
+      for (const [sellerId, s] of sellerMap) {
+        const closed = s.won + (lostBySeller.get(sellerId) ?? 0)
         s.conversion = closed > 0 ? Math.round((s.won / closed) * 100) : 0
       }
       setSellers([...sellerMap.values()].sort((a, b) => b.pipeline - a.pipeline))

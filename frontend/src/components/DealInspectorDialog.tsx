@@ -11,7 +11,7 @@ import {
   ChevronUp,
 } from "lucide-react"
 
-import { supabase } from "@/lib/supabase"
+import { getSupabaseUrl, supabase } from "@/lib/supabase"
 import type { PipelineStage } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -213,7 +213,7 @@ export function DealInspectorDialog({
       setLoadingMsg(`Analisando conversas...`)
 
       const res = await fetch(
-        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/deal-inspector`,
+        `${getSupabaseUrl()}/functions/v1/deal-inspector`,
         {
           method: "POST",
           headers: {

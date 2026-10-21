@@ -16,21 +16,30 @@ import type {
 export function usePipelines() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("pipelines")
       .select("*")
       .eq("is_active", true)
       .order("name")
-    setPipelines(data ?? [])
+    // O erro era descartado: uma falha virava lista vazia e o usuário via
+    // "Nenhum vendedor" em vez de um erro.
+    if (queryError) {
+      console.error("usePipelines failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setPipelines(data ?? [])
+    }
     setLoading(false)
   }, [])
 
   useEffect(() => { refresh() }, [refresh])
 
-  return { pipelines, loading, refresh }
+  return { pipelines, loading, error, refresh }
 }
 
 // ---------------------------------------------------------------------------
@@ -40,23 +49,30 @@ export function usePipelines() {
 export function usePipelineStages(pipelineId: string | null) {
   const [stages, setStages] = useState<PipelineStage[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!pipelineId) { setStages([]); setLoading(false); return }
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("pipeline_stages")
       .select("*")
       .eq("pipeline_id", pipelineId)
       .eq("is_active", true)
       .order("position")
-    setStages(data ?? [])
+    if (queryError) {
+      console.error("usePipelineStages failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setStages(data ?? [])
+    }
     setLoading(false)
   }, [pipelineId])
 
   useEffect(() => { refresh() }, [refresh])
 
-  return { stages, loading, refresh }
+  return { stages, loading, error, refresh }
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +86,12 @@ export function useOpportunities(filters?: {
 }) {
   const [opportunities, setOpportunities] = useState<Opportunity[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  // Teto de oportunidades por carga. Sem isso, a query baixava o funil
+  // INTEIRO (com 4 joins) a cada evento realtime — no Pipeline isso
+  // significava megabytes na rede a cada card movido.
+  const MAX_OPPORTUNITIES = 500
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -77,13 +99,22 @@ export function useOpportunities(filters?: {
       .from("opportunities")
       .select("*, contact:contacts(*), pipeline:pipelines(*), stage:pipeline_stages(*), assignee:profiles!opportunities_assigned_to_fkey(id, full_name)")
       .order("created_at", { ascending: false })
+      .limit(MAX_OPPORTUNITIES)
 
     if (filters?.assigned_to) q = q.eq("assigned_to", filters.assigned_to)
     if (filters?.pipeline_id) q = q.eq("pipeline_id", filters.pipeline_id)
     if (filters?.status) q = q.eq("status", filters.status)
 
-    const { data } = await q
-    setOpportunities((data as Opportunity[]) ?? [])
+    const { data, error: queryError } = await q
+    // O erro era descartado: uma falha de rede/RLS virava lista vazia e o
+    // usuário via "Nenhum vendedor" em vez de um erro.
+    if (queryError) {
+      console.error("useOpportunities failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setOpportunities((data as Opportunity[]) ?? [])
+    }
     setLoading(false)
   }, [filters?.assigned_to, filters?.pipeline_id, filters?.status])
 
@@ -140,7 +171,7 @@ export function useOpportunities(filters?: {
     await update(id, { status: "lost", lost_reason: reason ?? null, closed_at: new Date().toISOString() })
   }, [update])
 
-  return { opportunities, loading, refresh, create, update, moveStage, win, lose }
+  return { opportunities, loading, error, refresh, create, update, moveStage, win, lose }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,16 +181,23 @@ export function useOpportunities(filters?: {
 export function useOpportunityTasks(opportunityId: string | null) {
   const [tasks, setTasks] = useState<OpportunityTask[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     if (!opportunityId) { setTasks([]); setLoading(false); return }
     setLoading(true)
-    const { data } = await supabase
+    const { data, error: queryError } = await supabase
       .from("opportunity_tasks")
       .select("*")
       .eq("opportunity_id", opportunityId)
       .order("created_at", { ascending: false })
-    setTasks((data as OpportunityTask[]) ?? [])
+    if (queryError) {
+      console.error("useOpportunityTasks failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setTasks((data as OpportunityTask[]) ?? [])
+    }
     setLoading(false)
   }, [opportunityId])
 
@@ -201,7 +239,7 @@ export function useOpportunityTasks(opportunityId: string | null) {
     await refresh()
   }, [refresh])
 
-  return { tasks, loading, refresh, create, complete, cancel }
+  return { tasks, loading, error, refresh, create, complete, cancel }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +249,7 @@ export function useOpportunityTasks(opportunityId: string | null) {
 export function useMeetings(filters?: { opportunity_id?: string; assigned_to?: string }) {
   const [meetings, setMeetings] = useState<Meeting[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -222,8 +261,14 @@ export function useMeetings(filters?: { opportunity_id?: string; assigned_to?: s
     if (filters?.opportunity_id) q = q.eq("opportunity_id", filters.opportunity_id)
     if (filters?.assigned_to) q = q.eq("assigned_to", filters.assigned_to)
 
-    const { data } = await q
-    setMeetings((data as Meeting[]) ?? [])
+    const { data, error: queryError } = await q
+    if (queryError) {
+      console.error("useMeetings failed", queryError)
+      setError(queryError.message)
+    } else {
+      setError(null)
+      setMeetings((data as Meeting[]) ?? [])
+    }
     setLoading(false)
   }, [filters?.opportunity_id, filters?.assigned_to])
 
@@ -260,7 +305,7 @@ export function useMeetings(filters?: { opportunity_id?: string; assigned_to?: s
     await refresh()
   }, [refresh])
 
-  return { meetings, loading, refresh, create, update }
+  return { meetings, loading, error, refresh, create, update }
 }
 
 // ---------------------------------------------------------------------------

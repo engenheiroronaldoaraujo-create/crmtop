@@ -1,14 +1,30 @@
+import { Suspense, lazy } from "react"
 import { useSearchParams } from "react-router-dom"
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import UsersAdmin from "@/pages/UsersAdmin"
-import WhatsAppSettings from "@/pages/WhatsAppSettings"
-import AISettings from "@/pages/AISettings"
-import SDRSettings from "@/pages/SDRSettings"
-import TemplatesSettings from "@/pages/TemplatesSettings"
-import ApkSettings from "@/pages/ApkSettings"
-import CadencesSettings from "@/pages/CadencesSettings"
-import NoreplySettings from "@/pages/NoreplySettings"
+import { Skeleton } from "@/components/ui/skeleton"
+
+// Cada aba é um chunk separado: antes as 8 sub-páginas eram importadas
+// estaticamente e o chunk de Configurações carregava todas (~99 KB), mesmo
+// com o usuário olhando só para "Usuários".
+const UsersAdmin = lazy(() => import("@/pages/UsersAdmin"))
+const WhatsAppSettings = lazy(() => import("@/pages/WhatsAppSettings"))
+const AISettings = lazy(() => import("@/pages/AISettings"))
+const SDRSettings = lazy(() => import("@/pages/SDRSettings"))
+const TemplatesSettings = lazy(() => import("@/pages/TemplatesSettings"))
+const ApkSettings = lazy(() => import("@/pages/ApkSettings"))
+const CadencesSettings = lazy(() => import("@/pages/CadencesSettings"))
+const NoreplySettings = lazy(() => import("@/pages/NoreplySettings"))
+
+function TabFallback() {
+  return (
+    <div className="space-y-3 pt-4">
+      <Skeleton className="h-8 w-56" />
+      <Skeleton className="h-32 w-full" />
+      <Skeleton className="h-32 w-full" />
+    </div>
+  )
+}
 
 export default function SettingsPage() {
   // Aba inicial via ?tab= (o OAuth da Meta retorna em /settings?tab=whatsapp).
@@ -32,28 +48,44 @@ export default function SettingsPage() {
             <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
           <TabsContent value="users">
-            <UsersAdmin />
+            <Suspense fallback={<TabFallback />}>
+              <UsersAdmin />
+            </Suspense>
           </TabsContent>
           <TabsContent value="whatsapp">
-            <WhatsAppSettings />
+            <Suspense fallback={<TabFallback />}>
+              <WhatsAppSettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="templates">
-            <TemplatesSettings />
+            <Suspense fallback={<TabFallback />}>
+              <TemplatesSettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="app">
-            <ApkSettings />
+            <Suspense fallback={<TabFallback />}>
+              <ApkSettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="cadences">
-            <CadencesSettings />
+            <Suspense fallback={<TabFallback />}>
+              <CadencesSettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="noreply">
-            <NoreplySettings />
+            <Suspense fallback={<TabFallback />}>
+              <NoreplySettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="ai">
-            <AISettings />
+            <Suspense fallback={<TabFallback />}>
+              <AISettings />
+            </Suspense>
           </TabsContent>
           <TabsContent value="sdr">
-            <SDRSettings />
+            <Suspense fallback={<TabFallback />}>
+              <SDRSettings />
+            </Suspense>
           </TabsContent>
         </Tabs>
       </div>

@@ -4,6 +4,7 @@ import {
   isRelevantJid,
   normalizePhoneStrict,
   normalizeWhatsAppIdentity,
+  phoneLookupVariants,
   resolveSendTarget,
 } from "../_shared/evolution-identity.ts";
 import {
@@ -916,12 +917,21 @@ async function handleMessageUpdate(
       if (c) contactId = c.id;
     }
     if (!contactId && phone) {
-      const { data: c } = await supabase
-        .from("contacts")
-        .select("id")
-        .eq("phone", phone)
-        .maybeSingle();
-      if (c) contactId = c.id;
+      // Variantes do nono dígito: o contato pode estar gravado como
+      // 5511999999999 ou 11999999999. Antes a busca era pelo telefone EXATO
+      // e o status de entrega/leitura era descartado silenciosamente para
+      // os contatos gravados na forma de 12 dígitos.
+      for (const variant of phoneLookupVariants(phone)) {
+        const { data: c } = await supabase
+          .from("contacts")
+          .select("id")
+          .eq("phone", variant)
+          .maybeSingle();
+        if (c) {
+          contactId = c.id;
+          break;
+        }
+      }
     }
     if (!contactId) continue;
 

@@ -52,6 +52,54 @@ export function isRealPhone(phone: string | null | undefined): phone is string {
   return typeof phone === "string" && isValidBrPhone(phone.replace(/\D/g, ""))
 }
 
+/**
+ * Normaliza um telefone digitado pelo usuário para a forma canônica
+ * gravada no CRM: só dígitos, com DDI 55.
+ *
+ * Havia 4 regras diferentes de validação no app (`isRealPhone` em
+ * `lib/utils`, `/^\d{10,15}$/` em Contacts, `/^\+?\d{10,15}$/` em Campaigns e
+ * `digits.length < 10 || > 13` no Chat). Um contato aceito por uma delas
+ * era rejeitado por outra: o contato aparecia como "sem número" e o envio
+ * era bloqueado. Esta é a única porta de entrada.
+ */
+export function normalizePhoneInput(input: string): string | null {
+  const digits = (input ?? "").replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.length === 10 || digits.length === 11) return `55${digits}`;
+  if (digits.length === 12 || digits.length === 13) {
+    return digits.startsWith("55") ? digits : null;
+  }
+  return null;
+}
+
+/**
+ * Valida um telefone digitado pelo usuário.
+ *
+ * Rejeita telefone com '+' ou espaço (o valor é gravado cru no banco e
+ * quebrava a comparação `phone.eq.<valor>` do PostgREST).
+ */
+export function isValidPhoneInput(input: string | null | undefined): boolean {
+  if (typeof input !== "string") return false;
+  const trimmed = input.trim();
+  if (!trimmed) return false;
+  // '+', espaços, traços e parênteses não são aceitos no campo de entrada.
+  if (/[^\d]/.test(trimmed)) return false;
+  const normalized = normalizePhoneInput(trimmed);
+  return normalized !== null && isRealPhone(normalized);
+}
+
+/**
+ * Escapa um termo de busca para uso em filtro PostgREST (`or(...)`).
+ *
+ * Sem isso, digitar `,` ou `(` no campo de busca quebrava a query
+ * ("parse error"), e `%`/`_` funcionavam como curinga, trazer todos os
+ * registros. O mesmo escape já era feito na busca global — agora é
+ * compartilhado.
+ */
+export function escapePostgrestSearch(term: string): string {
+  return term.replace(/[%_,()"'*\\]/g, "").trim()
+}
+
 // Extrai o número embutido de um JID @s.whatsapp.net (telefone do WhatsApp,
 // BR ou internacional). NUNCA deriva número de @lid (LID é identificador, não
 // telefone). JIDs @s.whatsapp.net com 14+ dígitos são LIDs embrulhados e são

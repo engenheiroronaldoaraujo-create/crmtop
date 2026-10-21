@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -54,6 +55,8 @@ import {
   formatTime,
   isRealPhone,
   isSameDay,
+  isValidPhoneInput,
+  normalizePhoneInput,
 } from "@/lib/utils"
 import type {
   Conversation,
@@ -323,7 +326,19 @@ function MediaMessage({ msg }: { msg: Message }) {
   }
 }
 
-function MessageBubble({ msg, onRetry }: { msg: Message; onRetry?: (m: Message) => void }) {
+/**
+ * Bolha da mensagem — memoizada.
+ *
+ * Sem `memo`, cada tecla digitada na busca ou cada mensagem nova
+ * re-renderizava as 200+ bolhas da conversa inteira.
+ */
+const MessageBubble = memo(function MessageBubble({
+  msg,
+  onRetry,
+}: {
+  msg: Message
+  onRetry?: (m: Message) => void
+}) {
   const outbound = msg.direction === "outbound"
   const showStatus = outbound
   return (
@@ -383,7 +398,7 @@ function MessageBubble({ msg, onRetry }: { msg: Message; onRetry?: (m: Message) 
       </div>
     </div>
   )
-}
+})
 
 function MessageStatus({ status }: { status: Message["status"] }) {
   switch (status) {
@@ -431,7 +446,13 @@ function formatNoreplyNext(iso: string | null): string {
   return `· próxima em ~${days} ${days === 1 ? "dia" : "dias"}`
 }
 
-function ConversationItem({
+/**
+ * Item da lista de conversas — memoizado.
+ *
+ * A lista carrega até 500 conversas. Sem `memo`, digitar no campo de busca
+ * re-renderizava as 500 linhas a cada tecla.
+ */
+const ConversationItem = memo(function ConversationItem({
   conv,
   selected,
   onSelect,
@@ -536,7 +557,7 @@ function ConversationItem({
       </div>
     </button>
   )
-}
+})
 
 export default function ChatPage() {
   const { user, profile } = useAuth()
@@ -612,20 +633,30 @@ export default function ChatPage() {
   useEffect(() => {
     const ids = [...new Set(conversations.map((c) => c.contact_id).filter(Boolean))] as string[]
     if (ids.length === 0) return
-    supabase
-      .from("contact_tags")
-      .select("contact_id, tag:tags(id, name, color, is_active)")
-      .in("contact_id", ids)
-      .then(({ data }) => {
-        const map: Record<string, Tag[]> = {}
+    // Chunking: até 500 ids numa única URL do PostgREST estoura o limite de
+    // URI (413). O Pipeline já fazia chunking de 200; aqui faltava.
+    const CHUNK = 200
+    let cancelled = false
+    const load = async () => {
+      const map: Record<string, Tag[]> = {}
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK)
+        const { data } = await supabase
+          .from("contact_tags")
+          .select("contact_id, tag:tags(id, name, color, is_active)")
+          .in("contact_id", chunk)
+        if (cancelled) return
         for (const row of data as any[] ?? []) {
           if (row.tag?.is_active) {
             if (!map[row.contact_id]) map[row.contact_id] = []
             if (!map[row.contact_id].some((t) => t.id === row.tag.id)) map[row.contact_id].push(row.tag as Tag)
           }
         }
-        setConvTagsMap((prev) => ({ ...prev, ...map }))
-      })
+      }
+      if (!cancelled) setConvTagsMap((prev) => ({ ...prev, ...map }))
+    }
+    void load()
+    return () => { cancelled = true }
   }, [conversations])
 
   // Reflete mudanças de etiquetas do contato selecionado no mapa dos cards
@@ -800,6 +831,11 @@ export default function ChatPage() {
     }
   }, [conversations, searchParams, selectedId, setSearchParams])
 
+  // Conversa cujas mensagens estão na tela. Protege contra respostas
+  // fora de ordem: trocar de conversa rápido (A → B → A) podia deixar as
+  // mensagens de B na tela enquanto o fetch de A resolvia.
+  const messagesConvRef = useRef<string | null>(null)
+
   // Recarrega as mensagens da conversa. Usado pelo effect inicial e também
   // depois de enviar mídia/áudio, para não depender só do realtime: o upload
   // do Storage roda em background e termina depois do INSERT, então o realtime
@@ -813,18 +849,42 @@ export default function ChatPage() {
       .limit(MESSAGE_PAGE_SIZE)
     if (error) return
     const rows = ((data as Message[]) ?? []).slice().reverse()
-    setMessages(rows)
-    setHasMoreOlder(rows.length === MESSAGE_PAGE_SIZE)
+
+    // Resposta fora de ordem (troca rápida de conversa): descarta.
+    if (messagesConvRef.current !== conversationId) return
+
+    // MERGE, não replace.
+    //
+    // Antes era `setMessages(rows)`: trocar de conversa ou enviar um áudio
+    // apagava o histórico já paginado — o usuário carregava 3 páginas de
+    // mensagens antigas, enviava um áudio e tudo sumia (e o botão "Carregar
+    // mensagens anteriores" reaparecia). `loadOlder` já fazia merge correto;
+    // as duas funções usavam estratégias opostas.
+    setMessages((prev) => {
+      if (prev.length === 0) return rows
+      const seen = new Set(rows.map((r) => r.id))
+      const older = prev.filter((m) => !seen.has(m.id))
+      // Mantém a ordem cronológica.
+      return [...older, ...rows].sort((a, b) =>
+        a.sent_at === b.sent_at ? a.id.localeCompare(b.id) : a.sent_at.localeCompare(b.sent_at),
+      )
+    })
+    setHasMoreOlder((prevHasMore) => rows.length === MESSAGE_PAGE_SIZE || prevHasMore)
   }, [])
 
   // Load messages for the selected conversation and mark it read.
   useEffect(() => {
     setOptimisticMsgs([])
+    messagesConvRef.current = selectedId ?? null
     if (!selectedId) {
       setMessages([])
       setHasMoreOlder(false)
       return
     }
+    // Zera a lista ao trocar de conversa (o merge acima é só para a mesma
+    // conversa): senão as mensagens da conversa anterior ficariam na tela.
+    setMessages([])
+    setHasMoreOlder(false)
     let active = true
     refreshMessages(selectedId).then(() => {
       if (active) markRead(selectedId)
@@ -837,13 +897,19 @@ export default function ChatPage() {
   const loadOlder = useCallback(async () => {
     if (!selectedId || messages.length === 0) return
     setLoadingOlder(true)
-    const oldestSentAt = messages[0].sent_at
+    const oldest = messages[0]
+    // Cursor COMPOSTO (sent_at, id).
+    //
+    // Só `sent_at` pulava mensagens: várias mensagens do WhatsApp chegam
+    // com o mesmo timestamp (segundo) e `.lt("sent_at", ...)` exclui as de
+    // mesmo instante — buracos no histórico.
     const { data, error } = await supabase
       .from("messages")
       .select("*")
       .eq("conversation_id", selectedId)
-      .lt("sent_at", oldestSentAt)
+      .or(`sent_at.lt.${oldest.sent_at},and(sent_at.eq.${oldest.sent_at},id.lt.${oldest.id})`)
       .order("sent_at", { ascending: false })
+      .order("id", { ascending: false })
       .limit(MESSAGE_PAGE_SIZE)
     if (!error && data) {
       const rows = ((data as Message[]) ?? []).slice().reverse()
@@ -1098,9 +1164,11 @@ export default function ChatPage() {
 
   const instance = instances[0] ?? null
 
-  async function handleSelect(id: string) {
+  // Handlers estáveis: sem `useCallback`, a identidade do `onSelect`/`onRetry`
+  // mudava a cada render e o `React.memo` dos itens não tinha efeito.
+  const handleSelect = useCallback((id: string) => {
     setSelectedId(id)
-  }
+  }, [])
 
   async function handleAssign(conv: Conversation, assigneeId: string | null) {
     const { error } = await supabase
@@ -1205,14 +1273,16 @@ export default function ChatPage() {
 
   async function handleLinkPhone() {
     if (!selected) return
-    const digits = linkPhoneValue.replace(/\D/g, "")
-    if (digits.length < 10 || digits.length > 13) {
-      toast.error("Telefone inválido — use 10 a 13 dígitos (ex.: 5511940136791)")
+    // Regra única de telefone (lib/utils). A local (`length < 10 || > 13`)
+    // aceitava 10/12/13 dígitos — telefones que o resto do app rejeita.
+    const normalized = normalizePhoneInput(linkPhoneValue)
+    if (!normalized || !isValidPhoneInput(linkPhoneValue)) {
+      toast.error("Telefone inválido — use apenas números com DDI (ex.: 5511940136791)")
       return
     }
     setLinkPhoneSaving(true)
     try {
-      await proxyLinkConversationPhone(selected.id, digits)
+      await proxyLinkConversationPhone(selected.id, normalized)
       toast.success("Telefone vinculado ao contato")
       setLinkPhoneOpen(false)
       loadConversations()
@@ -1365,10 +1435,39 @@ export default function ChatPage() {
     if (fileInputRef.current) fileInputRef.current.value = ""
     try {
       if (isMedia && mediaFile) {
-        await proxySendMedia(selected.instance_id, targetPhone, mediaCaption, mediaFile.name, mediaFile)
-        // Mídia: a linha real tem media_url, então a bolha otimista sai na
-        // confirmação (a real chega pelo realtime logo em seguida).
+        const res = await proxySendMedia(
+          selected.instance_id,
+          targetPhone,
+          mediaCaption,
+          mediaFile.name,
+          mediaFile,
+        )
+        // A bolha otimista de mídia só sai quando a linha REAL foi gravada.
+        //
+        // Antes ela era removida incondicionalmente: se a Evolution aceitasse
+        // mas o INSERT no CRM falhasse, a mensagem sumia da tela sem
+        // registro (o comentário nas linhas 1246-1254 documenta exatamente
+        // esse bug, que só foi corrigido no caminho do áudio).
+        //
+        // O conteúdo também diverge: sem legenda, o otimista é "📎 nome.png"
+        // e o servidor grava content=null — a reconciliação por conteúdo
+        // (linha ~1050) nunca casava e a duplicata ficava na tela para sempre.
+        const persistedId = res?.message?.id ?? null
+        if (!persistedId) {
+          setOptimisticMsgs((prev) =>
+            prev.map((m) => (m.id === tempId ? { ...m, status: "failed" as const } : m)),
+          )
+          throw new Error(
+            "A mídia foi aceita, mas não foi registrada no CRM. Tente novamente.",
+          )
+        }
         setOptimisticMsgs((prev) => prev.filter((m) => m.id !== tempId))
+        // Reconciliação determinística: o upload ao Storage termina em
+        // background, então a primeira leitura costuma vir sem media_url.
+        await refreshMessages(selected.id)
+        setTimeout(() => {
+          void refreshMessages(selected.id)
+        }, 1500)
       } else {
         await proxySendText(selected.instance_id, targetPhone, optimisticMsg.content ?? "", instance?.instance_name)
         setOptimisticMsgs((prev) =>
@@ -1395,11 +1494,15 @@ export default function ChatPage() {
     }
     const text = (msg.content ?? "").trim()
     if (!text || msg.id.startsWith("optimistic-") === false) return
+    // Reenvio precisa do mesmo guard de envio do composer: um contato sem
+    // telefone (só LID) recebia `""` como destino em vez de um erro claro.
+    const targetPhone = canSendNow()
+    if (targetPhone === null) return
     setOptimisticMsgs((prev) =>
       prev.map((m) => (m.id === msg.id ? { ...m, status: "pending" as const } : m)),
     )
     try {
-      await proxySendText(selected.instance_id, selected.contact?.phone ?? "", text, instance.instance_name)
+      await proxySendText(selected.instance_id, targetPhone, text, instance.instance_name)
       setOptimisticMsgs((prev) =>
         prev.map((m) => (m.id === msg.id ? { ...m, status: "sent" as const } : m)),
       )
@@ -1568,6 +1671,7 @@ export default function ChatPage() {
                   size="icon"
                   className="shrink-0 md:hidden"
                   title="Voltar para conversas"
+                  aria-label="Voltar para conversas"
                   onClick={() => setSelectedId(null)}
                 >
                   <ArrowLeft className="h-5 w-5" />
@@ -1595,6 +1699,7 @@ export default function ChatPage() {
                   size="icon"
                   onClick={toggleAlertMuted}
                   title={alertMuted ? "Ativar alerta sonoro" : "Silenciar alerta sonoro"}
+                  aria-label={alertMuted ? "Ativar alerta sonoro" : "Silenciar alerta sonoro"}
                 >
                   {alertMuted ? (
                     <BellOff className="h-4 w-4 text-muted-foreground" />
@@ -1864,7 +1969,20 @@ export default function ChatPage() {
               </div>
             )}
 
-            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+            {/*
+              role="log" + aria-live="polite": sem isso, um leitor de tela
+              NÃO anuncia as mensagens recebidas — que é justamente o
+              evento mais importante do app.
+            */}
+            <div
+              ref={scrollRef}
+              className="flex-1 space-y-3 overflow-y-auto p-4"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+              aria-label="Mensagens da conversa"
+              tabIndex={0}
+            >
               {hasMoreOlder && (
                 <div className="flex justify-center">
                   <Button
@@ -1951,6 +2069,7 @@ export default function ChatPage() {
                     size="icon"
                     onClick={recorder.cancel}
                     title="Descartar gravação"
+                    aria-label="Descartar gravação"
                   >
                     <X className="h-5 w-5" />
                   </Button>
@@ -1959,6 +2078,7 @@ export default function ChatPage() {
                     size="icon"
                     onClick={recorder.stop}
                     title="Parar e revisar"
+                    aria-label="Parar e revisar"
                   >
                     <Square className="h-4 w-4 fill-current" />
                   </Button>
@@ -1985,6 +2105,7 @@ export default function ChatPage() {
                     size="icon"
                     onClick={recorder.discard}
                     title="Descartar"
+                    aria-label="Descartar gravação"
                   >
                     <X className="h-5 w-5" />
                   </Button>
@@ -1994,6 +2115,7 @@ export default function ChatPage() {
                     onClick={handleSendAudio}
                     disabled={sendingAudio}
                     title="Enviar áudio"
+                    aria-label="Enviar áudio"
                   >
                     <Send className="h-4 w-4" />
                   </Button>
@@ -2008,6 +2130,7 @@ export default function ChatPage() {
                       onClick={recorder.start}
                       disabled={recorder.status === "requesting"}
                       title="Gravar áudio"
+                      aria-label="Gravar áudio"
                     >
                       <Mic className="h-5 w-5" />
                     </Button>
@@ -2019,6 +2142,7 @@ export default function ChatPage() {
                         variant="ghost"
                         size="icon"
                         title="Templates de resposta"
+                        aria-label="Templates de resposta"
                       >
                         <FileText className="h-5 w-5" />
                       </Button>
@@ -2057,6 +2181,7 @@ export default function ChatPage() {
                     size="icon"
                     onClick={() => fileInputRef.current?.click()}
                     title="Anexar"
+                    aria-label="Anexar arquivo"
                   >
                     <Paperclip className="h-5 w-5" />
                   </Button>
@@ -2070,6 +2195,8 @@ export default function ChatPage() {
                     type="submit"
                     size="icon"
                     disabled={!text.trim() && !pendingFile}
+                    title="Enviar mensagem"
+                    aria-label="Enviar mensagem"
                   >
                     <Send className="h-4 w-4" />
                   </Button>

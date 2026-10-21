@@ -59,16 +59,28 @@ async function callOpenRouter(
     ...(options.response_format ? { response_format: options.response_format } : {}),
   };
 
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://crm-top.vercel.app",
-      "X-Title": "CRM_TOP",
-    },
-    body: JSON.stringify(body),
-  });
+  // Timeout: sem AbortSignal, uma resposta pendurada do OpenRouter segura o
+  // isolate até o limite da plataforma.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let res: Response;
+  try {
+    res = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://crm-top.vercel.app",
+        "X-Title": "CRM_TOP",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    throw new Error(`OpenRouter request failed: ${String(e).slice(0, 200)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const err = await res.text();

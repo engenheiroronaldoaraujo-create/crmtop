@@ -52,21 +52,33 @@ async function callAI(
   model: string,
   messages: Array<{ role: string; content: string }>,
 ): Promise<string> {
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://crm-top.vercel.app",
-      "X-Title": "CRM_TOP_INSPECTOR",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0.3,
-      max_tokens: 600,
-    }),
-  });
+  // Timeout: sem AbortSignal, uma resposta pendurada do OpenRouter segura o
+  // isolate até o limite da plataforma (e trava o laço de análise).
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let res: Response;
+  try {
+    res = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://crm-top.vercel.app",
+        "X-Title": "CRM_TOP_INSPECTOR",
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.3,
+        max_tokens: 600,
+      }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    throw new Error(`AI request failed: ${String(e).slice(0, 200)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const err = await res.text();
@@ -121,7 +133,13 @@ async function findCandidates(supabase: any, params: any, userId: string) {
     return new Date(Date.UTC(y, m - 1, day + 1)).toISOString(); // exclusivo
   };
 
-  // 1. Get ALL stalled conversations with at least 1 inbound message
+  // 1. Get stalled conversations with at least 1 inbound message.
+  //
+  // TETO de conversas: antes a query rodava SEM `limit` sobre `conversations`
+  // e fazia 1 query de contagem POR conversa (N+1). Em um CRM com milhares de
+  // conversas, isso era um DoS de CPU — e, como cada candidata vira uma
+  // chamada ao OpenRouter, também um DoS de custo.
+  const MAX_CANDIDATES = 50;
   let convQuery = supabase
     .from("conversations")
     .select(`
@@ -129,7 +147,9 @@ async function findCandidates(supabase: any, params: any, userId: string) {
       contact:contacts(name, phone)
     `)
     .lt("last_message_at", cutoff)
-    .not("contact_id", "is", null);
+    .not("contact_id", "is", null)
+    .order("last_message_at", { ascending: true })
+    .limit(MAX_CANDIDATES);
   if (params.period_start) convQuery = convQuery.gte("last_message_at", dayStartIso(params.period_start));
   if (params.period_end) convQuery = convQuery.lt("last_message_at", dayEndIso(params.period_end));
 
@@ -137,48 +157,48 @@ async function findCandidates(supabase: any, params: any, userId: string) {
 
   if (!convs || convs.length === 0) return candidates;
 
-  // 2. For each conversation, find linked opportunity and check inbound count
-  for (const conv of convs) {
-    // Check inbound message count
-    const { count } = await supabase
+  // 2. Contagem de inbound de TODAS as conversas de uma vez (sem N+1).
+  const convIdList = convs.map((c: any) => c.id);
+  const inboundCounts = new Map<string, number>();
+  for (let i = 0; i < convIdList.length; i += 100) {
+    const chunk = convIdList.slice(i, i + 100);
+    const { data: inboundRows } = await supabase
       .from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("conversation_id", conv.id)
-      .eq("direction", "inbound");
+      .select("conversation_id")
+      .eq("direction", "inbound")
+      .in("conversation_id", chunk);
+    for (const row of inboundRows ?? []) {
+      const cid = (row as any).conversation_id as string;
+      inboundCounts.set(cid, (inboundCounts.get(cid) ?? 0) + 1);
+    }
+  }
 
-    if ((count ?? 0) < 1) continue;
-
-    // Find opportunity: by conversation_id first, then by contact_id
-    let opp: any = null;
-
-    // Direct link
-    const { data: directOpp } = await supabase
+  // 3. Oportunidades abertas por contato (uma query, em vez de uma por
+  //    conversa). Vínculo direto por conversation_id tem prioridade.
+  const contactIds = [...new Set(convs.map((c: any) => c.contact_id).filter(Boolean))] as string[];
+  const oppByContact = new Map<string, any>();
+  const oppByConversation = new Map<string, any>();
+  for (let i = 0; i < contactIds.length; i += 100) {
+    const chunk = contactIds.slice(i, i + 100);
+    const { data: opps } = await supabase
       .from("opportunities")
       .select(`
         id, title, contact_id, conversation_id, metadata, assigned_to, status,
         stage_id, stage:pipeline_stages(name)
       `)
-      .eq("conversation_id", conv.id)
-      .limit(1)
-      .maybeSingle();
-
-    if (directOpp) {
-      opp = directOpp;
-    } else {
-      // Indirect link: same contact_id, open status
-      const { data: contactOpp } = await supabase
-        .from("opportunities")
-        .select(`
-          id, title, contact_id, conversation_id, metadata, assigned_to, status,
-          stage_id, stage:pipeline_stages(name)
-        `)
-        .eq("contact_id", conv.contact_id)
-        .eq("status", "open")
-        .limit(1)
-        .maybeSingle();
-
-      if (contactOpp) opp = contactOpp;
+      .in("contact_id", chunk)
+      .eq("status", "open");
+    for (const o of (opps ?? []) as any[]) {
+      if (o.conversation_id) oppByConversation.set(o.conversation_id, o);
+      if (!oppByContact.has(o.contact_id)) oppByContact.set(o.contact_id, o);
     }
+  }
+
+  for (const conv of convs as any[]) {
+    if ((inboundCounts.get(conv.id) ?? 0) < 1) continue;
+
+    // Vínculo: direto (conversation_id) → indireto (mesmo contato, aberta).
+    const opp = oppByConversation.get(conv.id) ?? oppByContact.get(conv.contact_id) ?? null;
 
     // Skip closed opportunities unless include_closed
     if (opp && (opp.status === "won" || opp.status === "lost") && !params.include_closed) {

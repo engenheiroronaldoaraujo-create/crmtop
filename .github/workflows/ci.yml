@@ -22,10 +22,14 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Edge Function tests (deno)
-        run: deno test supabase/functions/_shared/
+        run: deno test --allow-env supabase/functions/_shared/
 
+      # Type-check por GLOB: a lista manual de arquivos ficava desatualizada
+      # (a função `lead-webhook`, adicionada por último, não entrava no
+      # type-check do CI). Qualquer função nova passa a ser checada
+      # automaticamente.
       - name: Type-check Edge Functions
-        run: deno check supabase/functions/ai-service/index.ts supabase/functions/sdr-engine/index.ts supabase/functions/deal-inspector/index.ts supabase/functions/automation-engine/index.ts supabase/functions/evolution-webhook/index.ts supabase/functions/evolution-proxy/index.ts supabase/functions/admin-users/index.ts supabase/functions/cadence-runner/index.ts supabase/functions/noreply-runner/index.ts supabase/functions/group-publisher/index.ts supabase/functions/group-dm-runner/index.ts supabase/functions/zernio-proxy/index.ts supabase/functions/zernio-webhook/index.ts
+        run: deno check supabase/functions/*/index.ts supabase/functions/_shared/*.ts
 
       - name: Frontend lint
         working-directory: frontend
@@ -36,3 +40,15 @@ jobs:
       - name: Frontend build (tsc + vite)
         working-directory: frontend
         run: npm run build
+
+      # Gate de vulnerabilidades: 22 vulns (1 critical, 11 high) passavam
+      # despercebidas. O nível `high` bloqueia as graves; as moderadas
+      # (react-router) ainda não têm correção sem major.
+      - name: Audit de dependências
+        working-directory: frontend
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Audit de dependências (bloqueante)
+        working-directory: frontend
+        run: npm audit --audit-level=critical
