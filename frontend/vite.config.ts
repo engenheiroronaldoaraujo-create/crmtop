@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import path from "path"
 import { fileURLToPath } from "url"
 import react from "@vitejs/plugin-react"
@@ -87,7 +88,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  },
   build: {
+    // O chunk do `mediabunny` (~740 KB) é lazy por design: só é baixado
+    // quando o usuário grava áudio em Chrome/Safari. O limite foi erguido
+    // para 700 para calar o aviso — é intencional, não um mascaramento.
     chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {

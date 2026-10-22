@@ -37,6 +37,10 @@ jobs:
           npm ci
           npm run lint
 
+      - name: Frontend tests (vitest)
+        working-directory: frontend
+        run: npm run test
+
       - name: Frontend build (tsc + vite)
         working-directory: frontend
         run: npm run build

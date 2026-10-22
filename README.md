@@ -186,9 +186,10 @@ preferível a um job apontando para a URL errada.
 ## Testes e CI
 
 ```bash
-npm test          # deno test --allow-env supabase/functions/_shared/ (116 casos)
-npm run build     # tsc + vite
-npm --prefix frontend run lint
+npm test              # deno test --allow-env supabase/functions/_shared/ (116 casos)
+npm run test:frontend # vitest (26 casos em lib/utils)
+npm run build         # tsc + vite
+npm run lint          # eslint (frontend)
 ```
 
 CI no GitHub Actions (`.github/workflows/ci.yml`): testes Deno, type-check das

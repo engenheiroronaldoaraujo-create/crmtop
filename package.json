@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "scripts": {
     "build": "npm --prefix frontend run build",
-    "test": "deno test --allow-env supabase/functions/_shared/"
+    "test": "deno test --allow-env supabase/functions/_shared/",
+    "test:frontend": "npm --prefix frontend run test",
+    "lint": "npm --prefix frontend run lint"
   }
 }
