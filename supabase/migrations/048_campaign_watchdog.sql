@@ -16,6 +16,15 @@
 -- e net.* independentemente do schema da extensão; criar "with schema X"
 -- conflita com objetos já existentes, então usamos a instalação padrão.
 
+--
+-- NOTA (higiene): a URL e a anon key de producao que estavam
+-- hardcoded aqui foram removidas. A migration 063 re-agenda TODOS
+-- os jobs lendo a URL e a anon key de `public.cron_config` (ver o
+-- setup no README). A URL local abaixo e um placeholder inerte: em
+-- um `supabase db reset` o job aponta para o Supabase local e nao
+-- faz nada em producao.
+--
+
 do $$
 begin
   if not exists (select 1 from pg_extension where extname = 'pg_cron') then
@@ -49,11 +58,11 @@ select cron.schedule(
       limit 3
     )
     select net.http_post(
-      url := 'https://gboyodouyrkljqbrxohz.supabase.co/functions/v1/zernio-proxy',
+      url := 'http://localhost:54321/functions/v1/zernio-proxy',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'apikey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdib3lvZG91eXJrbGpxYnJ4b2h6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczNTY4ODgsImV4cCI6MjEwMjkzMjg4OH0.OSZNTnjJbRlP0epjzmvyGlijAtLkwjCtqMGph2esBbg',
-        'Authorization', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdib3lvZG91eXJrbGpxYnJ4b2h6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczNTY4ODgsImV4cCI6MjEwMjkzMjg4OH0.OSZNTnjJbRlP0epjzmvyGlijAtLkwjCtqMGph2esBbg'
+        'apikey', 'local-anon-key-placeholder',
+        'Authorization', 'Bearer local-anon-key-placeholder'
       ),
       body := jsonb_build_object(
         'action', 'campaign-send-batch',

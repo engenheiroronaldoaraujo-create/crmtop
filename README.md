@@ -90,7 +90,7 @@ dois runners impede envio duplicado. Auditoria em `activity_log` (`GROUP_POST:*`
 
 ```
 supabase/
-  migrations/          001..062 (profiles → cadences, noreply follow-up, hardening)
+  migrations/          001..063 (profiles → cadences, noreply follow-up, hardening, cron)
   functions/
     _shared/           cors, auth (requireUser/requireAdmin server-side),
                        evolution-identity (camada única de identidade LID/JID/phone),
@@ -137,6 +137,26 @@ npm install && npm run dev
 Deploy das funções: `supabase functions deploy <nome>` (por função).
 Signup público **desligado** — usuários criados pelo admin.
 Webhook: `https://<ref>.supabase.co/functions/v1/evolution-webhook?token=<WEBHOOK_SECRET>`.
+
+### Jobs do pg_cron (cadências, régua, grupos, watchdog)
+
+A URL base e a anon key usadas pelos jobs ficam em `cron_config` — **não há
+mais URL de produção hardcoded nas migrations** (antes: 6 arquivos, 9
+ocorrências; `supabase db reset` em dev criava jobs que apontavam para
+produção).
+
+Configure **uma vez**, com a Edge Function `admin-users` (admin-only, os
+valores vêm do ambiente — nada é digitado e nada sensível vai para o git):
+
+```bash
+curl -X POST "<ref>.supabase.co/functions/v1/admin-users" \
+  -H "Authorization: Bearer <access_token_do_admin>" \
+  -H "apikey: <anon_key>" -H "Content-Type: application/json" \
+  -d '{"action":"set-cron-config"}'
+```
+
+Sem essa configuração os jobs **não fazem nada** (fail closed) — é
+preferível a um job apontando para a URL errada.
 
 ## Notas de segurança
 

@@ -216,6 +216,43 @@ Deno.serve(async (req) => {
         return jsonResponse(200, { ok: true });
       }
 
+      case "set-cron-config": {
+        // Configura URL base e anon key usados pelos jobs do pg_cron.
+        //
+        // Antes a URL e a anon key de PRODUÇÃO estavam hardcoded nas
+        // migrations (6 arquivos, 9 ocorrências): `supabase db reset` em dev
+        // criava jobs que faziam POST na produção, e trocar de projeto
+        // exigia editar 6 migrations.
+        //
+        // Os valores vêm do ambiente da Edge Function (SUPABASE_URL e
+        // SUPABASE_ANON_KEY são secrets padrão do Supabase) — o admin não
+        // digita nada e nada sensível vai para o git.
+        const baseUrl = String(body.base_url ?? Deno.env.get("SUPABASE_URL") ?? "").trim();
+        const anonKey = String(body.anon_key ?? Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim();
+        if (!baseUrl || !anonKey) {
+          return jsonResponse(400, {
+            error: "base_url e anon_key obrigatórios (ou SUPABASE_URL/SUPABASE_ANON_KEY no ambiente)",
+          });
+        }
+        const rows = [
+          { key: "cron_base_url", value: baseUrl },
+          { key: "cron_anon_key", value: anonKey },
+        ];
+        const { error: cfgError } = await supabase
+          .from("cron_config")
+          .upsert(rows.map((r) => ({ ...r, updated_at: new Date().toISOString() })), { onConflict: "key" });
+        if (cfgError) return jsonResponse(400, { error: cfgError.message });
+
+        await supabase.from("activity_log").insert({
+          entity_type: "secret_update",
+          entity_id: null,
+          action: "CRON_CONFIG_UPDATED",
+          actor_id: profile.id,
+          new_data: { base_url: baseUrl, anon_key_length: anonKey.length },
+        }).then(() => {}, () => {});
+        return jsonResponse(200, { ok: true, base_url: baseUrl });
+      }
+
       default:
         return jsonResponse(400, { error: "unknown action" });
     }

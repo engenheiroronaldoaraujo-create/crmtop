@@ -16,6 +16,15 @@
 -- 1. Tabela de posts
 -- ===========================================================================
 
+--
+-- NOTA (higiene): a URL e a anon key de producao que estavam
+-- hardcoded aqui foram removidas. A migration 063 re-agenda TODOS
+-- os jobs lendo a URL e a anon key de `public.cron_config` (ver o
+-- setup no README). A URL local abaixo e um placeholder inerte: em
+-- um `supabase db reset` o job aponta para o Supabase local e nao
+-- faz nada em producao.
+--
+
 create table if not exists public.group_posts (
   id                  uuid primary key default gen_random_uuid(),
   instance_id         uuid not null references public.whatsapp_instances(id) on delete cascade,
@@ -203,10 +212,10 @@ select cron.schedule(
   '*/5 * * * *',
   $$
     select net.http_post(
-      url := 'https://gboyodouyrkljqbrxohz.supabase.co/functions/v1/group-publisher',
+      url := 'http://localhost:54321/functions/v1/group-publisher',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'apikey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdib3lvZG91eXJrbGpxYnJ4b2h6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczNTY4ODgsImV4cCI6MjEwMjkzMjg4OH0.OSZNTnjJbRlP0epjzmvyGlijAtLkwjCtqMGph2esBbg'
+        'apikey', 'local-anon-key-placeholder'
       ),
       body := jsonb_build_object(
         'internal_token', (
@@ -224,10 +233,10 @@ select cron.schedule(
   '*/5 * * * *',
   $$
     select net.http_post(
-      url := 'https://gboyodouyrkljqbrxohz.supabase.co/functions/v1/group-dm-runner',
+      url := 'http://localhost:54321/functions/v1/group-dm-runner',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'apikey', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdib3lvZG91eXJrbGpxYnJ4b2h6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczNTY4ODgsImV4cCI6MjEwMjkzMjg4OH0.OSZNTnjJbRlP0epjzmvyGlijAtLkwjCtqMGph2esBbg'
+        'apikey', 'local-anon-key-placeholder'
       ),
       body := jsonb_build_object(
         'internal_token', (

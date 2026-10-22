@@ -121,7 +121,11 @@ file_size_limit = "50MiB"
 [storage.buckets.whatsapp-media]
 public = false
 file_size_limit = "50MiB"
-allowed_mime_types = ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/aac", "video/mp4", "application/pdf", "application/octet-stream"]
+# audio/webm e audio/webm;codecs=opus são o formato que o MediaRecorder
+# produz no Chrome/Firefox. Sem eles, o upload de áudio falhava no dev
+# local (a migration 056 corrigiu o bucket no banco de produção, mas o
+# config.toml nunca foi atualizado).
+allowed_mime_types = ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/aac", "audio/webm", "audio/ogg;codecs=opus", "video/mp4", "video/3gpp", "application/pdf", "application/octet-stream"]
 
 # Allow connections via S3 compatible clients
 [storage.s3_protocol]

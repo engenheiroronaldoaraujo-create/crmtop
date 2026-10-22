@@ -1,0 +1,63 @@
+name: Deploy Supabase
+
+# Publica banco + Edge Functions no merge em `main`.
+#
+# Antes o deploy era 100% manual (`supabase db push` + `supabase functions
+# deploy` por função), e nada denunciava o drift entre a migration aplicada
+# e o código em produção — era possível ter o banco na 063 e a `sdr-engine`
+# ainda na versão anterior.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: supabase-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Migrations: `supabase db push` aplica só as pendentes.
+      - name: Aplicar migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+        run: supabase db push
+
+      # Edge Functions: deploy de todas.
+      #
+      # SEM `--no-verify-jwt`: o deploy respeita o `verify_jwt` de cada
+      # função no config.toml (false nas 11 server-to-server, true em
+      # sdr-engine / ai-service / deal-inspector). Passar a flag abriria
+      # as três últimas para chamadas sem autenticação.
+      - name: Deploy das Edge Functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+        run: |
+          for fn in supabase/functions/*/; do
+            name=$(basename "$fn")
+            [ "$name" = "_shared" ] && continue
+            echo "deploy $name"
+            supabase functions deploy "$name" --project-ref "$SUPABASE_PROJECT_ID"
+          done
+
+      # Os secrets de runtime (EVOLUTION_API_KEY, WEBHOOK_SECRET, ...) são
+      # configurados no dashboard e NAO sao sobrescritos aqui.
+      - name: Resumo
+        run: echo "Deploy concluido. Confira os logs do Supabase em caso de erro."
