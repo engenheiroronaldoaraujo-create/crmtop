@@ -936,27 +936,22 @@ export default function ChatPage() {
   const toggleSDR = async () => {
     if (!selectedId) return
     setSdrToggling(true)
+    const willPause = sdrStatus === "active" || sdrStatus === null
     try {
-      if (sdrStatus === "active" || sdrStatus === null) {
-        // Pause SDR (create record if doesn't exist)
-        await supabase
-          .from("sdr_conversations")
-          .upsert({
-            conversation_id: selectedId,
-            contact_id: selected?.contact_id,
-            status: "paused_human",
-          }, { onConflict: "conversation_id" })
-        setSdrStatus("paused_human")
-        toast.success("SDR pausado nesta conversa")
-      } else {
-        // Resume SDR
-        await supabase
-          .from("sdr_conversations")
-          .update({ status: "active" })
-          .eq("conversation_id", selectedId)
-        setSdrStatus("active")
-        toast.success("SDR reativado nesta conversa")
-      }
+      // Pausar/retomar o SDR via RPC.
+      //
+      // O `upsert` direto em `sdr_conversations` parou de funcionar depois
+      // do hardening: `authenticated` só tem UPDATE/INSERT por coluna e o
+      // `ON CONFLICT DO UPDATE` exige UPDATE de TABELA (403). O RPC é
+      // SECURITY DEFINER (roda como dono) e ainda restringe o que o cliente
+      // pode pedir — só pausar/retomar, nunca mexer no contador da IA.
+      const { error } = await supabase.rpc("set_sdr_pause", {
+        p_conversation_id: selectedId,
+        p_paused: willPause,
+      })
+      if (error) throw error
+      setSdrStatus(willPause ? "paused_human" : "active")
+      toast.success(willPause ? "SDR pausado nesta conversa" : "SDR reativado nesta conversa")
     } catch (e: any) {
       toast.error(e.message)
     } finally {
