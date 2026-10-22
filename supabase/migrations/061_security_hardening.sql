@@ -155,31 +155,74 @@ drop policy if exists "zernio_connections_select" on public.zernio_connections;
 create policy "zernio_connections_select" on public.zernio_connections
   for select to authenticated using (public.is_admin());
 
--- `sdr_conversations` é lido pelo Chat (badge de pausa da IA) por qualquer
--- usuário, mas escrita é restrita: só service role muda estado da IA.
-drop policy if exists "sdr_conversations_update" on public.sdr_conversations;
-create policy "sdr_conversations_update" on public.sdr_conversations
-  for update to authenticated
-  using (public.is_admin())
-  with check (public.is_admin());
+-- `automation_executions` é escrito só pelo `automation-engine` (service
+-- role). O frontend apenas LÊ (em /automations, rota de admin). Deixar o
+-- INSERT liberado permitia a qualquer vendedor forjar log de execução.
+drop policy if exists "automation_executions_insert" on public.automation_executions;
+create policy "automation_executions_insert" on public.automation_executions
+  for insert to authenticated with check (public.is_admin());
 
--- `noreply_states`: o Chat mostra o badge "tentativa N/total" para qualquer
--- usuário, mas o estado da régua é controlado pelo runner (service role).
-drop policy if exists "noreply_states_update" on public.noreply_states;
-create policy "noreply_states_update" on public.noreply_states
-  for update to authenticated
-  using (public.is_admin())
-  with check (public.is_admin());
+-- ---------------------------------------------------------------------------
+-- 2b. Grants por COLUNA — o vendedor escreve só o que a UI permite
+-- ---------------------------------------------------------------------------
+--
+-- Estas três tabelas são escritas pelo frontend por QUALQUER usuário:
+--   - conversations: atribuir responsável, marcar origem, abrir/fechar;
+--   - sdr_conversations: pausar/retomar o SDR na conversa;
+--   - noreply_states: botão "Cancelar follow-up" (documentado como
+--     disponível a qualquer usuário).
+--
+-- Restringir a policy a admin QUEBRARIA esses 3 fluxos. A alternativa
+-- precisa é o **grant por coluna**: o privilege de UPDATE é conferido
+-- coluna a coluna, então o vendedor continua podendo mexer no que a UI
+-- precisa e NÃO consegue mais:
+--   - inflar `unread_count` nem reescrever `last_message_preview`;
+--   - zerar `auto_messages_count` (destravar o limite de mensagens da IA);
+--   - zerar `attempts_made` (reiniciar a régua de follow-up).
+--
+-- O service role (webhook, runners) não é afetado: BYPASSRLS + privilégios
+-- de tabela. As funções SECURITY DEFINER (`bump_conversation`,
+-- `mark_conversation_read`, `noreply_touch`) rodam como dono e também não
+-- são afetadas.
 
--- `conversations.update` com `with check (true)` permitia inflar
--- `unread_count` arbitrariamente e reescrever o preview. O preview e o
--- contador são mantidos pelo webhook (service role); o cliente só precisa
--- zerar o unread via RPC.
+-- conversations: o que a UI escreve
+revoke update on public.conversations from authenticated;
+grant update (assigned_to, source, source_meta, status) on public.conversations to authenticated;
+
 drop policy if exists "conversations_update" on public.conversations;
 create policy "conversations_update" on public.conversations
   for update to authenticated
-  using (public.is_admin())
-  with check (public.is_admin());
+  using (true)
+  with check (true);
+
+-- sdr_conversations: pausar/retomar o SDR
+revoke update on public.sdr_conversations from authenticated;
+grant update (status, last_auto_reply_at, handoff_reason, metadata)
+  on public.sdr_conversations to authenticated;
+
+revoke insert on public.sdr_conversations from authenticated;
+grant insert (conversation_id, contact_id, opportunity_id, status, handoff_reason, metadata)
+  on public.sdr_conversations to authenticated;
+
+drop policy if exists "sdr_conversations_update" on public.sdr_conversations;
+create policy "sdr_conversations_update" on public.sdr_conversations
+  for update to authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists "sdr_conversations_insert" on public.sdr_conversations;
+create policy "sdr_conversations_insert" on public.sdr_conversations
+  for insert to authenticated with check (true);
+
+-- noreply_states: "Cancelar follow-up" (qualquer usuário)
+revoke update on public.noreply_states from authenticated;
+grant update (status, ended_at, next_check_at) on public.noreply_states to authenticated;
+
+drop policy if exists "noreply_states_update" on public.noreply_states;
+create policy "noreply_states_update" on public.noreply_states
+  for update to authenticated
+  using (true)
+  with check (true);
 
 -- ---------------------------------------------------------------------------
 -- 3. CHECK de formato em contacts (identidade canônica no banco)
