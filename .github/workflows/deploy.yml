@@ -49,11 +49,12 @@ jobs:
       #
       # `--project-ref` é explícito de propósito: o runner não tem
       # `supabase link` feito, e sem o flag o CLI aborta com "Cannot find
-      # project ref".
+      # project ref". O `SUPABASE_DB_URL` NÃO é passado aqui de propósito:
+      # com ele no ambiente o CLI tenta conectar direto no Postgres e
+      # ignora o `--project-ref` (a senha do banco não está no repositório).
       - name: Aplicar migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
         run: supabase db push --project-ref "$SUPABASE_PROJECT_ID"
 
