@@ -206,7 +206,14 @@ Edge Functions, lint e build do frontend em cada push/PR.
 ## Dívida conhecida / próximos passos
 
 - Atualizações **majors** pendentes (avisadas pelo `npm audit`): vite 5→8 e
-  react-router 6→7 (com testes), em branch dedicada.
+  react-router 6→7 (com testes), em branch dedicada. O `vitest` também está
+  preso na v2 porque a v4 exige Vite 6+ — sobe junto com o vite.
+- **Política de audit no CI**: o gate bloqueante é
+  `npm audit --omit=dev --audit-level=high` (só o que entra no bundle do
+  navegador). O audit completo, que inclui a toolchain de dev
+  (`tinypool`, `tar`, `sharp`, `uuid` via capacitor), fica informativo:
+  nenhuma delas é executada no navegador do usuário, e bloquear o merge
+  por elas só deixaria o CI vermelho.
 - `evolution-proxy` com ~2.2k linhas — dividir em módulos na próxima mudança grande.
 - `Chat.tsx` (~2.2k linhas, ~35 `useState`) e `Pipeline.tsx` (~1.9k) ainda
   concentram componentes que deveriam viver em `components/chat/*` e
