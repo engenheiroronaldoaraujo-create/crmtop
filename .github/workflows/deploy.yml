@@ -31,13 +31,31 @@ jobs:
         with:
           node-version: 20
 
+      # Falha com mensagem clara se os secrets não estiverem configurados
+      # (o CLI abortaria com "Cannot find project ref", que não diz o que
+      # falta).
+      - name: Checar secrets
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_PROJECT_ID" ]; then
+            echo "::error::Configure os secrets SUPABASE_ACCESS_TOKEN e SUPABASE_PROJECT_ID no repositorio (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          echo "project ref: $SUPABASE_PROJECT_ID"
+
       # Migrations: `supabase db push` aplica só as pendentes.
+      #
+      # `--project-ref` é explícito de propósito: o runner não tem
+      # `supabase link` feito, e sem o flag o CLI aborta com "Cannot find
+      # project ref".
       - name: Aplicar migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
-        run: supabase db push
+        run: supabase db push --project-ref "$SUPABASE_PROJECT_ID"
 
       # Edge Functions: deploy de todas.
       #
