@@ -636,6 +636,24 @@ async function processMessage(
         return { action: "skip", response: "Instância não configurada para SDR" }
       }
     }
+
+    // 3.5 Check message origin (source). O usuário escolhe em quais origens
+    // o SDR pode responder (organic | ad | campaign | manual).
+    // NULL/undefined = todas (compat com bancos pré-migração 067).
+    const allowed: string[] | null = Array.isArray((settings as any)?.allowed_sources)
+      ? (settings as any).allowed_sources as string[]
+      : null
+    if (allowed) {
+      const { data: conv } = await supabase
+        .from("conversations")
+        .select("source")
+        .eq("id", conversationId)
+        .maybeSingle()
+      const source = (conv as any)?.source ?? "organic"
+      if (!allowed.includes(source)) {
+        return { action: "skip", response: `Origem ${source} não habilitada para SDR` }
+      }
+    }
   }
 
   // 4. Check conversation SDR state
@@ -1270,6 +1288,7 @@ Deno.serve(async (req) => {
         // Whitelist allowed fields to prevent accidental corruption
         const allowedFields = [
           "enabled", "test_mode", "timezone", "instance_id",
+          "allowed_sources",
           "schedule_sunday", "schedule_monday", "schedule_tuesday",
           "schedule_wednesday", "schedule_thursday", "schedule_friday", "schedule_saturday",
           "schedule_start_time", "schedule_end_time",

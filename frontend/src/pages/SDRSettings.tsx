@@ -31,6 +31,13 @@ import {
 
 const PRES_DAYS = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"]
 
+const SDR_SOURCES = [
+  { value: "ad", label: "Anúncio", hint: "Click-to-WhatsApp (Meta Ads)" },
+  { value: "organic", label: "Orgânico", hint: "Mensagem espontânea" },
+  { value: "campaign", label: "Campanha", hint: "Disparo / landing page" },
+  { value: "manual", label: "Manual", hint: "Contato criado no CRM" },
+] as const
+
 // ---------------------------------------------------------------------------
 // Presentation Availability Component
 // ---------------------------------------------------------------------------
@@ -390,6 +397,35 @@ export default function SDRSettings() {
             <div className="flex items-center justify-between"><Label className="text-sm">Limite msgs/conversa</Label><Input type="number" className="w-20 h-8" value={settings.max_messages_per_conversation} onChange={(e) => handleSave({ max_messages_per_conversation: parseInt(e.target.value) || 10 })} /></div>
             <div className="flex items-center justify-between"><Label className="text-sm">Cooldown (seg)</Label><Input type="number" className="w-20 h-8" value={settings.cooldown_seconds} onChange={(e) => handleSave({ cooldown_seconds: parseInt(e.target.value) || 5 })} /></div>
             <div className="flex items-center justify-between"><Label className="text-sm">Duracao reuniao (min)</Label><Input type="number" className="w-20 h-8" value={settings.meeting_duration_minutes} onChange={(e) => handleSave({ meeting_duration_minutes: parseInt(e.target.value) || 30 })} /></div>
+            <Separator />
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Origens que o SDR responde</Label>
+              <p className="text-xs text-muted-foreground">Desmarque uma origem para o SDR ignorar essas conversas.</p>
+              <div className="space-y-2 pt-1">
+                {SDR_SOURCES.map((s) => {
+                  const allowed: string[] = Array.isArray(settings.allowed_sources)
+                    ? settings.allowed_sources
+                    : ["organic", "ad", "campaign", "manual"]
+                  const checked = allowed.includes(s.value)
+                  return (
+                    <label key={s.value} className="flex items-center justify-between gap-2 cursor-pointer">
+                      <span className="text-sm">{s.label} <span className="text-xs text-muted-foreground">— {s.hint}</span></span>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...allowed, s.value]
+                            : allowed.filter((v) => v !== s.value)
+                          handleSave({ allowed_sources: next })
+                        }}
+                        className="rounded"
+                      />
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
           </CardContent>
         </Card>
 
