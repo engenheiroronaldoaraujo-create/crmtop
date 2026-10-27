@@ -273,7 +273,35 @@ export default function SDRSettings() {
       await sdrUpdateSettings(patch)
       setSettings({ ...settings, ...patch })
       toast.success("Configuracoes salvas")
-    } catch (e: any) { toast.error(e.message) }
+    } catch (e: any) {
+      // Fallback: se o sdr-engine em produção ainda é o código antigo
+      // (sem `allowed_sources` no whitelist → 400 "No valid fields to update"),
+      // tenta gravar direto na tabela (RLS: admin). Isso desbloqueia o
+      // checkbox assim que a migration 067 for aplicada, mesmo antes do
+      // redeploy da function.
+      const msg = String(e?.message ?? "")
+      if ("allowed_sources" in patch && /no valid fields/i.test(msg) && settings?.id) {
+        try {
+          const { error } = await supabase
+            .from("sdr_settings")
+            .update({ allowed_sources: patch.allowed_sources })
+            .eq("id", settings.id)
+          if (error) throw error
+          setSettings({ ...settings, ...patch })
+          toast.success("Configuracoes salvas")
+          return
+        } catch (e2: any) {
+          const msg2 = String(e2?.message ?? "")
+          if (/allowed_sources/i.test(msg2) || /column/i.test(msg2)) {
+            toast.error("Rode a migration 067 no SQL Editor do Supabase e recarregue a página.")
+          } else {
+            toast.error(msg2 || msg)
+          }
+          return
+        }
+      }
+      toast.error(msg)
+    }
   }
 
   const handleKnowledgeFile = async (file: File | null) => {
