@@ -5,7 +5,6 @@ import { Toaster } from "sonner"
 import { AuthProvider, useAuth } from "@/hooks/use-auth"
 import { ThemeProvider, useTheme } from "@/hooks/use-theme"
 import { ProtectedRoute } from "@/components/ProtectedRoute"
-import { PwaInstallPrompt } from "@/components/PwaInstallPrompt"
 import { Layout } from "@/components/Layout"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import LoginPage from "@/pages/Login"
@@ -129,7 +128,6 @@ export default function App() {
             </Suspense>
           </ErrorBoundary>
           <AppToaster />
-          <PwaInstallPrompt />
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>
