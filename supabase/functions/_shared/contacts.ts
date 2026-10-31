@@ -150,7 +150,7 @@ export async function upsertContact(
   return data.id;
 }
 
-export type ConversationSource = "organic" | "ad" | "campaign" | "manual";
+export type ConversationSource = "organic" | "ad" | "campaign" | "landing" | "manual";
 
 export interface ConversationOrigin {
   source?: ConversationSource;

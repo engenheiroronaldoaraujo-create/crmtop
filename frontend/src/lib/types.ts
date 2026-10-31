@@ -33,7 +33,7 @@ export type WhatsAppInstance = {
   created_at: string
 }
 
-export type ConversationSource = "organic" | "ad" | "campaign" | "manual"
+export type ConversationSource = "organic" | "ad" | "campaign" | "landing" | "manual"
 
 export type Conversation = {
   id: string

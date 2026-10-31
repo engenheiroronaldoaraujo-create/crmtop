@@ -116,6 +116,7 @@ const SOURCE_OPTIONS: [SourceFilter, string][] = [
   ["all", "Todas as origens"],
   ["ad", "Anúncios"],
   ["campaign", "Campanhas"],
+  ["landing", "Landing page"],
   ["organic", "Orgânico"],
   ["manual", "Manual"],
 ]
@@ -123,11 +124,13 @@ const SOURCE_OPTIONS: [SourceFilter, string][] = [
 const SOURCE_BADGES: Partial<Record<ConversationSource, string>> = {
   ad: "Anúncio",
   campaign: "Campanha",
+  landing: "Landing",
 }
 
 const SOURCE_MARK_OPTIONS: [ConversationSource, string][] = [
   ["ad", "Anúncio"],
   ["campaign", "Campanha"],
+  ["landing", "Landing page"],
   ["organic", "Orgânico"],
   ["manual", "Manual"],
 ]

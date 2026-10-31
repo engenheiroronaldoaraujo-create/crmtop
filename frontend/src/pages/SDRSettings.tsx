@@ -34,7 +34,8 @@ const PRES_DAYS = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "
 const SDR_SOURCES = [
   { value: "ad", label: "Anúncio", hint: "Click-to-WhatsApp (Meta Ads)" },
   { value: "organic", label: "Orgânico", hint: "Mensagem espontânea" },
-  { value: "campaign", label: "Campanha", hint: "Disparo / landing page" },
+  { value: "campaign", label: "Campanha", hint: "Disparo via Zernio" },
+  { value: "landing", label: "Landing page", hint: "Formulário do site (lead-webhook)" },
   { value: "manual", label: "Manual", hint: "Contato criado no CRM" },
 ] as const
 
@@ -433,7 +434,7 @@ export default function SDRSettings() {
                 {SDR_SOURCES.map((s) => {
                   const allowed: string[] = Array.isArray(settings.allowed_sources)
                     ? settings.allowed_sources
-                    : ["organic", "ad", "campaign", "manual"]
+                    : ["organic", "ad", "campaign", "landing", "manual"]
                   const checked = allowed.includes(s.value)
                   return (
                     <label key={s.value} className="flex items-center justify-between gap-2 cursor-pointer">

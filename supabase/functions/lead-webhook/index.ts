@@ -306,7 +306,7 @@ Deno.serve(async (req) => {
             .insert({
               contact_id: contactId,
               instance_id: instanceId,
-              source: "campaign",
+              source: "landing",
               source_meta: { origin: "landing", created_via: "lead-webhook", ...utm },
             })
             .select("id")

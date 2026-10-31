@@ -638,7 +638,7 @@ async function processMessage(
     }
 
     // 3.5 Check message origin (source). O usuário escolhe em quais origens
-    // o SDR pode responder (organic | ad | campaign | manual).
+    // o SDR pode responder (organic | ad | campaign | landing | manual).
     // NULL/undefined = todas (compat com bancos pré-migração 067).
     const allowed: string[] | null = Array.isArray((settings as any)?.allowed_sources)
       ? (settings as any).allowed_sources as string[]
