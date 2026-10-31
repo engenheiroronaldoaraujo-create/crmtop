@@ -45,6 +45,7 @@ export function adminUsersCreate(payload: {
   full_name: string
   role: "admin" | "vendedor"
   temp_password: string
+  workspace_id?: string
 }) {
   return postJson("admin-users", { action: "create", ...payload })
 }
@@ -67,6 +68,32 @@ export function adminUsersResetPassword(user_id: string, temp_password: string) 
 
 export function adminUsersSetRole(user_id: string, role: "admin" | "vendedor") {
   return postJson("admin-users", { action: "set-role", user_id, role })
+}
+
+// ----- multi-tenant (workspaces) -----
+// postJson/createWorkspace/inviteMember já incluem o JWT do usuário via
+// getAccessToken() (Authorization: Bearer <token>) — checagem de permissão
+// é feita server-side na edge function admin-users.
+
+export function createWorkspace(name: string) {
+  return postJson("admin-users", { action: "create-workspace", name })
+}
+
+export function inviteMember(
+  workspaceId: string,
+  email: string,
+  role: "admin" | "vendedor",
+  temp_password: string,
+  full_name?: string,
+) {
+  return postJson("admin-users", {
+    action: "create",
+    email,
+    full_name: full_name ?? email.split("@")[0],
+    role,
+    temp_password,
+    workspace_id: workspaceId,
+  })
 }
 
 // ----- evolution-proxy (any authenticated user) -----

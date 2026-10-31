@@ -25,6 +25,7 @@ import { serviceClient } from "../_shared/contacts.ts";
 import { recordOutboundMessage } from "../_shared/outbound.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
+import { bumpUsage, isMsgQuotaExceeded, listActiveWorkspaces } from "../_shared/workspace.ts";
 import {
   isWeekend,
   localParts,
@@ -46,6 +47,7 @@ const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 
 interface NoreplySettings {
   is_active: boolean;
+  workspace_id?: string | null;
   business_hours_only: boolean;
   skip_weekends: boolean;
   restart_after_reply: boolean;
@@ -55,6 +57,7 @@ interface NoreplySettings {
 
 interface NoreplyAttempt {
   id: string;
+  workspace_id?: string | null;
   attempt_number: number;
   delay_hours: number;
   template_id: string | null;
@@ -64,6 +67,7 @@ interface NoreplyAttempt {
 
 interface NoreplyState {
   id: string;
+  workspace_id?: string | null;
   conversation_id: string;
   contact_id: string;
   opportunity_id: string | null;
@@ -78,6 +82,7 @@ interface NoreplyState {
 
 interface ConversationRow {
   id: string;
+  workspace_id?: string | null;
   contact_id: string;
   instance_id: string;
   status: "open" | "closed";
@@ -88,6 +93,7 @@ interface ConversationRow {
 
 interface Contact {
   id: string;
+  workspace_id?: string | null;
   name: string | null;
   push_name: string | null;
   phone: string | null;
@@ -98,6 +104,7 @@ interface Contact {
 
 interface Opportunity {
   id: string;
+  workspace_id?: string | null;
   contact_id: string;
   pipeline_id: string;
   stage_id: string;
@@ -137,13 +144,14 @@ async function authorize(req: Request, internalToken: string | undefined): Promi
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function withinBusinessHours(): Promise<boolean> {
+async function withinBusinessHours(workspaceId?: string): Promise<boolean> {
   const { dayOfWeek, minutes } = localParts(new Date());
-  const { data: hours } = await supabase
+  let hoursQuery = supabase
     .from("business_hours")
     .select("is_active, start_time, end_time")
-    .eq("day_of_week", dayOfWeek)
-    .maybeSingle();
+    .eq("day_of_week", dayOfWeek);
+  if (workspaceId) hoursQuery = hoursQuery.eq("workspace_id", workspaceId);
+  const { data: hours } = await hoursQuery.maybeSingle();
   if (!hours || !hours.is_active) return false;
   return minutes >= timeToMinutes(hours.start_time) && minutes <= timeToMinutes(hours.end_time);
 }
@@ -206,6 +214,7 @@ async function logEvent(
   attempt: number | null,
   messageId: string | null = null,
   details: Record<string, unknown> | null = null,
+  workspaceId?: string,
 ): Promise<void> {
   const { error } = await supabase.from("noreply_events").insert({
     state_id: stateId,
@@ -213,6 +222,7 @@ async function logEvent(
     attempt,
     message_id: messageId,
     details,
+    ...(workspaceId ? { workspace_id: workspaceId } : {}),
   });
   if (error) console.error("NOREPLY_EVENT_INSERT_FAILED", stateId, eventType, error.message);
 }
@@ -221,15 +231,16 @@ async function logEvent(
 // Load
 // ---------------------------------------------------------------------------
 
-async function loadSettings(): Promise<NoreplySettings | null> {
-  const { data, error } = await supabase
+async function loadSettings(workspaceId?: string): Promise<NoreplySettings | null> {
+  let settingsQuery = supabase
     .from("noreply_settings")
     .select(
       "is_active, business_hours_only, skip_weekends, restart_after_reply, exhaust_grace_hours, task_on_exhaust",
     )
     .order("created_at")
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  if (workspaceId) settingsQuery = settingsQuery.eq("workspace_id", workspaceId);
+  const { data, error } = await settingsQuery.maybeSingle();
   if (error) {
     console.error("NOREPLY_SETTINGS_LOAD_FAILED", error.message);
     return null;
@@ -237,12 +248,14 @@ async function loadSettings(): Promise<NoreplySettings | null> {
   return (data as NoreplySettings) ?? null;
 }
 
-async function loadAttempts(): Promise<NoreplyAttempt[]> {
-  const { data, error } = await supabase
+async function loadAttempts(workspaceId?: string): Promise<NoreplyAttempt[]> {
+  let attemptsQuery = supabase
     .from("noreply_attempts")
     .select("id, attempt_number, delay_hours, template_id, message_text, is_active")
     .eq("is_active", true)
     .order("attempt_number");
+  if (workspaceId) attemptsQuery = attemptsQuery.eq("workspace_id", workspaceId);
+  const { data, error } = await attemptsQuery;
   if (error) {
     console.error("NOREPLY_ATTEMPTS_LOAD_FAILED", error.message);
     return [];
@@ -250,43 +263,47 @@ async function loadAttempts(): Promise<NoreplyAttempt[]> {
   return (data as NoreplyAttempt[]) ?? [];
 }
 
-async function loadConversation(conversationId: string): Promise<ConversationRow | null> {
-  const { data } = await supabase
+async function loadConversation(conversationId: string, workspaceId?: string): Promise<ConversationRow | null> {
+  let convQuery = supabase
     .from("conversations")
     .select("id, contact_id, instance_id, status, last_message_inbound, last_message_at, instance:whatsapp_instances(instance_name)")
-    .eq("id", conversationId)
-    .maybeSingle();
+    .eq("id", conversationId);
+  if (workspaceId) convQuery = convQuery.eq("workspace_id", workspaceId);
+  const { data } = await convQuery.maybeSingle();
   // join aninhado com maybeSingle chega como objeto, mas o tipo genérico do
   // supabase-js o infere como array — cast via unknown (padrão do cadence-runner).
   return (data as unknown as ConversationRow) ?? null;
 }
 
-async function loadContact(contactId: string): Promise<Contact | null> {
-  const { data } = await supabase
+async function loadContact(contactId: string, workspaceId?: string): Promise<Contact | null> {
+  let contactQuery = supabase
     .from("contacts")
     .select("id, name, push_name, phone, lid, jid, opted_out")
-    .eq("id", contactId)
-    .maybeSingle();
+    .eq("id", contactId);
+  if (workspaceId) contactQuery = contactQuery.eq("workspace_id", workspaceId);
+  const { data } = await contactQuery.maybeSingle();
   return (data as Contact) ?? null;
 }
 
-async function loadOpportunity(oppId: string): Promise<Opportunity | null> {
-  const { data } = await supabase
+async function loadOpportunity(oppId: string, workspaceId?: string): Promise<Opportunity | null> {
+  let oppQuery = supabase
     .from("opportunities")
     .select("id, contact_id, pipeline_id, stage_id, assigned_to, conversation_id, status, title")
-    .eq("id", oppId)
-    .maybeSingle();
+    .eq("id", oppId);
+  if (workspaceId) oppQuery = oppQuery.eq("workspace_id", workspaceId);
+  const { data } = await oppQuery.maybeSingle();
   return (data as Opportunity) ?? null;
 }
 
 /** SDR IA ativo no comando da conversa? (active/paused_limit/paused_schedule) */
-async function sdrOwnsConversation(conversationId: string): Promise<boolean> {
-  const { data } = await supabase
+async function sdrOwnsConversation(conversationId: string, workspaceId?: string): Promise<boolean> {
+  let sdrQuery = supabase
     .from("sdr_conversations")
     .select("status")
     .eq("conversation_id", conversationId)
-    .in("status", ["active", "paused_limit", "paused_schedule"])
-    .maybeSingle();
+    .in("status", ["active", "paused_limit", "paused_schedule"]);
+  if (workspaceId) sdrQuery = sdrQuery.eq("workspace_id", workspaceId);
+  const { data } = await sdrQuery.maybeSingle();
   return Boolean(data);
 }
 
@@ -294,34 +311,34 @@ async function sdrOwnsConversation(conversationId: string): Promise<boolean> {
 // Cancel / replied helpers (estado → terminal + evento)
 // ---------------------------------------------------------------------------
 
-async function cancelState(state: NoreplyState, reason: string): Promise<void> {
+async function cancelState(state: NoreplyState, reason: string, workspaceId?: string): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
     .update({ status: "cancelled", ended_at: new Date().toISOString(), next_check_at: null, locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_CANCEL_FAILED", state.id, error.message);
-  else await logEvent(state.id, "cancelled", state.attempts_made, null, { reason });
+  else await logEvent(state.id, "cancelled", state.attempts_made, null, { reason }, workspaceId ?? state.workspace_id ?? undefined);
 }
 
-async function markReplied(state: NoreplyState): Promise<void> {
+async function markReplied(state: NoreplyState, workspaceId?: string): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
     .update({ status: "replied", ended_at: new Date().toISOString(), next_check_at: null, locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_REPLIED_FAILED", state.id, error.message);
-  else await logEvent(state.id, "reply_detected", state.attempts_made, null, { reason: "runner_recheck" });
+  else await logEvent(state.id, "reply_detected", state.attempts_made, null, { reason: "runner_recheck" }, workspaceId ?? state.workspace_id ?? undefined);
 }
 
-async function rescheduleState(state: NoreplyState, nextCheckAt: Date, reason: string): Promise<void> {
+async function rescheduleState(state: NoreplyState, nextCheckAt: Date, reason: string, workspaceId?: string): Promise<void> {
   const { error } = await supabase
     .from("noreply_states")
     .update({ next_check_at: nextCheckAt.toISOString(), locked_until: null })
     .eq("id", state.id)
     .eq("status", "active");
   if (error) console.error("NOREPLY_RESCHEDULE_FAILED", state.id, error.message);
-  else await logEvent(state.id, "rescheduled", state.attempts_made, null, { reason });
+  else await logEvent(state.id, "rescheduled", state.attempts_made, null, { reason }, workspaceId ?? state.workspace_id ?? undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +348,7 @@ async function rescheduleState(state: NoreplyState, nextCheckAt: Date, reason: s
 async function detectNew(
   settings: NoreplySettings,
   attempts: NoreplyAttempt[],
+  workspaceId?: string,
 ): Promise<{ enrolled: number; skipped: number }> {
   let enrolled = 0;
   let skipped = 0;
@@ -357,6 +375,18 @@ async function detectNew(
     r_opportunity_id: string;
     r_last_message_at: string;
   }[]) {
+    // O RPC de candidatos é global: fora do workspace da iteração, pula.
+    if (workspaceId) {
+      const { data: convWs } = await supabase
+        .from("conversations")
+        .select("workspace_id")
+        .eq("id", c.r_conversation_id)
+        .maybeSingle();
+      if ((convWs as { workspace_id?: string } | null)?.workspace_id !== workspaceId) {
+        skipped++;
+        continue;
+      }
+    }
     const lastAt = new Date(c.r_last_message_at).getTime();
     if (Date.now() - lastAt > horizonMs) {
       skipped++;
@@ -381,6 +411,7 @@ async function detectNew(
         next_check_at: nextCheck.toISOString(),
         // Delay da 1ª tentativa — fonte única usada também pelo noreply_touch.
         next_delay_hours: attempts[0].delay_hours,
+        ...(workspaceId ? { workspace_id: workspaceId } : {}),
       })
       .select("id")
       .maybeSingle();
@@ -395,7 +426,7 @@ async function detectNew(
       await logEvent(created.id, "started", 0, null, {
         last_message_at: c.r_last_message_at,
         next_check_at: nextCheck.toISOString(),
-      });
+      }, workspaceId);
     }
     enrolled++;
   }
@@ -417,6 +448,7 @@ async function sendAttemptMessage(
   attempt: NoreplyAttempt,
   conversation: ConversationRow,
   contact: Contact,
+  workspaceId?: string,
 ): Promise<{ messageId: string | null; error: string | null }> {
   const vars = {
     contact: { name: contact.name ?? contact.push_name ?? "Cliente", phone: contact.phone },
@@ -426,11 +458,12 @@ async function sendAttemptMessage(
   if (attempt.message_text) {
     text = substituteVariables(attempt.message_text, vars);
   } else if (attempt.template_id) {
-    const { data: tpl } = await supabase
+    let tplQuery = supabase
       .from("message_templates")
       .select("body")
-      .eq("id", attempt.template_id)
-      .maybeSingle();
+      .eq("id", attempt.template_id);
+    if (workspaceId) tplQuery = tplQuery.eq("workspace_id", workspaceId);
+    const { data: tpl } = await tplQuery.maybeSingle();
     text = substituteVariables(String(tpl?.body ?? ""), vars);
   }
 
@@ -482,6 +515,7 @@ async function sendAttemptMessage(
 async function executeDues(
   settings: NoreplySettings,
   attempts: NoreplyAttempt[],
+  workspaceId?: string,
 ): Promise<{ sent: number; exhausted: number; failed: number; skipped: number }> {
   let sent = 0;
   let exhausted = 0;
@@ -503,34 +537,41 @@ async function executeDues(
 
   for (const state of dues as NoreplyState[]) {
     try {
-      const conversation = await loadConversation(state.conversation_id);
+      // Claim é global: estado de outro workspace volta para a fila (lock
+      // liberado) e será processado na iteração do workspace dono.
+      if (workspaceId && state.workspace_id && state.workspace_id !== workspaceId) {
+        await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
+        continue;
+      }
+      const wsId = workspaceId ?? state.workspace_id ?? null;
+      const conversation = await loadConversation(state.conversation_id, workspaceId);
 
       // Conversa sumiu (cascade) ou foi encerrada → régua não tem mais sentido.
       if (!conversation || conversation.status !== "open") {
-        await cancelState(state, "conversation_closed");
+        await cancelState(state, "conversation_closed", wsId ?? undefined);
         continue;
       }
 
       // Lead respondeu entre o agendamento e agora (corrida com o webhook).
       if (conversation.last_message_inbound === true) {
-        await markReplied(state);
+        await markReplied(state, wsId ?? undefined);
         continue;
       }
 
-      const contact = await loadContact(state.contact_id);
+      const contact = await loadContact(state.contact_id, workspaceId);
       if (!contact) {
-        await cancelState(state, "contact_missing");
+        await cancelState(state, "contact_missing", wsId ?? undefined);
         continue;
       }
       if (contact.opted_out) {
-        await cancelState(state, "opted_out");
+        await cancelState(state, "opted_out", wsId ?? undefined);
         continue;
       }
 
       // SDR IA reassumiu a conversa → régua sai de cena (a IA tem a própria
       // lógica de cooldown; duas respostas automáticas não podem competir).
-      if (await sdrOwnsConversation(state.conversation_id)) {
-        await cancelState(state, "sdr_active");
+      if (await sdrOwnsConversation(state.conversation_id, workspaceId)) {
+        await cancelState(state, "sdr_active", wsId ?? undefined);
         continue;
       }
 
@@ -538,13 +579,13 @@ async function executeDues(
       // deletada (FK on delete set null → opportunity_id null). Em todos os
       // casos a régua não tem mais card para mover: encerra.
       if (state.opportunity_id) {
-        const opp = await loadOpportunity(state.opportunity_id);
+        const opp = await loadOpportunity(state.opportunity_id, workspaceId);
         if (!opp || opp.status !== "open") {
-          await cancelState(state, "opportunity_closed");
+          await cancelState(state, "opportunity_closed", wsId ?? undefined);
           continue;
         }
       } else {
-        await cancelState(state, "opportunity_deleted");
+        await cancelState(state, "opportunity_deleted", wsId ?? undefined);
         continue;
       }
 
@@ -558,7 +599,7 @@ async function executeDues(
       const attempt = selectNextAttempt(attempts, state.attempts_made);
       if (!attempt) {
         // Todas as tentativas enviadas e o prazo final passou → esgotar.
-        const done = await exhaustState(state, settings);
+        const done = await exhaustState(state, settings, wsId ?? undefined);
         if (done) exhausted++;
         else failed++;
         continue;
@@ -572,18 +613,18 @@ async function executeDues(
         await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
         continue; // mantém next_check_at vencido; o próximo run em dia útil envia
       }
-      if (settings.business_hours_only && !(await withinBusinessHours())) {
+      if (settings.business_hours_only && !(await withinBusinessHours(wsId ?? undefined))) {
         skipped++;
         await supabase.from("noreply_states").update({ locked_until: null }).eq("id", state.id);
         continue;
       }
 
-      const result = await sendAttemptMessage(attempt, conversation, contact);
+      const result = await sendAttemptMessage(attempt, conversation, contact, wsId ?? undefined);
       if (result.error) {
         failed++;
         await logEvent(state.id, "send_failed", attempt.attempt_number, null, {
           error: result.error,
-        });
+        }, wsId ?? undefined);
         // Falha não conta como tentativa. 3 falhas SEGUIDAS desistem da régua.
         //
         // A janela precisa ser desde o último ENVIO BEM-SUCEDIDO, não desde o
@@ -606,12 +647,13 @@ async function executeDues(
           .eq("event_type", "send_failed")
           .gt("created_at", sinceIso);
         if ((failCount ?? 0) >= 3) {
-          await cancelState(state, "send_failures");
+          await cancelState(state, "send_failures", wsId ?? undefined);
         } else {
           await rescheduleState(
             state,
             new Date(Date.now() + 6 * 3600_000),
             `send_failed: ${result.error.slice(0, 120)}`,
+            wsId ?? undefined,
           );
         }
         continue;
@@ -650,7 +692,7 @@ async function executeDues(
       await logEvent(state.id, "attempt_sent", attempt.attempt_number, result.messageId, {
         attempt_number: attempt.attempt_number,
         next_check_at: nextCheck.toISOString(),
-      });
+      }, wsId ?? undefined);
       sent++;
     } catch (e) {
       failed++;
@@ -673,20 +715,22 @@ async function executeDues(
  * Retorna false quando o esgotamento deve ser tentado de novo no próximo run
  * (falha de move, ex.) — o estado continua ativo e vencido.
  */
-async function exhaustState(state: NoreplyState, settings: NoreplySettings): Promise<boolean> {
-  const opp = state.opportunity_id ? await loadOpportunity(state.opportunity_id) : null;
+async function exhaustState(state: NoreplyState, settings: NoreplySettings, workspaceId?: string): Promise<boolean> {
+  const wsId = workspaceId ?? state.workspace_id ?? null;
+  const opp = state.opportunity_id ? await loadOpportunity(state.opportunity_id, workspaceId) : null;
   if (!opp || opp.status !== "open") {
-    await cancelState(state, "opportunity_closed");
+    await cancelState(state, "opportunity_closed", wsId ?? undefined);
     return true; // terminal: não é falha, apenas não há o que mover
   }
 
   // Config do pipeline: estágio de destino (pode ter sido desabilitada no
   // meio do ciclo — nesse caso apenas encerra, sem mover).
-  const { data: config } = await supabase
+  let configQuery = supabase
     .from("noreply_pipeline_configs")
     .select("target_stage_id, is_enabled")
-    .eq("pipeline_id", opp.pipeline_id)
-    .maybeSingle();
+    .eq("pipeline_id", opp.pipeline_id);
+  if (wsId) configQuery = configQuery.eq("workspace_id", wsId);
+  const { data: config } = await configQuery.maybeSingle();
 
   let movedToStage: string | null = null;
   if (config?.is_enabled && config.target_stage_id) {
@@ -697,7 +741,7 @@ async function exhaustState(state: NoreplyState, settings: NoreplySettings): Pro
       });
       if (moveErr) {
         console.error("NOREPLY_MOVE_STAGE_FAILED", opp.id, moveErr.message);
-        await rescheduleState(state, new Date(Date.now() + 3600_000), "move_stage_failed");
+        await rescheduleState(state, new Date(Date.now() + 3600_000), "move_stage_failed", wsId ?? undefined);
         return false;
       }
     }
@@ -715,9 +759,9 @@ async function exhaustState(state: NoreplyState, settings: NoreplySettings): Pro
     return false;
   }
 
-  await logEvent(state.id, "exhausted", state.attempts_made, null, { attempts_made: state.attempts_made });
+  await logEvent(state.id, "exhausted", state.attempts_made, null, { attempts_made: state.attempts_made }, wsId ?? undefined);
   if (movedToStage) {
-    await logEvent(state.id, "moved_to_stage", state.attempts_made, null, { stage_id: movedToStage });
+    await logEvent(state.id, "moved_to_stage", state.attempts_made, null, { stage_id: movedToStage }, wsId ?? undefined);
   }
 
   // Trilha de auditoria + tarefa para o humano analisar/excluir o card.
@@ -731,6 +775,7 @@ async function exhaustState(state: NoreplyState, settings: NoreplySettings): Pro
       ? `NOREPLY: movida para o estágio "Sem Resposta" (lead não respondeu após ${state.attempts_made} tentativa(s))`
       : `NOREPLY: régua esgotada após ${state.attempts_made} tentativa(s) — sem estágio de destino configurado`,
     new_data: { attempts_made: state.attempts_made, stage_id: movedToStage },
+    ...(wsId ? { workspace_id: wsId } : {}),
   });
 
   if (settings.task_on_exhaust) {
@@ -745,6 +790,7 @@ async function exhaustState(state: NoreplyState, settings: NoreplySettings): Pro
       due_at: new Date(Date.now() + 24 * 3600_000).toISOString(),
       status: "pending",
       priority: "normal",
+      ...(wsId ? { workspace_id: wsId } : {}),
     });
   }
 
@@ -766,29 +812,46 @@ Deno.serve(async (req) => {
       return jsonResponse(401, { error: "unauthorized" });
     }
 
-    const settings = await loadSettings();
-    if (!settings || !settings.is_active) {
-      return jsonResponse(200, { ok: true, active: false });
+    const workspaces = await listActiveWorkspaces(supabase);
+    if (workspaces.length === 0) {
+      return jsonResponse(200, { ok: true, workspaces: 0 });
     }
 
-    const attempts = await loadAttempts();
-    if (attempts.length === 0) {
-      return jsonResponse(200, { ok: true, active: true, attempts: 0 });
-    }
+    const totals = { enrolled: 0, out_of_horizon: 0, sent: 0, exhausted: 0, failed: 0, skipped_window: 0, attempts: 0 };
+    let anyActive = false;
+    for (const ws of workspaces) {
+      if (await isMsgQuotaExceeded(supabase, ws.id)) continue;
+      const settings = await loadSettings(ws.id);
+      if (!settings || !settings.is_active) continue;
+      anyActive = true;
 
-    const detected = await detectNew(settings, attempts);
-    const executed = await executeDues(settings, attempts);
+      const attempts = await loadAttempts(ws.id);
+      if (attempts.length === 0) continue;
+      totals.attempts += attempts.length;
+
+      const detected = await detectNew(settings, attempts, ws.id);
+      const executed = await executeDues(settings, attempts, ws.id);
+
+      totals.enrolled += detected.enrolled;
+      totals.out_of_horizon += detected.skipped;
+      totals.sent += executed.sent;
+      totals.exhausted += executed.exhausted;
+      totals.failed += executed.failed;
+      totals.skipped_window += executed.skipped;
+      if (executed.sent > 0) bumpUsage(supabase, ws.id, { p_out: executed.sent });
+    }
 
     return jsonResponse(200, {
       ok: true,
-      active: true,
-      attempts: attempts.length,
-      enrolled: detected.enrolled,
-      out_of_horizon: detected.skipped,
-      sent: executed.sent,
-      exhausted: executed.exhausted,
-      failed: executed.failed,
-      skipped_window: executed.skipped,
+      active: anyActive,
+      workspaces: workspaces.length,
+      attempts: totals.attempts,
+      enrolled: totals.enrolled,
+      out_of_horizon: totals.out_of_horizon,
+      sent: totals.sent,
+      exhausted: totals.exhausted,
+      failed: totals.failed,
+      skipped_window: totals.skipped_window,
     });
   } catch (err) {
     console.error("NOREPLY_RUNNER_ERROR", err);

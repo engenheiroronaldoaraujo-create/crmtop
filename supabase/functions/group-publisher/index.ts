@@ -13,6 +13,7 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient } from "../_shared/contacts.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
+import { bumpUsage, isMsgQuotaExceeded, listActiveWorkspaces } from "../_shared/workspace.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -22,6 +23,7 @@ const supabase = serviceClient();
 
 interface GroupPost {
   id: string;
+  workspace_id?: string | null;
   instance_id: string;
   group_jid: string;
   group_name: string | null;
@@ -114,12 +116,13 @@ function extFromMime(mimetype: string, fallback: string): string {
   return map[base] ?? fallback;
 }
 
-async function publishPost(post: GroupPost): Promise<{ messageId: string | null; error: string | null }> {
-  const { data: inst } = await supabase
+async function publishPost(post: GroupPost, workspaceId?: string): Promise<{ messageId: string | null; error: string | null }> {
+  let instQuery = supabase
     .from("whatsapp_instances")
     .select("instance_name")
-    .eq("id", post.instance_id)
-    .maybeSingle();
+    .eq("id", post.instance_id);
+  if (workspaceId) instQuery = instQuery.eq("workspace_id", workspaceId);
+  const { data: inst } = await instQuery.maybeSingle();
   const instanceName = inst?.instance_name as string | undefined;
   if (!instanceName) return { messageId: null, error: "instância não encontrada" };
   if (!EVOLUTION_API_URL || !EVOLUTION_API_KEY) {
@@ -169,35 +172,41 @@ async function publishPost(post: GroupPost): Promise<{ messageId: string | null;
   return { messageId: data?.key?.id ?? null, error: null };
 }
 
-async function markPublished(post: GroupPost, messageId: string | null): Promise<void> {
+async function markPublished(post: GroupPost, messageId: string | null, workspaceId?: string): Promise<void> {
+  const wsId = workspaceId ?? post.workspace_id ?? null;
   const now = new Date().toISOString();
   await supabase.from("group_posts").update({
     status: "published",
     published_message_id: messageId,
     published_at: now,
     last_error: null,
+    ...(wsId ? { workspace_id: wsId } : {}),
   }).eq("id", post.id);
   await supabase.from("activity_log").insert({
     entity_type: "group_post",
     entity_id: post.id,
     action: `GROUP_POST: publicado no grupo ${post.group_name ?? post.group_jid}`,
     new_data: { message_id: messageId },
+    ...(wsId ? { workspace_id: wsId } : {}),
   });
 }
 
-async function markFailed(post: GroupPost, error: string): Promise<void> {
+async function markFailed(post: GroupPost, error: string, workspaceId?: string): Promise<void> {
+  const wsId = workspaceId ?? post.workspace_id ?? null;
   const attempts = post.publish_attempts + 1;
   if (attempts >= 3) {
     await supabase.from("group_posts").update({
       status: "failed",
       publish_attempts: attempts,
       last_error: error.slice(0, 500),
+      ...(wsId ? { workspace_id: wsId } : {}),
     }).eq("id", post.id);
     await supabase.from("activity_log").insert({
       entity_type: "group_post",
       entity_id: post.id,
       action: `GROUP_POST: falha definitiva após ${attempts} tentativas — ${error.slice(0, 200)}`,
       new_data: { error: error.slice(0, 500) },
+      ...(wsId ? { workspace_id: wsId } : {}),
     });
   } else {
     // Reagenda para a próxima passada (+5min): falha transitória não perde o post.
@@ -206,22 +215,24 @@ async function markFailed(post: GroupPost, error: string): Promise<void> {
       scheduled_at: new Date(Date.now() + 5 * 60_000).toISOString(),
       publish_attempts: attempts,
       last_error: error.slice(0, 500),
+      ...(wsId ? { workspace_id: wsId } : {}),
     }).eq("id", post.id);
   }
 }
 
-async function expireOld(): Promise<number> {
+async function expireOld(workspaceId?: string): Promise<number> {
   // Publicados cuja janela já fechou: expired (webhook para de casar, UI mostra).
   // `.order("published_at")` garante que os mais antigos sejam avaliados
   // primeiro — sem ORDER BY o Postgres devolve linhas em qualquer ordem e o
   // limite de 100 podia deixar posts antigos para sempre "published".
-  const { data } = await supabase
+  let expiredQuery = supabase
     .from("group_posts")
     .select("id, published_at, window_hours")
     .eq("status", "published")
     .not("published_at", "is", null)
-    .order("published_at", { ascending: true })
-    .limit(100);
+    .order("published_at", { ascending: true });
+  if (workspaceId) expiredQuery = expiredQuery.eq("workspace_id", workspaceId);
+  const { data } = await expiredQuery.limit(100);
   let expired = 0;
   const now = Date.now();
   for (const p of data ?? []) {
@@ -255,25 +266,59 @@ Deno.serve(async (req) => {
     const { data: reaped } = await supabase.rpc("reap_stuck_group_posts");
     if (reaped) console.info("GROUP_POSTS_REAPED", reaped);
 
+    // Multi-tenant: o claim é global, mas cada post é publicado no contexto
+    // do seu workspace (quota + isolamento). Posts de workspaces fora do
+    // loop voltam para 'scheduled' — nunca ficam presos em 'publishing'.
+    const workspaces = await listActiveWorkspaces(supabase);
+    const claimedPosts = (claimed ?? []) as GroupPost[];
+    if (workspaces.length === 0) {
+      for (const post of claimedPosts) {
+        await supabase.from("group_posts").update({ status: "scheduled" }).eq("id", post.id);
+      }
+      return jsonResponse(200, { ok: true, workspaces: 0, published: 0, failed: 0, expired: 0 });
+    }
+    const activeIds = new Set(workspaces.map((w) => w.id));
+
     let published = 0;
     let failed = 0;
-    for (const post of (claimed ?? []) as GroupPost[]) {
-      try {
-        const { messageId, error } = await publishPost(post);
-        if (error) {
-          failed++;
-          await markFailed(post, error);
-        } else {
-          published++;
-          await markPublished(post, messageId);
-        }
-      } catch (err) {
-        failed++;
-        await markFailed(post, String(err).slice(0, 500));
+    let expired = 0;
+    for (const ws of workspaces) {
+      const wsPosts = claimedPosts.filter((p) => p.workspace_id === ws.id);
+      if (wsPosts.length === 0) {
+        expired += await expireOld(ws.id);
+        continue;
       }
+      // Sem quota: devolve os posts para a fila em vez de publicá-los.
+      if (await isMsgQuotaExceeded(supabase, ws.id)) {
+        for (const post of wsPosts) {
+          await supabase.from("group_posts").update({ status: "scheduled" }).eq("id", post.id);
+        }
+        expired += await expireOld(ws.id);
+        continue;
+      }
+      for (const post of wsPosts) {
+        try {
+          const { messageId, error } = await publishPost(post, ws.id);
+          if (error) {
+            failed++;
+            await markFailed(post, error, ws.id);
+          } else {
+            published++;
+            await markPublished(post, messageId, ws.id);
+            bumpUsage(supabase, ws.id, { p_out: 1 });
+          }
+        } catch (err) {
+          failed++;
+          await markFailed(post, String(err).slice(0, 500), ws.id);
+        }
+      }
+      expired += await expireOld(ws.id);
     }
-    const expired = await expireOld();
-    return jsonResponse(200, { ok: true, published, failed, expired });
+    // Claims de workspaces inativos/removidos: devolve para 'scheduled'.
+    for (const post of claimedPosts.filter((p) => !activeIds.has(p.workspace_id as string))) {
+      await supabase.from("group_posts").update({ status: "scheduled" }).eq("id", post.id);
+    }
+    return jsonResponse(200, { ok: true, workspaces: workspaces.length, published, failed, expired });
   } catch (err) {
     console.error("GROUP_PUBLISHER_ERROR", err);
     return jsonResponse(500, { error: "internal error" });

@@ -1,5 +1,6 @@
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
+import { bumpUsage, isAiQuotaExceeded } from "../_shared/workspace.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
   transcribeAudio,
@@ -32,6 +33,64 @@ async function getModel(supabase: Supabase): Promise<string> {
     .limit(1)
     .single();
   return (data?.new_data as any)?.model ?? OPENROUTER_MODEL;
+}
+
+// ---------------------------------------------------------------------------
+// Quota multi-tenant de IA (on-demand)
+// ---------------------------------------------------------------------------
+
+function estimateTokens(content: string, usage: any): number {
+  const reported = usage?.total_tokens;
+  if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) return reported;
+  return Math.max(1, Math.ceil(content.length / 4));
+}
+
+// Resolve o workspace dono da entidade do action (conversa, contato,
+// oportunidade ou mensagem). Null quando a entidade não existe ou o id veio vazio.
+async function resolveActionWorkspace(
+  supabase: Supabase,
+  action: string,
+  data: Record<string, unknown>,
+): Promise<string | null> {
+  try {
+    switch (action) {
+      case "summarize_conversation":
+      case "analyze_lead":
+      case "suggest_reply": {
+        const id = data.conversation_id as string | undefined;
+        if (!id) return null;
+        const { data: row } = await supabase.from("conversations").select("workspace_id").eq("id", id).maybeSingle();
+        return (row as { workspace_id: string | null } | null)?.workspace_id ?? null;
+      }
+      case "summarize_client": {
+        const id = data.contact_id as string | undefined;
+        if (!id) return null;
+        const { data: row } = await supabase.from("contacts").select("workspace_id").eq("id", id).maybeSingle();
+        return (row as { workspace_id: string | null } | null)?.workspace_id ?? null;
+      }
+      case "analyze_opportunity": {
+        const id = data.opportunity_id as string | undefined;
+        if (!id) return null;
+        const { data: row } = await supabase.from("opportunities").select("workspace_id").eq("id", id).maybeSingle();
+        return (row as { workspace_id: string | null } | null)?.workspace_id ?? null;
+      }
+      case "transcribe_audio": {
+        const id = data.message_id as string | undefined;
+        if (!id) return null;
+        const { data: row } = await supabase.from("messages").select("workspace_id, conversation_id").eq("id", id).maybeSingle();
+        const direct = (row as { workspace_id: string | null } | null)?.workspace_id ?? null;
+        if (direct) return direct;
+        const convId = (row as { conversation_id: string | null } | null)?.conversation_id ?? null;
+        if (!convId) return null;
+        const { data: conv } = await supabase.from("conversations").select("workspace_id").eq("id", convId).maybeSingle();
+        return (conv as { workspace_id: string | null } | null)?.workspace_id ?? null;
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +281,7 @@ async function getOpportunityContext(supabase: Supabase, oppId: string): Promise
 // Feature implementations
 // ---------------------------------------------------------------------------
 
-async function summarizeConversation(supabase: Supabase, conversationId: string): Promise<ConversationSummary> {
+async function summarizeConversation(supabase: Supabase, conversationId: string, workspaceId: string | null = null): Promise<ConversationSummary> {
   const conversationText = await getConversationContext(supabase, conversationId)
   const { data: conv } = await supabase.from("conversations").select("contact_id").eq("id", conversationId).single()
   const contactCtx = conv?.contact_id ? await getContactContext(supabase, conv.contact_id) : {}
@@ -244,10 +303,11 @@ ${conversationText}
 
 Retorne APENAS o JSON, sem texto adicional.`
 
-  const { content } = await callOpenRouter(
+  const { content, usage } = await callOpenRouter(
     [{ role: "system", content: systemPrompt }],
     { temperature: 0.3, max_tokens: 500 }
   )
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(content, usage) })
 
   return parseStructuredResponse<ConversationSummary>(content) ?? {
     summary: "Não foi possível gerar resumo.",
@@ -255,7 +315,7 @@ Retorne APENAS o JSON, sem texto adicional.`
   }
 }
 
-async function analyzeLead(supabase: Supabase, conversationId: string): Promise<LeadAnalysis> {
+async function analyzeLead(supabase: Supabase, conversationId: string, workspaceId: string | null = null): Promise<LeadAnalysis> {
   const conversationText = await getConversationContext(supabase, conversationId)
   const { data: conv } = await supabase.from("conversations").select("contact_id").eq("id", conversationId).single()
   const contactCtx = conv?.contact_id ? await getContactContext(supabase, conv.contact_id) : {}
@@ -283,10 +343,11 @@ ${conversationText}
 
 Retorne APENAS o JSON.`
 
-  const { content } = await callOpenRouter(
+  const { content, usage } = await callOpenRouter(
     [{ role: "system", content: systemPrompt }],
     { temperature: 0.3, max_tokens: 500 }
   )
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(content, usage) })
 
   return parseStructuredResponse<LeadAnalysis>(content) ?? {
     intent: "other", temperature: "cold", temperature_reason: "Análise não disponível",
@@ -294,7 +355,7 @@ Retorne APENAS o JSON.`
   }
 }
 
-async function suggestReply(supabase: Supabase, conversationId: string, tone: string = "profissional_cordial"): Promise<SuggestedReply> {
+async function suggestReply(supabase: Supabase, conversationId: string, tone: string = "profissional_cordial", workspaceId: string | null = null): Promise<SuggestedReply> {
   const conversationText = await getConversationContext(supabase, conversationId)
   const { data: conv } = await supabase.from("conversations").select("contact_id").eq("id", conversationId).single()
   const contactCtx = conv?.contact_id ? await getContactContext(supabase, conv.contact_id) : {}
@@ -323,10 +384,11 @@ Retorne um JSON:
 
 Retorne APENAS o JSON.`
 
-  const { content } = await callOpenRouter(
+  const { content, usage } = await callOpenRouter(
     [{ role: "system", content: systemPrompt }],
     { temperature: 0.7, max_tokens: 300 }
   )
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(content, usage) })
 
   return parseStructuredResponse<SuggestedReply>(content) ?? {
     reply: "Olá! Obrigado pelo contato. Como posso ajudar?",
@@ -334,7 +396,7 @@ Retorne APENAS o JSON.`
   }
 }
 
-async function summarizeClient(supabase: Supabase, contactId: string): Promise<string> {
+async function summarizeClient(supabase: Supabase, contactId: string, workspaceId: string | null = null): Promise<string> {
   const ctx = await getContactContext(supabase, contactId)
 
   // Get recent conversations
@@ -369,15 +431,16 @@ Retorne um JSON:
 
 Retorne APENAS o JSON.`
 
-  const { content } = await callOpenRouter(
+  const { content, usage } = await callOpenRouter(
     [{ role: "system", content: systemPrompt }],
     { temperature: 0.3, max_tokens: 800 }
   )
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(content, usage) })
 
   return content
 }
 
-async function analyzeOpportunity(supabase: Supabase, oppId: string): Promise<string> {
+async function analyzeOpportunity(supabase: Supabase, oppId: string, workspaceId: string | null = null): Promise<string> {
   const ctx = await getOpportunityContext(supabase, oppId)
 
   const systemPrompt = `Você é um analista comercial. Analise esta oportunidade e retorne insights.
@@ -397,10 +460,11 @@ Retorne um JSON:
 
 Retorne APENAS o JSON.`
 
-  const { content } = await callOpenRouter(
+  const { content, usage } = await callOpenRouter(
     [{ role: "system", content: systemPrompt }],
     { temperature: 0.3, max_tokens: 600 }
   )
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(content, usage) })
 
   return content
 }
@@ -434,7 +498,7 @@ async function getTranscriptionConfig(supabase: Supabase): Promise<{ enabled: bo
 
 // Transcreve uma mensagem de áudio já salva no Storage. Retorna a transcrição
 // e grava em messages.transcription.
-async function transcribeAudioMessage(supabase: Supabase, messageId: string): Promise<{ transcript: string }> {
+async function transcribeAudioMessage(supabase: Supabase, messageId: string, workspaceId: string | null = null): Promise<{ transcript: string }> {
   const { data: msg, error } = await supabase
     .from("messages")
     .select("id, type, media_url, transcription")
@@ -465,6 +529,7 @@ async function transcribeAudioMessage(supabase: Supabase, messageId: string): Pr
     mimetype: blob.type || "audio/ogg",
   });
   await supabase.from("messages").update({ transcription: transcript || null }).eq("id", messageId);
+  bumpUsage(supabase, workspaceId, { p_tokens: estimateTokens(transcript, null) });
   return { transcript };
 }
 
@@ -493,6 +558,28 @@ Deno.serve(async (req) => {
     let result: unknown = null
     let error: string | null = null
 
+    // Quota de IA multi-tenant (on-demand): resolve o workspace da entidade
+    // do action e bloqueia com 402 antes de consumir qualquer LLM — sem
+    // workspace conhecido ou com quota estourada, nada é chamado.
+    const AI_QUOTA_ACTIONS = new Set([
+      "summarize_conversation",
+      "analyze_lead",
+      "suggest_reply",
+      "summarize_client",
+      "analyze_opportunity",
+      "transcribe_audio",
+    ]);
+    let aiWorkspaceId: string | null = null;
+    if (AI_QUOTA_ACTIONS.has(action)) {
+      aiWorkspaceId = await resolveActionWorkspace(supabase, action, (data ?? {}) as Record<string, unknown>);
+      if (!aiWorkspaceId) {
+        return jsonResponse(402, { error: "workspace_required" });
+      }
+      if (await isAiQuotaExceeded(supabase, aiWorkspaceId)) {
+        return jsonResponse(402, { error: "quota de IA excedida" });
+      }
+    }
+
     try {
       switch (action) {
         case "store_api_key": {
@@ -517,22 +604,22 @@ Deno.serve(async (req) => {
           }
           break
         case "summarize_conversation":
-          result = await summarizeConversation(supabase, data.conversation_id as string)
+          result = await summarizeConversation(supabase, data.conversation_id as string, aiWorkspaceId)
           break
         case "analyze_lead":
-          result = await analyzeLead(supabase, data.conversation_id as string)
+          result = await analyzeLead(supabase, data.conversation_id as string, aiWorkspaceId)
           break
         case "suggest_reply":
-          result = await suggestReply(supabase, data.conversation_id as string, data.tone as string)
+          result = await suggestReply(supabase, data.conversation_id as string, data.tone as string, aiWorkspaceId)
           break
         case "summarize_client":
-          result = await summarizeClient(supabase, data.contact_id as string)
+          result = await summarizeClient(supabase, data.contact_id as string, aiWorkspaceId)
           break
         case "analyze_opportunity":
-          result = await analyzeOpportunity(supabase, data.opportunity_id as string)
+          result = await analyzeOpportunity(supabase, data.opportunity_id as string, aiWorkspaceId)
           break
         case "transcribe_audio":
-          result = await transcribeAudioMessage(supabase, data.message_id as string)
+          result = await transcribeAudioMessage(supabase, data.message_id as string, aiWorkspaceId)
           break
         case "set_transcription_config": {
           // Configuração global de IA: só admin. A policy de INSERT em

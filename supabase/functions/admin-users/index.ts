@@ -103,6 +103,32 @@ Deno.serve(async (req) => {
           user_metadata: { full_name, role },
         });
         if (error) return jsonResponse(400, { error: error.message });
+        // Multi-tenant: vincula o novo usuário ao workspace informado
+        // (o trigger handle_new_user cria o profile; aqui criamos o membership).
+        const workspace_id = (body as { workspace_id?: string }).workspace_id;
+        if (workspace_id) {
+          const { data: callerMember } = await supabase
+            .from("workspace_members")
+            .select("role")
+            .eq("workspace_id", workspace_id)
+            .eq("user_id", profile.id)
+            .maybeSingle();
+          const { data: callerPlat } = await supabase
+            .from("profiles")
+            .select("is_platform_admin")
+            .eq("id", profile.id)
+            .maybeSingle();
+          const isPlat = Boolean((callerPlat as { is_platform_admin?: boolean } | null)?.is_platform_admin);
+          const callerRole = (callerMember as { role?: string } | null)?.role;
+          if (!isPlat && callerRole !== "owner" && callerRole !== "admin" && profile.role !== "admin") {
+            return jsonResponse(403, { error: "forbidden: workspace admin required" });
+          }
+          await supabase.from("workspace_members").upsert({
+            workspace_id,
+            user_id: data.user.id,
+            role: role === "admin" ? "admin" : "vendedor",
+          }, { onConflict: "workspace_id,user_id" });
+        }
         return jsonResponse(200, {
           user: { id: data.user.id, email: data.user.email },
         });
@@ -251,6 +277,26 @@ Deno.serve(async (req) => {
           new_data: { base_url: baseUrl, anon_key_length: anonKey.length },
         }).then(() => {}, () => {});
         return jsonResponse(200, { ok: true, base_url: baseUrl });
+      }
+
+      case "create-workspace": {
+        const name = String((body as { name?: string }).name ?? "").trim();
+        if (!name) return jsonResponse(400, { error: "name is required" });
+        const slugBase = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "workspace";
+        const slug = `${slugBase}-${Date.now().toString(36)}`;
+        const { data: ws, error: wsError } = await supabase
+          .from("workspaces")
+          .insert({ name, slug })
+          .select("id, name, slug")
+          .single();
+        if (wsError || !ws) return jsonResponse(400, { error: wsError?.message ?? "create failed" });
+        await supabase.from("workspace_members").upsert({
+          workspace_id: (ws as { id: string }).id,
+          user_id: profile.id,
+          role: "owner",
+        }, { onConflict: "workspace_id,user_id" });
+        return jsonResponse(200, { workspace: ws });
       }
 
       default:

@@ -10,6 +10,7 @@ import {
   Sun,
   User,
   Users,
+  Building2,
   FlaskConical,
   CalendarDays,
   Megaphone,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
+import { useWorkspace } from "@/hooks/use-workspace"
 import { useTheme } from "@/hooks/use-theme"
 import { useGlobalSearch } from "@/hooks/use-tags"
 import { cn } from "@/lib/utils"
@@ -35,6 +37,7 @@ const NAV_ITEMS = [
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { user, profile, signOut } = useAuth()
+  const { workspaces, activeWorkspace, switchWorkspace, isWorkspaceAdmin } = useWorkspace()
   const { resolvedTheme, toggleTheme } = useTheme()
   const navigate = useNavigate()
   const { query, setQuery, results, loading, search } = useGlobalSearch()
@@ -74,12 +77,17 @@ export function Layout({ children }: { children: React.ReactNode }) {
   }
 
   const items = [...NAV_ITEMS]
-  if (profile?.role === "admin") {
+  const canAdmin = profile?.is_platform_admin || profile?.role === "admin" || isWorkspaceAdmin
+  const isPlatformAdmin = profile?.is_platform_admin === true
+  if (canAdmin) {
     items.push({ to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, end: false })
     items.push({ to: "/campaigns", label: "Campanhas", icon: Megaphone, end: false })
     items.push({ to: "/groups", label: "Grupos", icon: MessagesSquare, end: false })
     items.push({ to: "/automations", label: "Automações", icon: Zap, end: false })
     items.push({ to: "/settings", label: "Configurações", icon: Settings, end: false })
+  }
+  if (isPlatformAdmin) {
+    items.push({ to: "/platform", label: "Plataforma", icon: Building2, end: false })
   }
 
   return (
@@ -102,6 +110,28 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <MessageCircle className="h-6 w-6 text-primary" />
           <span className="text-lg font-semibold text-white">CRM WhatsApp</span>
         </div>
+        {/* Seletor de workspace (multi-clientes) */}
+        {workspaces.length > 1 && (
+          <div className="px-2 pt-2">
+            <select
+              className="h-8 w-full rounded-md border border-white/10 bg-white/10 px-2 text-xs text-white"
+              value={activeWorkspace?.id ?? ""}
+              onChange={(e) => switchWorkspace(e.target.value)}
+              title="Trocar de empresa"
+            >
+              {workspaces.map((w) => (
+                <option key={w.id} value={w.id} className="text-black">
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {workspaces.length === 1 && activeWorkspace && (
+          <div className="px-4 pt-2 text-[11px] font-medium uppercase tracking-wide text-sidebar-muted">
+            {activeWorkspace.name}
+          </div>
+        )}
         <nav className="flex-1 space-y-1 p-2">
           {items.map((item) => (
             <NavLink
@@ -204,7 +234,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 {profile?.full_name ?? "—"}
               </p>
               <p className="truncate text-xs text-sidebar-muted">
-                {profile?.role === "admin" ? "Admin" : "Vendedor"}
+                {profile?.is_platform_admin ? "Platform" : canAdmin ? "Admin" : "Vendedor"}
+                {activeWorkspace ? ` · ${activeWorkspace.name}` : ""}
               </p>
             </div>
             <Button

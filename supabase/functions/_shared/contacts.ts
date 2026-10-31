@@ -43,25 +43,30 @@ export async function upsertContact(
   lid: string | null,
   pushName: string | null,
   jid: string | null = null,
+  workspaceId: string | null = null,
 ): Promise<string> {
   let existing: ContactRow | null = null;
 
+  const scope = (q: any) => (workspaceId ? q.eq("workspace_id", workspaceId) : q);
+
   if (lid) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("lid", lid)
-      .maybeSingle();
+    const { data } = await scope(
+      supabase
+        .from("contacts")
+        .select("id, phone, lid, push_name, jid")
+        .eq("lid", lid),
+    ).maybeSingle();
     if (data) existing = data;
   }
 
   if (!existing && phone) {
     for (const variant of phoneLookupVariants(phone)) {
-      const { data } = await supabase
-        .from("contacts")
-        .select("id, phone, lid, push_name, jid")
-        .eq("phone", variant)
-        .maybeSingle();
+      const { data } = await scope(
+        supabase
+          .from("contacts")
+          .select("id, phone, lid, push_name, jid")
+          .eq("phone", variant),
+      ).maybeSingle();
       if (data) {
         existing = data;
         break;
@@ -72,11 +77,12 @@ export async function upsertContact(
   // Fallback legado: dados pré-LID armazenavam o LID dentro de `phone`
   // como `lid:<digits>`.
   if (!existing && lid) {
-    const { data } = await supabase
-      .from("contacts")
-      .select("id, phone, lid, push_name, jid")
-      .eq("phone", `lid:${lid.replace(/^lid:/, "")}`)
-      .maybeSingle();
+    const { data } = await scope(
+      supabase
+        .from("contacts")
+        .select("id, phone, lid, push_name, jid")
+        .eq("phone", `lid:${lid.replace(/^lid:/, "")}`),
+    ).maybeSingle();
     if (data) existing = data;
   }
 
@@ -86,23 +92,24 @@ export async function upsertContact(
     // funde os dois em vez de duplicar (o backfill silencioso violava as
     // constraints UNIQUE(phone)/UNIQUE(lid) e o erro era ignorado, deixando
     // contatos LID órfãos que geravam conversas duplicadas pós-reconexão).
+    // Escopo workspace: nunca funde contatos de workspaces diferentes.
     if (phone && !existing.phone) {
-      const { data: phoneOwner } = await supabase
+      const q = supabase
         .from("contacts")
         .select("id")
-        .eq("phone", phone)
-        .maybeSingle();
+        .eq("phone", phone);
+      const { data: phoneOwner } = await (workspaceId ? q.eq("workspace_id", workspaceId) : q).maybeSingle();
       if (phoneOwner && phoneOwner.id !== existing.id) {
         await mergeContacts(supabase, existing.id, phoneOwner.id);
         return phoneOwner.id;
       }
     }
     if (lid && existing.lid !== lid) {
-      const { data: lidOwner } = await supabase
+      const q = supabase
         .from("contacts")
         .select("id")
-        .eq("lid", lid)
-        .maybeSingle();
+        .eq("lid", lid);
+      const { data: lidOwner } = await (workspaceId ? q.eq("workspace_id", workspaceId) : q).maybeSingle();
       if (lidOwner && lidOwner.id !== existing.id) {
         // Mantém o dono do telefone (existing), absorve o dono do LID.
         await mergeContacts(supabase, lidOwner.id, existing.id);
@@ -127,7 +134,14 @@ export async function upsertContact(
 
   const { data, error } = await supabase
     .from("contacts")
-    .insert({ phone, lid, push_name: pushName ?? null, name: pushName ?? null, jid })
+    .insert({
+      phone,
+      lid,
+      push_name: pushName ?? null,
+      name: pushName ?? null,
+      jid,
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
+    })
     .select("id")
     .single();
   if (error) {
@@ -162,6 +176,7 @@ export async function upsertConversation(
   contactId: string,
   instanceId: string,
   origin?: ConversationOrigin,
+  workspaceId: string | null = null,
 ): Promise<string> {
   const { data: existing } = await supabase
     .from("conversations")
@@ -190,6 +205,7 @@ export async function upsertConversation(
       instance_id: instanceId,
       source,
       source_meta: origin?.meta ?? null,
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
     })
     .select("id")
     .single();

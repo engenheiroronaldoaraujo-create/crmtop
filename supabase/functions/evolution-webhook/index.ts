@@ -72,6 +72,35 @@ async function getTranscriptionConfig(
   }
 }
 
+async function resolveInstance(
+  supabase: Supabase,
+  instanceName: string,
+): Promise<{ id: string; workspace_id: string | null } | null> {
+  const { data } = await supabase
+    .from("whatsapp_instances")
+    .select("id, workspace_id")
+    .eq("instance_name", instanceName)
+    .maybeSingle();
+  return (data as { id: string; workspace_id: string | null } | null) ?? null;
+}
+
+function bumpUsage(
+  supabase: Supabase,
+  workspaceId: string | null,
+  patch: { p_in?: number; p_out?: number; p_transcricoes?: number; p_tokens?: number },
+): void {
+  if (!workspaceId) return;
+  const dia = new Date().toISOString().slice(0, 10);
+  supabase.rpc("bump_workspace_usage", {
+    p_workspace_id: workspaceId,
+    p_dia: dia,
+    p_in: patch.p_in ?? 0,
+    p_out: patch.p_out ?? 0,
+    p_transcricoes: patch.p_transcricoes ?? 0,
+    p_tokens: patch.p_tokens ?? 0,
+  }).then(() => {}, () => {});
+}
+
 interface EvolutionMedia {
   url?: string;
   mimetype?: string;
@@ -279,6 +308,7 @@ async function handleGroupMessage(
   instanceId: string,
   groupJid: string,
   raw: RawMessage,
+  workspaceId: string | null = null,
 ): Promise<void> {
   const fromMe = Boolean(raw.key?.fromMe);
   if (fromMe) return; // ecos dos nossos envios (inclusive o publish) não contam
@@ -312,7 +342,7 @@ async function handleGroupMessage(
   const quotedId = extractQuotedId(raw.message);
   const rawPushName = raw.pushName ?? null;
   const pushName = rawPushName && !/^\d{8,}$/.test(rawPushName) ? rawPushName : null;
-  const contactId = await upsertContact(supabase, phone, lid, pushName);
+  const contactId = await upsertContact(supabase, phone, lid, pushName, null, workspaceId);
 
   for (const post of posts) {
     const publishedAt = new Date(post.published_at as string);
@@ -355,12 +385,13 @@ async function processMessage(
   instanceId: string,
   instanceName: string,
   raw: RawMessage,
+  workspaceId: string | null = null,
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
   // Grupos têm fluxo próprio (engajamento em posts programados): nunca viram
   // conversa/contato de funil — isRelevantJid rejeita @g.us abaixo.
   if (isGroupJid(jid)) {
-    await handleGroupMessage(supabase, instanceId, jid, raw);
+    await handleGroupMessage(supabase, instanceId, jid, raw, workspaceId);
     return;
   }
   if (!isRelevantJid(jid)) {
@@ -427,7 +458,7 @@ async function processMessage(
   const rawPushName = !fromMe ? raw.pushName ?? null : null;
   const pushName = rawPushName && !/^\d{8,}$/.test(rawPushName) ? rawPushName : null;
 
-  const contactId = await upsertContact(supabase, phone, lid, pushName, jid);
+  const contactId = await upsertContact(supabase, phone, lid, pushName, jid, workspaceId);
   console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
 
   // Origem da conversa — aplicada apenas na CRIAÇÃO (upsertConversation não
@@ -450,7 +481,7 @@ async function processMessage(
         },
       }
     : undefined;
-  const conversationId = await upsertConversation(supabase, contactId, instanceId, origin);
+  const conversationId = await upsertConversation(supabase, contactId, instanceId, origin, workspaceId);
 
   let mediaUrl: string | null = null;
   let audioBase64: string | null = null;
@@ -485,6 +516,7 @@ async function processMessage(
       media_url: mediaUrl,
       sent_at: sentAt,
       status: "sent",
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
     },
     { onConflict: "conversation_id, evolution_message_id", ignoreDuplicates: true },
   ).select("id").maybeSingle();
@@ -512,6 +544,7 @@ async function processMessage(
       p_preview: preview,
       p_inbound: !fromMe,
     });
+    bumpUsage(supabase, workspaceId, fromMe ? { p_out: 1 } : { p_in: 1 });
   }
 
   // Régua "sem resposta": eco outbound de mensagem enviada fora do CRM (ex.:
@@ -545,6 +578,7 @@ async function processMessage(
         audioBase64,
         audioMimetype,
         hasPhone: Boolean(phone),
+        workspaceId,
       }),
     );
   }
@@ -564,10 +598,11 @@ async function postProcessInbound(args: {
   audioBase64: string | null;
   audioMimetype: string | null;
   hasPhone: boolean;
+  workspaceId?: string | null;
 }): Promise<void> {
   const {
     supabase, instanceName, conversationId, contactId, messageId,
-    evolutionId, type, audioBase64, audioMimetype, hasPhone,
+    evolutionId, type, audioBase64, audioMimetype, hasPhone, workspaceId,
   } = args;
   let sdrContent = args.content;
 
@@ -606,6 +641,7 @@ async function postProcessInbound(args: {
         if (transcript) {
           await supabase.from("messages").update({ transcription: transcript }).eq("id", messageId);
           sdrContent = transcript;
+          bumpUsage(supabase, workspaceId ?? null, { p_transcricoes: 1 });
           console.info("AUDIO_TRANSCRIBED", evolutionId, `chars=${transcript.length}`);
         } else {
           console.info("AUDIO_TRANSCRIPTION_EMPTY", evolutionId);
@@ -616,14 +652,16 @@ async function postProcessInbound(args: {
     }
   }
 
-  // SDR IA: processa se habilitado.
+  // SDR IA: processa se habilitado (escopo workspace; legado sem workspace cai no global).
   if (hasPhone) {
     try {
-      const { data: sdrSettings } = await supabase
+      const sdrQuery = supabase
         .from("sdr_settings")
         .select("enabled, test_mode, cooldown_seconds")
-        .limit(1)
-        .single()
+        .limit(1);
+      const { data: sdrSettings } = await (workspaceId
+        ? supabase.from("sdr_settings").select("enabled, test_mode, cooldown_seconds").eq("workspace_id", workspaceId).maybeSingle()
+        : sdrQuery.single());
 
       if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
         const { data: sdrConv } = await supabase
@@ -878,14 +916,11 @@ async function handleMessageUpdate(
   instanceName: string,
   data: StatusUpdate[] | StatusUpdate | null,
 ): Promise<Response> {
-  const { data: instance } = await supabase
-    .from("whatsapp_instances")
-    .select("id")
-    .eq("instance_name", instanceName)
-    .maybeSingle();
+  const instance = await resolveInstance(supabase, instanceName);
   if (!instance) {
     return jsonResponse(200, { ok: true, skipped: "unknown instance" });
   }
+  const workspaceId = instance.workspace_id;
 
   const list: StatusUpdate[] = Array.isArray(data) ? data : data ? [data] : [];
   let updated = 0;
@@ -907,13 +942,12 @@ async function handleMessageUpdate(
     if (!phone && !lid) continue;
 
     // Localiza o contato (somente leitura — um status nunca cria contato).
+    // Escopo workspace: evita aplicar receipt de um workspace em outro.
     let contactId: string | null = null;
     if (lid) {
-      const { data: c } = await supabase
-        .from("contacts")
-        .select("id")
-        .eq("lid", lid)
-        .maybeSingle();
+      let q = supabase.from("contacts").select("id").eq("lid", lid);
+      if (workspaceId) q = q.eq("workspace_id", workspaceId);
+      const { data: c } = await q.maybeSingle();
       if (c) contactId = c.id;
     }
     if (!contactId && phone) {
@@ -922,11 +956,9 @@ async function handleMessageUpdate(
       // e o status de entrega/leitura era descartado silenciosamente para
       // os contatos gravados na forma de 12 dígitos.
       for (const variant of phoneLookupVariants(phone)) {
-        const { data: c } = await supabase
-          .from("contacts")
-          .select("id")
-          .eq("phone", variant)
-          .maybeSingle();
+        let q = supabase.from("contacts").select("id").eq("phone", variant);
+        if (workspaceId) q = q.eq("workspace_id", workspaceId);
+        const { data: c } = await q.maybeSingle();
         if (c) {
           contactId = c.id;
           break;
@@ -1133,9 +1165,11 @@ async function reconcileInstanceMessages(
 
     const items = extractMessageRows(await res.json().catch(() => null));
     fetched += items.length;
+    // Workspace da instância: isola a reconciliação (não mistura contatos).
+    const inst = await resolveInstance(supabase, instanceName);
     for (const item of items) {
       // Linha da store Baileys tem a mesma forma de um item MESSAGES_UPSERT.
-      await processMessage(supabase, instanceId, instanceName, item as unknown as RawMessage);
+      await processMessage(supabase, instanceId, instanceName, item as unknown as RawMessage, inst?.workspace_id ?? null);
       processed += 1;
     }
   }
@@ -1158,11 +1192,7 @@ async function handleMessages(
   instanceName: string,
   data: RawMessage[] | RawMessage | null,
 ): Promise<Response> {
-  const { data: instance } = await supabase
-    .from("whatsapp_instances")
-    .select("id")
-    .eq("instance_name", instanceName)
-    .maybeSingle();
+  const instance = await resolveInstance(supabase, instanceName);
   if (!instance) {
     return jsonResponse(200, { ok: true, skipped: "unknown instance" });
   }
@@ -1178,7 +1208,7 @@ async function handleMessages(
   for (let i = 0; i < list.length; i += BATCH) {
     const chunk = list.slice(i, i + BATCH);
     await Promise.allSettled(
-      chunk.map((raw) => processMessage(supabase, instance.id, instanceName, raw)),
+      chunk.map((raw) => processMessage(supabase, instance.id, instanceName, raw, instance.workspace_id)),
     );
   }
   return jsonResponse(200, { ok: true, processed: list.length });
@@ -1197,6 +1227,7 @@ async function handleContacts(
     | Array<{ id?: string; pushName?: string; number?: string; remoteJid?: string }>
     | { id?: string; pushName?: string; number?: string; remoteJid?: string }
     | null,
+  workspaceId: string | null = null,
 ): Promise<Response> {
   const list = Array.isArray(data) ? data : data ? [data] : [];
   let processed = 0;
@@ -1220,7 +1251,7 @@ async function handleContacts(
 
     if (!phone && !lid) continue;
     try {
-      await upsertContact(supabase, phone, lid, contact.pushName ?? null, jid || null);
+      await upsertContact(supabase, phone, lid, contact.pushName ?? null, jid || null, workspaceId);
       processed += 1;
     } catch (err) {
       console.error("EVOLUTION_CONTACT_IMPORT_FAILED", err);
@@ -1246,7 +1277,22 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
-    if (!timingSafeEqual(url.searchParams.get("token") ?? "", WEBHOOK_SECRET)) {
+    const token = url.searchParams.get("token") ?? req.headers.get("x-webhook-token") ?? "";
+    const supabase = serviceClient();
+
+    // Multi-tenant: token por instância (whatsapp_instances.webhook_token)
+    // tem precedência; o segredo global segue como fallback legado.
+    // O workspace é resolvido pela instância, nunca pelo payload.
+    let authed = timingSafeEqual(token, WEBHOOK_SECRET);
+    if (!authed && token) {
+      const { data: tok } = await supabase
+        .from("whatsapp_instances")
+        .select("id")
+        .eq("webhook_token", token)
+        .maybeSingle();
+      authed = Boolean(tok);
+    }
+    if (!authed) {
       return jsonResponse(401, { error: "unauthorized" });
     }
 
@@ -1256,7 +1302,6 @@ Deno.serve(async (req) => {
     // Rastro de ingestão: sem isso, quedas de entrega ficam invisíveis
     // (foi exatamente o bug do chat "perdido" das 21:07).
     console.info("EVOLUTION_EVENT_RECEIVED", event, instanceName);
-    const supabase = serviceClient();
 
     switch (event) {
       case "connection.update":
@@ -1267,8 +1312,10 @@ Deno.serve(async (req) => {
       case "messages.update":
         return await handleMessageUpdate(supabase, instanceName, payload.data);
       case "contacts.set":
-      case "contacts.upsert":
-        return await handleContacts(supabase, payload.data);
+      case "contacts.upsert": {
+        const inst = instanceName ? await resolveInstance(supabase, instanceName) : null;
+        return await handleContacts(supabase, payload.data, inst?.workspace_id ?? null);
+      }
       default:
         return jsonResponse(200, { ok: true, ignored: event });
     }

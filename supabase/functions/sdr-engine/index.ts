@@ -2,6 +2,7 @@ import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
 import { isServiceRole, requireAdmin, requireUser } from "../_shared/auth.ts";
+import { bumpUsage, isAiQuotaExceeded } from "../_shared/workspace.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -693,6 +694,31 @@ async function processMessage(
     return { action: "skip", response: "Fora do horário" }
   }
 
+  // 7.5. Quota de IA do workspace (multi-tenant). Resolve o dono pela
+  // conversa; sem workspace conhecido pula sem chamar a LLM, e com quota
+  // estourada também (skip com reason, sem consumir OpenRouter).
+  const { data: convWs } = await supabase
+    .from("conversations")
+    .select("workspace_id")
+    .eq("id", conversationId)
+    .maybeSingle()
+  const sdrWorkspaceId = (convWs as { workspace_id: string | null } | null)?.workspace_id ?? null
+  if (!sdrWorkspaceId) {
+    return { action: "skip", response: "workspace desconhecido" }
+  }
+  if (await isAiQuotaExceeded(supabase, sdrWorkspaceId)) {
+    await supabase.from("sdr_logs").insert({
+      conversation_id: conversationId,
+      contact_id: contactId,
+      message_id: messageId,
+      status: "completed",
+      action: "skip",
+      model: settings.primary_model,
+      metadata: { reason: "ai_quota_exceeded" },
+    }).then(() => {}, () => {})
+    return { action: "skip", response: "quota de IA excedida" }
+  }
+
   // 8. Get contact context
   const { data: contact } = await supabase
     .from("contacts")
@@ -762,12 +788,18 @@ Responda a última mensagem do CLIENTE.`
   // 11. Call AI
   const startTime = Date.now()
   let aiResponse: string
+  let aiTokens = 0
   try {
     const result = await callAI(supabase, [
       { role: "system", content: systemMsg },
       { role: "user", content: userMsg },
     ], { temperature: 0.7, max_tokens: 800 })
     aiResponse = result.content
+    const reported = (result.usage as any)?.total_tokens
+    aiTokens = typeof reported === "number" && reported > 0
+      ? reported
+      : Math.max(1, Math.ceil(aiResponse.length / 4))
+    bumpUsage(supabase, sdrWorkspaceId, { p_tokens: aiTokens })
   } catch (e) {
     // Log error
     await supabase.from("sdr_logs").insert({
@@ -806,6 +838,7 @@ Responda a última mensagem do CLIENTE.`
       action: "fallback",
       latency_ms: latency,
       model: settings.primary_model,
+      tokens_used: aiTokens,
       metadata: { raw_response: aiResponse.slice(0, 300) },
     }).then(() => {}, () => {})
     return { action: "continue", response: fallback.response }
@@ -846,6 +879,7 @@ Responda a última mensagem do CLIENTE.`
       action: "transfer_human",
       latency_ms: latency,
       model: settings.primary_model,
+      tokens_used: aiTokens,
       metadata: parsed.extracted_info,
     }).then(() => {}, () => {})
 
@@ -932,6 +966,7 @@ Responda a última mensagem do CLIENTE.`
     action: parsed.suggested_action,
     latency_ms: latency,
     model: settings.primary_model,
+    tokens_used: aiTokens,
     metadata: parsed.extracted_info,
   }).then(() => {}, () => {})
 
@@ -1068,8 +1103,20 @@ async function requalifyRecent(
   }
 
   // Processa candidatos em paralelo (4 por vez)
-  const processOne = async ({ conversationId, contactId }: { conversationId: string; contactId: string }): Promise<"qualified" | "partial" | "error" | "empty"> => {
+  const processOne = async ({ conversationId, contactId }: { conversationId: string; contactId: string }): Promise<"qualified" | "partial" | "error" | "empty" | "skipped"> => {
     try {
+      // Quota de IA do workspace: sem workspace ou com quota estourada,
+      // pula sem chamar a LLM.
+      const { data: rqWsRow } = await supabase
+        .from("conversations")
+        .select("workspace_id")
+        .eq("id", conversationId)
+        .maybeSingle()
+      const rqWorkspaceId = (rqWsRow as { workspace_id: string | null } | null)?.workspace_id ?? null
+      if (!rqWorkspaceId || await isAiQuotaExceeded(supabase, rqWorkspaceId)) {
+        return "skipped"
+      }
+
       const { data: msgs } = await supabase
         .from("messages")
         .select("direction, content, type, transcription, sent_at")
@@ -1095,6 +1142,12 @@ async function requalifyRecent(
         },
       ], { temperature: 0.2, max_tokens: 2000, model: extractModel })
 
+      const rqReported = (aiRes.usage as any)?.total_tokens
+      const rqTokens = typeof rqReported === "number" && rqReported > 0
+        ? rqReported
+        : Math.max(1, Math.ceil(aiRes.content.length / 4))
+      bumpUsage(supabase, rqWorkspaceId, { p_tokens: rqTokens })
+
       const parsed = parseQualification(aiRes.content)
 
       const info = parsed?.extracted_info
@@ -1105,6 +1158,7 @@ async function requalifyRecent(
           status: "failed",
           action: "requalify",
           error: "no_extractable_data",
+          tokens_used: rqTokens,
           metadata: { raw: (aiRes.content || "").slice(0, 1200), len: (aiRes.content || "").length },
         }).then(() => {}, () => {})
         return "error"
@@ -1129,6 +1183,7 @@ async function requalifyRecent(
         status: "completed",
         action: "requalify",
         model: extractModel,
+        tokens_used: rqTokens,
         metadata: { ...info, temperature: parsed.temperature, complete },
       }).then(() => {}, () => {})
       return complete ? "qualified" : "partial"
@@ -1155,6 +1210,7 @@ async function requalifyRecent(
         result.analyzed++
         if (outcome === "qualified") result.qualified++
         else if (outcome === "partial") result.partial++
+        else if (outcome === "skipped") result.skipped++
         else result.errors++
       }
     }

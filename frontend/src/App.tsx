@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom
 import { Toaster } from "sonner"
 
 import { AuthProvider, useAuth } from "@/hooks/use-auth"
+import { WorkspaceProvider, useWorkspace } from "@/hooks/use-workspace"
 import { ThemeProvider, useTheme } from "@/hooks/use-theme"
 import { ProtectedRoute } from "@/components/ProtectedRoute"
 import { Layout } from "@/components/Layout"
@@ -19,14 +20,25 @@ const AutomationsPage = lazy(() => import("@/pages/Automations"))
 const DashboardPage = lazy(() => import("@/pages/Dashboard"))
 const CampaignsPage = lazy(() => import("@/pages/Campaigns"))
 const GroupsPage = lazy(() => import("@/pages/Groups"))
+const PlatformAdminPage = lazy(() => import("@/pages/PlatformAdmin"))
 
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { profile, loading } = useAuth()
+  const { loading: wsLoading, isWorkspaceAdmin } = useWorkspace()
   // `loading` cobre o carregamento do profile (ver use-auth): sem isso
   // existia uma janela em que profile era null e o admin era expulso.
+  if (loading || wsLoading) return <PageSkeleton />
+  // Multi-tenant: platform admin, admin global legado ou admin do workspace ativo.
+  if (profile?.is_platform_admin) return <>{children}</>
+  if (profile?.role === "admin" || isWorkspaceAdmin) return <>{children}</>
+  return <Navigate to="/" replace />
+}
+
+function RequirePlatformAdmin({ children }: { children: React.ReactNode }) {
+  const { profile, loading } = useAuth()
   if (loading) return <PageSkeleton />
-  if (!profile || profile.role !== "admin") return <Navigate to="/" replace />
-  return <>{children}</>
+  if (profile?.is_platform_admin) return <>{children}</>
+  return <Navigate to="/" replace />
 }
 
 /**
@@ -106,6 +118,14 @@ function AppRoutes() {
             </RequireAdmin>
           }
         />
+        <Route
+          path="/platform"
+          element={
+            <RequirePlatformAdmin>
+              <PlatformAdminPage />
+            </RequirePlatformAdmin>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
@@ -122,12 +142,14 @@ export default function App() {
     <ThemeProvider>
       <BrowserRouter>
         <AuthProvider>
-          <ErrorBoundary>
-            <Suspense fallback={<PageSkeleton />}>
-              <AppRoutes />
-            </Suspense>
-          </ErrorBoundary>
-          <AppToaster />
+          <WorkspaceProvider>
+            <ErrorBoundary>
+              <Suspense fallback={<PageSkeleton />}>
+                <AppRoutes />
+              </Suspense>
+            </ErrorBoundary>
+            <AppToaster />
+          </WorkspaceProvider>
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react"
-import { Ban, KeyRound, Plus, RotateCcw, ShieldCheck } from "lucide-react"
+import { Ban, KeyRound, Plus, RotateCcw, ShieldCheck, UserMinus, Users } from "lucide-react"
 import { toast } from "sonner"
 
 import {
@@ -10,8 +10,10 @@ import {
   adminUsersResetPassword,
   adminUsersSetRole,
 } from "@/lib/api"
-import type { AdminUser } from "@/lib/types"
+import { supabase } from "@/lib/supabase"
 import { useAuth } from "@/hooks/use-auth"
+import { useWorkspace } from "@/hooks/use-workspace"
+import type { AdminUser } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -42,10 +44,22 @@ import {
 
 type Role = "admin" | "vendedor"
 
+type MemberRow = {
+  workspace_id: string
+  user_id: string
+  role: "owner" | "admin" | "vendedor"
+  created_at: string
+  full_name: string | null
+}
+
 export default function UsersAdmin() {
   const { user: currentUser } = useAuth()
+  const { activeWorkspace, isWorkspaceAdmin } = useWorkspace()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
+  const [members, setMembers] = useState<MemberRow[]>([])
+  const [membersLoading, setMembersLoading] = useState(false)
+  const [removingId, setRemovingId] = useState<string | null>(null)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm, setCreateForm] = useState({
@@ -76,6 +90,48 @@ export default function UsersAdmin() {
     loadUsers()
   }, [])
 
+  async function loadMembers() {
+    if (!activeWorkspace) {
+      setMembers([])
+      return
+    }
+    setMembersLoading(true)
+    try {
+      const { data: mems, error } = await supabase
+        .from("workspace_members")
+        .select("workspace_id, user_id, role, created_at")
+        .eq("workspace_id", activeWorkspace.id)
+        .order("created_at", { ascending: true })
+      if (error) throw error
+      const list = (mems ?? []) as Array<{
+        workspace_id: string
+        user_id: string
+        role: "owner" | "admin" | "vendedor"
+        created_at: string
+      }>
+      const ids = list.map((m) => m.user_id)
+      let names = new Map<string, string | null>()
+      if (ids.length > 0) {
+        const { data: profiles, error: pErr } = await supabase
+          .from("profiles")
+          .select("id, full_name")
+          .in("id", ids)
+        if (pErr) throw pErr
+        names = new Map(((profiles ?? []) as Array<{ id: string; full_name: string | null }>).map((p) => [p.id, p.full_name]))
+      }
+      setMembers(list.map((m) => ({ ...m, full_name: names.get(m.user_id) ?? null })))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao listar membros")
+    } finally {
+      setMembersLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (isWorkspaceAdmin) void loadMembers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspace?.id, isWorkspaceAdmin])
+
   async function handleCreate(e: FormEvent) {
     e.preventDefault()
     if (createForm.temp_password.length < 6) {
@@ -84,11 +140,21 @@ export default function UsersAdmin() {
     }
     setCreating(true)
     try {
-      await adminUsersCreate(createForm)
-      toast.success("Usuário criado — informe a senha provisória a ele")
+      // Multi-tenant: vincula o novo usuário ao workspace ativo.
+      await adminUsersCreate(
+        activeWorkspace
+          ? { ...createForm, workspace_id: activeWorkspace.id }
+          : { ...createForm },
+      )
+      toast.success(
+        activeWorkspace
+          ? `Usuário criado e vinculado a "${activeWorkspace.name}"`
+          : "Usuário criado — informe a senha provisória a ele",
+      )
       setCreateOpen(false)
       setCreateForm({ email: "", full_name: "", role: "vendedor", temp_password: "" })
       await loadUsers()
+      if (isWorkspaceAdmin) await loadMembers()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao criar usuário")
     } finally {
@@ -121,6 +187,30 @@ export default function UsersAdmin() {
     }
   }
 
+  async function handleRemoveMember(userId: string, displayName: string) {
+    if (!activeWorkspace) return
+    if (userId === currentUser?.id) {
+      toast.error("Você não pode remover seu próprio vínculo")
+      return
+    }
+    if (!window.confirm(`Remover ${displayName} do workspace "${activeWorkspace.name}"?`)) return
+    setRemovingId(userId)
+    try {
+      const { error } = await supabase
+        .from("workspace_members")
+        .delete()
+        .eq("workspace_id", activeWorkspace.id)
+        .eq("user_id", userId)
+      if (error) throw error
+      toast.success("Membro removido do workspace")
+      await loadMembers()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao remover membro")
+    } finally {
+      setRemovingId(null)
+    }
+  }
+
   async function handleResetPassword(e: FormEvent) {
     e.preventDefault()
     if (!resetTarget) return
@@ -143,9 +233,72 @@ export default function UsersAdmin() {
 
   return (
     <div className="space-y-4">
+      {isWorkspaceAdmin && activeWorkspace && (
+        <section className="space-y-3 rounded-lg border p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Users className="h-4 w-4" /> Membros de "{activeWorkspace.name}"
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Usuários vinculados a este workspace. Novos usuários criados abaixo
+                entram automaticamente neste workspace.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void loadMembers()} disabled={membersLoading}>
+              {membersLoading ? "Atualizando..." : "Atualizar"}
+            </Button>
+          </div>
+          {membersLoading ? (
+            <p className="text-sm text-muted-foreground">Carregando membros...</p>
+          ) : members.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nenhum membro encontrado.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Nome</TableHead>
+                  <TableHead>Papel no workspace</TableHead>
+                  <TableHead className="text-right">Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {members.map((m) => (
+                  <TableRow key={m.user_id}>
+                    <TableCell className="font-medium">
+                      {m.full_name || "—"}
+                      {m.user_id === currentUser?.id && (
+                        <span className="ml-2 text-xs text-muted-foreground">(você)</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">
+                        {m.role === "owner" ? "Dono" : m.role === "admin" ? "Admin" : "Vendedor"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="Remover do workspace"
+                        disabled={m.user_id === currentUser?.id || removingId === m.user_id}
+                        onClick={() => void handleRemoveMember(m.user_id, m.full_name || m.user_id)}
+                      >
+                        <UserMinus className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </section>
+      )}
+
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           Gestão de usuários internos. Não há cadastro público.
+          {activeWorkspace ? ` Novos usuários entram em "${activeWorkspace.name}".` : ""}
         </p>
         <Button onClick={() => setCreateOpen(true)}>
           <Plus className="mr-2 h-4 w-4" /> Criar usuário
@@ -241,6 +394,7 @@ export default function UsersAdmin() {
             <DialogDescription>
               O usuário entra com a senha provisória e troca a senha na página "Minha
               conta". Não é enviado e-mail.
+              {activeWorkspace ? ` Será vinculado a "${activeWorkspace.name}".` : ""}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleCreate} className="space-y-4">

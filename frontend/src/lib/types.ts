@@ -7,6 +7,41 @@ export type Profile = {
   created_at: string
 }
 
+export type Workspace = {
+  id: string
+  name: string
+  slug: string
+  plan: "base" | "pro" | "scale"
+  status: "active" | "suspended" | "cancelled"
+  max_users: number
+  max_instances: number
+  msg_mensal: number
+  ai_credits_mensal: number
+  feat_sdr: boolean
+  feat_transcription: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type WorkspaceMember = {
+  workspace_id: string
+  user_id: string
+  role: "owner" | "admin" | "vendedor"
+  created_at: string
+  workspace?: Workspace | null
+}
+
+export type WorkspaceInvite = {
+  id: string
+  workspace_id: string
+  email: string
+  role: "admin" | "vendedor"
+  token: string
+  accepted_at: string | null
+  expires_at: string
+  created_at: string
+}
+
 export type Contact = {
   id: string
   phone: string | null

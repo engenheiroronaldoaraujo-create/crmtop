@@ -93,7 +93,7 @@ export function parseTranscriptionResponse(json: any): string {
   return text;
 }
 
-export const DEFAULT_TRANSCRIPTION_MODEL = "google/gemini-2.5-flash";
+export const DEFAULT_TRANSCRIPTION_MODEL = "google/gemini-2.5-flash-lite";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 export async function transcribeAudio(opts: {

@@ -101,3 +101,74 @@ export async function requireAdminOrService(
   if (isServiceRole(req)) return null;
   return await requireAdmin(req, supabase);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-tenant (workspaces). Evolution e IA seguem centralizados no dono;
+// o workspace só isola dados + quotas. Toda checagem lê workspace_members
+// no banco (service role), nunca claim do client.
+// ---------------------------------------------------------------------------
+
+export interface WorkspaceMembership {
+  workspace_id: string;
+  role: string;
+}
+
+export async function getUserWorkspaces(
+  supabase: Supabase,
+  userId: string,
+): Promise<WorkspaceMembership[]> {
+  const { data } = await supabase
+    .from("workspace_members")
+    .select("workspace_id, role")
+    .eq("user_id", userId);
+  return (data ?? []) as WorkspaceMembership[];
+}
+
+export async function requireWorkspaceMember(
+  req: Request,
+  supabase: Supabase,
+  workspaceId: string,
+): Promise<CallerProfile> {
+  const profile = await requireUser(req, supabase);
+  if (profile.role === "admin") {
+    const { data: plat } = await supabase
+      .from("profiles")
+      .select("is_platform_admin")
+      .eq("id", profile.id)
+      .maybeSingle();
+    if ((plat as { is_platform_admin?: boolean } | null)?.is_platform_admin) return profile;
+  }
+  const { data } = await supabase
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", profile.id)
+    .maybeSingle();
+  if (!data) throw jsonResponse(403, { error: "forbidden: not a workspace member" });
+  return profile;
+}
+
+export async function requireWorkspaceAdmin(
+  req: Request,
+  supabase: Supabase,
+  workspaceId: string,
+): Promise<CallerProfile> {
+  const profile = await requireUser(req, supabase);
+  const { data: plat } = await supabase
+    .from("profiles")
+    .select("is_platform_admin")
+    .eq("id", profile.id)
+    .maybeSingle();
+  if ((plat as { is_platform_admin?: boolean } | null)?.is_platform_admin) return profile;
+  const { data } = await supabase
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", profile.id)
+    .maybeSingle();
+  const role = (data as { role?: string } | null)?.role;
+  if (role !== "owner" && role !== "admin") {
+    throw jsonResponse(403, { error: "forbidden: workspace admin required" });
+  }
+  return profile;
+}

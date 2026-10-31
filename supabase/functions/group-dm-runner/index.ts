@@ -18,6 +18,7 @@ import { isWeekend, localParts, substituteVariables, timeToMinutes } from "../_s
 import { renderGroupDm } from "../_shared/group-posts.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
+import { bumpUsage, isMsgQuotaExceeded } from "../_shared/workspace.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -27,12 +28,14 @@ const supabase = serviceClient();
 interface GroupDm {
   id: string;
   post_id: string;
+  workspace_id?: string | null;
   contact_id: string | null;
   dm_attempts: number;
 }
 
 interface GroupPost {
   id: string;
+  workspace_id?: string | null;
   instance_id: string;
   status: string;
   dm_template: string;
@@ -44,6 +47,7 @@ interface GroupPost {
 
 interface Contact {
   id: string;
+  workspace_id?: string | null;
   name: string | null;
   push_name: string | null;
   phone: string | null;
@@ -249,12 +253,21 @@ Deno.serve(async (req) => {
     let deferred = 0;
     let failed = 0;
     let skipped = 0;
+    // Quota é por workspace: cache do run para não re-consultar a cada DM.
+    const quotaCache = new Map<string, boolean>();
+    async function workspaceQuotaExceeded(wsId: string): Promise<boolean> {
+      const cached = quotaCache.get(wsId);
+      if (cached !== undefined) return cached;
+      const exceeded = await isMsgQuotaExceeded(supabase, wsId);
+      quotaCache.set(wsId, exceeded);
+      return exceeded;
+    }
 
     for (const dm of (dues ?? []) as GroupDm[]) {
       try {
         const { data: post } = await supabase
           .from("group_posts")
-          .select("id, instance_id, status, dm_template, pacing_seconds")
+          .select("id, instance_id, workspace_id, status, dm_template, pacing_seconds")
           .eq("id", dm.post_id)
           .maybeSingle();
         if (!post || (post as GroupPost).status !== "published") {
@@ -271,7 +284,7 @@ Deno.serve(async (req) => {
         }
         const { data: contact } = await supabase
           .from("contacts")
-          .select("id, name, push_name, phone, lid, jid, opted_out")
+          .select("id, name, push_name, phone, lid, jid, opted_out, workspace_id")
           .eq("id", dm.contact_id)
           .maybeSingle();
         if (!contact) {
@@ -296,10 +309,30 @@ Deno.serve(async (req) => {
 
         const { data: inst } = await supabase
           .from("whatsapp_instances")
-          .select("instance_name")
+          .select("instance_name, workspace_id")
           .eq("id", p.instance_id)
           .maybeSingle();
         const instanceName = inst?.instance_name as string | undefined;
+        // Isolamento multi-tenant: post, contato e instância precisam pertencer
+        // ao mesmo workspace. Mismatch = dado inconsistente: cancela a DM em
+        // vez de enviar pelo canal errado.
+        const postWs = (p.workspace_id ?? null) as string | null;
+        const contactWs = (c.workspace_id ?? null) as string | null;
+        const instWs = ((inst as { workspace_id?: string } | null)?.workspace_id ?? null) as string | null;
+        if (!postWs || !contactWs || !instWs || postWs !== contactWs || postWs !== instWs) {
+          await markTerminal(dm.id, dm.post_id, {
+            dm_status: "cancelled",
+            dm_error: "workspace mismatch entre post/contato/instância",
+          });
+          skipped++;
+          continue;
+        }
+        // Sem quota no workspace: adia (+60min) em vez de perder a DM.
+        if (await workspaceQuotaExceeded(postWs)) {
+          await defer(dm.id, "quota de mensagens do workspace esgotada", 60);
+          deferred++;
+          continue;
+        }
         if (!instanceName || !(await instanceConnected(instanceName))) {
           await defer(dm.id, "instância desconectada", 15);
           deferred++;
@@ -360,6 +393,7 @@ Deno.serve(async (req) => {
           dm_error: null,
         });
         sent++;
+        bumpUsage(supabase, postWs, { p_out: 1 });
 
         const pacingMs = Math.min(300, Math.max(0, p.pacing_seconds ?? 20)) * 1000;
         if (pacingMs > 0) await sleep(pacingMs);

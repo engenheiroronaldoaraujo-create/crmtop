@@ -20,6 +20,7 @@ import {
 } from "../_shared/audio.ts";
 import { isOgg, isWebm, remuxWebmToOgg } from "../_shared/ogg-remux.ts";
 import { recordOutboundMessage as recordOutboundShared } from "../_shared/outbound.ts";
+import { bumpUsage, isMsgQuotaExceeded } from "../_shared/workspace.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -130,6 +131,26 @@ async function getInstanceName(supabase: Supabase, instanceId: string): Promise<
   return data.instance_name;
 }
 
+async function getInstanceWorkspaceId(supabase: Supabase, instanceId: string): Promise<string | null> {
+  const { data } = await supabase
+    .from("whatsapp_instances")
+    .select("workspace_id")
+    .eq("id", instanceId)
+    .maybeSingle();
+  return (data as { workspace_id: string | null } | null)?.workspace_id ?? null;
+}
+
+// Quota multi-tenant no envio: sem workspace conhecido bloqueia com 400
+// (nunca envia sem dono); com quota estourada retorna 402 sem chamar a
+// Evolution. Retorna null quando o envio pode prosseguir.
+async function requireMsgQuota(supabase: Supabase, workspaceId: string | null): Promise<Response | null> {
+  if (!workspaceId) return jsonResponse(400, { error: "workspace_required" });
+  if (await isMsgQuotaExceeded(supabase, workspaceId)) {
+    return jsonResponse(402, { error: "quota de mensagens excedida" });
+  }
+  return null;
+}
+
 async function callEvolution(
   path: string,
   init: { method?: string; body?: unknown } = {},
@@ -194,9 +215,10 @@ async function recordOutboundMessage(
     sendError?: string | null;
   },
   status: "sent" | "failed" = "sent",
+  workspaceId: string | null = null,
 ): Promise<{ conversationId: string; messageId: string | null }> {
-  const contactId = await upsertContact(supabase, phone, lid, null);
-  const conversationId = await upsertConversation(supabase, contactId, instanceId);
+  const contactId = await upsertContact(supabase, phone, lid, null, null, workspaceId);
+  const conversationId = await upsertConversation(supabase, contactId, instanceId, undefined, workspaceId);
 
   const { messageId, error } = await recordOutboundShared(
     supabase,
@@ -213,6 +235,17 @@ async function recordOutboundMessage(
     status,
   );
   if (error) console.error("OUTBOUND_PERSIST_FAILED", error);
+
+  // Propaga o workspace na linha da mensagem (o trigger
+  // set_workspace_id_default já herdaria da conversa, mas o envio manual
+  // sempre sabe o dono — grava explícito).
+  if (workspaceId && messageId) {
+    await supabase
+      .from("messages")
+      .update({ workspace_id: workspaceId })
+      .eq("id", messageId)
+      .then(() => {}, () => {});
+  }
 
   return { conversationId, messageId };
 }
@@ -370,10 +403,11 @@ async function actionSendText(
   // para qualquer instância registrada na Evolution.
   let instance_name = body.instance_name ?? "";
   let instance_id = body.instance_id ?? "";
+  let workspace_id: string | null = null;
   if (!instance_id) {
     const { data: inst } = await supabase
       .from("whatsapp_instances")
-      .select("id, instance_name")
+      .select("id, instance_name, workspace_id")
       .eq("instance_name", instance_name)
       .maybeSingle();
     if (!inst) {
@@ -381,12 +415,18 @@ async function actionSendText(
     }
     instance_id = inst.id;
     instance_name = inst.instance_name;
+    workspace_id = (inst as { workspace_id: string | null }).workspace_id ?? null;
   } else {
     instance_name = await getInstanceName(supabase, instance_id);
+    workspace_id = await getInstanceWorkspaceId(supabase, instance_id);
   }
   if (!instance_name || !instance_id) {
     return jsonResponse(400, { error: "instância não encontrada" });
   }
+
+  // Quota multi-tenant: bloqueia antes de qualquer chamada à Evolution.
+  const quotaBlock = await requireMsgQuota(supabase, workspace_id);
+  if (quotaBlock) return quotaBlock;
 
   // Parallel DB queries
   const phoneDigits = sanitizePhone(body.phone ?? "");
@@ -430,7 +470,7 @@ async function actionSendText(
         mediaUrl: null,
         sentAt,
         sendError: respText.slice(0, 300),
-      }, "failed");
+      }, "failed", workspace_id);
       return jsonResponse(res.status, { error: `evolution sendText failed: ${respText}` });
     }
 
@@ -445,7 +485,9 @@ async function actionSendText(
       content: text,
       mediaUrl: null,
       sentAt,
-    }, "sent");
+    }, "sent", workspace_id);
+
+    bumpUsage(supabase, workspace_id, { p_out: 1 });
 
     return jsonResponse(200, {
       ok: true,
@@ -461,7 +503,7 @@ async function actionSendText(
         mediaUrl: null,
         sentAt,
         sendError: String(err).slice(0, 300),
-      }, "failed");
+      }, "failed", workspace_id);
     } catch (recordErr) {
       console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
     }
@@ -482,6 +524,12 @@ async function actionSendMedia(
   if (!file || file.size === 0) return jsonResponse(400, { error: "file is required" });
 
   const instance_name = await getInstanceName(supabase, instance_id);
+  const workspace_id = await getInstanceWorkspaceId(supabase, instance_id);
+
+  // Quota multi-tenant: bloqueia antes de qualquer chamada à Evolution.
+  const quotaBlock = await requireMsgQuota(supabase, workspace_id);
+  if (quotaBlock) return quotaBlock;
+
   const phoneDigits = sanitizePhone(String(formData.get("phone") ?? ""));
 
   const contact = await findContactByNumber(supabase, phoneDigits);
@@ -582,7 +630,7 @@ async function actionSendMedia(
         mediaUrl: null,
         sentAt,
         sendError: String(err).slice(0, 300),
-      }, "failed");
+      }, "failed", workspace_id);
     } catch (recordErr) {
       console.error("EVOLUTION_SEND_FAILED_RECORD_ERROR", recordErr);
     }
@@ -602,7 +650,7 @@ async function actionSendMedia(
       mediaUrl: null,
       sentAt,
       sendError: resText.slice(0, 300),
-    }, "failed");
+    }, "failed", workspace_id);
     return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
 
@@ -616,7 +664,9 @@ async function actionSendMedia(
     content: caption || null,
     mediaUrl: null,
     sentAt,
-  }, "sent");
+  }, "sent", workspace_id);
+
+  bumpUsage(supabase, workspace_id, { p_out: 1 });
 
   const ext = (fileName.split(".").pop() ?? "bin").toLowerCase().slice(0, 8);
   const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;
@@ -712,6 +762,12 @@ async function actionSendAudio(
   if (!validation.ok) return jsonResponse(400, { error: validation.error });
 
   const instance_name = await getInstanceName(supabase, instance_id);
+  const workspace_id = await getInstanceWorkspaceId(supabase, instance_id);
+
+  // Quota multi-tenant: bloqueia antes de qualquer chamada à Evolution.
+  const quotaBlock = await requireMsgQuota(supabase, workspace_id);
+  if (quotaBlock) return quotaBlock;
+
   const phoneDigits = sanitizePhone(phone);
 
   const contact = await findContactByNumber(supabase, phoneDigits);
@@ -820,7 +876,7 @@ async function actionSendAudio(
         mediaUrl: null,
         sentAt,
         sendError: String(err).slice(0, 300),
-      }, "failed");
+      }, "failed", workspace_id);
     } catch (recordErr) {
       console.error("EVOLUTION_SEND_AUDIO_FAILED_RECORD_ERROR", recordErr);
     }
@@ -860,7 +916,7 @@ async function actionSendAudio(
       mediaUrl: null,
       sentAt,
       sendError: resText.slice(0, 300),
-    }, "failed");
+    }, "failed", workspace_id);
     return jsonResponse(res.status, { error: `evolution sendMedia failed: ${resText}` });
   }
 
@@ -878,7 +934,7 @@ async function actionSendAudio(
       mediaUrl: null,
       sentAt,
       sendError: `evolution não confirmou o envio: ${detail}`,
-    }, "failed");
+    }, "failed", workspace_id);
     return jsonResponse(502, {
       error: `O WhatsApp não confirmou o envio do áudio. Resposta do Evolution: ${detail}`,
     });
@@ -892,7 +948,10 @@ async function actionSendAudio(
     user.id,
     { evolutionId, type: "audio", content: null, mediaUrl: null, sentAt },
     "sent",
+    workspace_id,
   );
+
+  bumpUsage(supabase, workspace_id, { p_out: 1 });
 
   const ext = finalIsOgg ? "ogg" : audioExtension(fileType);
   const objectPath = `messages/${evolutionId ?? crypto.randomUUID()}.${ext}`;

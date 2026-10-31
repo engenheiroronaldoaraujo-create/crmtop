@@ -3,6 +3,7 @@ import { serviceClient, upsertConversation } from "../_shared/contacts.ts";
 import { recordOutboundMessage } from "../_shared/outbound.ts";
 import { resolveSendTarget } from "../_shared/evolution-identity.ts";
 import { timingSafeEqual } from "../_shared/timing.ts";
+import { bumpUsage, isMsgQuotaExceeded, listActiveWorkspaces } from "../_shared/workspace.ts";
 
 const EVOLUTION_API_URL = (Deno.env.get("EVOLUTION_API_URL") ?? "").replace(/\/+$/, "");
 const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
@@ -26,6 +27,7 @@ interface CadenceStep {
 interface Cadence {
   id: string;
   name: string;
+  workspace_id?: string | null;
   pipeline_id: string;
   trigger_stage_id: string;
   skip_weekends: boolean;
@@ -167,12 +169,13 @@ async function callEvolution(
 // Load
 // ---------------------------------------------------------------------------
 
-async function loadCadences(): Promise<Cadence[]> {
-  const { data: rows } = await supabase
+async function loadCadences(workspaceId?: string): Promise<Cadence[]> {
+  let query = supabase
     .from("cadences")
     .select("*")
-    .eq("is_active", true)
-    .order("created_at");
+    .eq("is_active", true);
+  if (workspaceId) query = query.eq("workspace_id", workspaceId);
+  const { data: rows } = await query.order("created_at");
   if (!rows || rows.length === 0) return [];
 
   const { data: steps } = await supabase
@@ -352,19 +355,21 @@ async function sendStepMessage(
 // 1) MATRÍCULA — oportunidade open no estágio gatilho
 // ---------------------------------------------------------------------------
 
-async function enroll(cadences: Cadence[]): Promise<{ enrolled: number }> {
+async function enroll(cadences: Cadence[], workspaceId?: string): Promise<{ enrolled: number }> {
   let enrolled = 0;
 
   for (const cadence of cadences) {
     if (cadence.steps.length === 0) continue;
 
     // Oportunidades no estágio gatilho, sem enrollment nesta cadência.
-    const { data: candidates } = await supabase
+    let oppQuery = supabase
       .from("opportunities")
       .select("id, assigned_to")
       .eq("pipeline_id", cadence.pipeline_id)
       .eq("stage_id", cadence.trigger_stage_id)
       .eq("status", "open");
+    if (workspaceId) oppQuery = oppQuery.eq("workspace_id", workspaceId);
+    const { data: candidates } = await oppQuery;
     if (!candidates || candidates.length === 0) continue;
 
     for (const opp of candidates as Pick<Opportunity, "id" | "assigned_to">[]) {
@@ -383,6 +388,7 @@ async function enroll(cadences: Cadence[]): Promise<{ enrolled: number }> {
         current_step: 0,
         status: "active",
         next_run_at: nextRunAt(cadence, cadence.steps[0]),
+        ...(workspaceId ? { workspace_id: workspaceId } : {}),
       });
       if (error) {
         if (error.code !== "23505") console.error("CADENCE_ENROLL_FAILED", opp.id, error.message);
@@ -398,7 +404,7 @@ async function enroll(cadences: Cadence[]): Promise<{ enrolled: number }> {
 // 2) EXECUÇÃO — etapas vencidas (next_run_at <= now)
 // ---------------------------------------------------------------------------
 
-async function executeDues(cadences: Cadence[]): Promise<{ executed: number; failed: number }> {
+async function executeDues(cadences: Cadence[], workspaceId?: string): Promise<{ executed: number; failed: number }> {
   let executed = 0;
   let failed = 0;
 
@@ -420,8 +426,17 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
   for (const enr of dues) {
     try {
       const cadence = cadenceById.get(enr.cadence_id);
+      // Claim é global: matrícula de outro workspace volta para a fila (lock
+      // liberado) e será processada na iteração do workspace dono.
+      if (!cadence) {
+        if (workspaceId) {
+          await supabase.from("cadence_enrollments").update({ locked_until: null }).eq("id", enr.id);
+        }
+        continue;
+      }
       // Cadência desativada/deletada: pausa (não cancela, admin pode reativar).
-      if (!cadence || cadence.steps.length === 0) continue;
+      if (cadence.steps.length === 0) continue;
+      const wsId = workspaceId ?? cadence.workspace_id ?? null;
 
       const opp = await loadOpportunity(enr.opportunity_id);
       if (!opp || opp.status !== "open") {
@@ -442,6 +457,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
         await supabase.from("cadence_executions").insert({
           enrollment_id: enr.id, status: "skipped",
           details: { reason: "lead_respondeu" },
+          ...(wsId ? { workspace_id: wsId } : {}),
         });
         continue;
       }
@@ -456,6 +472,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
         await supabase.from("cadence_executions").insert({
           enrollment_id: enr.id, status: "skipped",
           details: { reason: "opted_out" },
+          ...(wsId ? { workspace_id: wsId } : {}),
         });
         continue;
       }
@@ -483,6 +500,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
           await supabase.from("cadence_executions").insert({
             enrollment_id: enr.id, step_id: step.id, step_order: step.step_order,
             status: "failed", error: `move stage: ${moveErr.message}`,
+            ...(wsId ? { workspace_id: wsId } : {}),
           });
           // Não avança a etapa: tenta de novo em 1h.
           await supabase
@@ -515,6 +533,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
           enrollment_id: enr.id, step_id: step.id, step_order: step.step_order,
           status: "failed", message_id: messageId, error: sendError,
           details: { stageMoved: opp.stage_id !== step.stage_id, cadence: cadence.name, retry: true },
+          ...(wsId ? { workspace_id: wsId } : {}),
         });
         await supabase
           .from("cadence_enrollments")
@@ -546,6 +565,7 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
         message_id: messageId,
         error: updErr?.message ?? null,
         details: { stageMoved: opp.stage_id !== step.stage_id, cadence: cadence.name },
+        ...(wsId ? { workspace_id: wsId } : {}),
       });
 
       if (updErr) failed++;
@@ -565,24 +585,26 @@ async function executeDues(cadences: Cadence[]): Promise<{ executed: number; fai
 // 3) SINCRONIZAÇÃO — movimentação manual encerrou a entrada expira ou cancelou
 // ---------------------------------------------------------------------------
 
-async function reconcile(cadences: Cadence[]): Promise<{ synced: number; cancelled: number }> {
+async function reconcile(cadences: Cadence[], workspaceId?: string): Promise<{ synced: number; cancelled: number }> {
   let synced = 0;
   let cancelled = 0;
 
   const cadenceById = new Map(cadences.map((c) => [c.id, c]));
 
-  const { data: actives } = await supabase
+  let activeQuery = supabase
     .from("cadence_enrollments")
     .select("*")
     .in("status", ["active", "paused"])
-    .or(`locked_until.is.null,locked_until.lt.${new Date().toISOString()}`)
-    .limit(500);
+    .or(`locked_until.is.null,locked_until.lt.${new Date().toISOString()}`);
+  if (workspaceId) activeQuery = activeQuery.eq("workspace_id", workspaceId);
+  const { data: actives } = await activeQuery.limit(500);
   if (!actives || actives.length === 0) return { synced, cancelled };
 
   for (const enr of actives as Enrollment[]) {
     try {
       const cadence = cadenceById.get(enr.cadence_id);
       if (!cadence) continue;
+      const wsId = workspaceId ?? cadence.workspace_id ?? null;
 
       const opp = await loadOpportunity(enr.opportunity_id);
       if (!opp || opp.status !== "open") {
@@ -614,6 +636,7 @@ async function reconcile(cadences: Cadence[]): Promise<{ synced: number; cancell
           await supabase.from("cadence_executions").insert({
             enrollment_id: enr.id, step_order: manualIndex, status: "skipped",
             details: { reason: "manual_stage_move", stage: opp.stage_id },
+            ...(wsId ? { workspace_id: wsId } : {}),
           });
         }
       } else if (manualIndex === undefined && enr.current_step > 0) {
@@ -629,6 +652,7 @@ async function reconcile(cadences: Cadence[]): Promise<{ synced: number; cancell
           await supabase.from("cadence_executions").insert({
             enrollment_id: enr.id, status: "skipped",
             details: { reason: "manual move out of cadence sequence" },
+            ...(wsId ? { workspace_id: wsId } : {}),
           });
         }
       }
@@ -644,19 +668,20 @@ async function reconcile(cadences: Cadence[]): Promise<{ synced: number; cancell
 // Fallback de matrícula via estágio gatilho (agendamento inicial)
 // ---------------------------------------------------------------------------
 
-async function firstSchedules(cadences: Cadence[]): Promise<{ scheduled: number }> {
+async function firstSchedules(cadences: Cadence[], workspaceId?: string): Promise<{ scheduled: number }> {
   // Garante que enrollments ativos SEM next_run_at tenham a 1ª execução
   // agendada (recuperação de dados/manutenção).
   let scheduled = 0;
   const cadenceById = new Map(cadences.map((c) => [c.id, c]));
 
-  const { data: orphans } = await supabase
+  let orphanQuery = supabase
     .from("cadence_enrollments")
     .select("id, cadence_id, current_step")
     .eq("status", "active")
     .is("next_run_at", null)
-    .order("created_at")
-    .limit(200);
+    .order("created_at");
+  if (workspaceId) orphanQuery = orphanQuery.eq("workspace_id", workspaceId);
+  const { data: orphans } = await orphanQuery.limit(200);
   if (!orphans || orphans.length === 0) return { scheduled };
 
   for (const enr of orphans as Enrollment[]) {
@@ -695,28 +720,40 @@ Deno.serve(async (req) => {
       return jsonResponse(401, { error: "unauthorized" });
     }
 
-    const cadences = await loadCadences();
-    if (cadences.length === 0) {
-      return jsonResponse(200, { ok: true, cadences: 0 });
+    const workspaces = await listActiveWorkspaces(supabase);
+    if (workspaces.length === 0) {
+      return jsonResponse(200, { ok: true, workspaces: 0 });
     }
 
-    const enrolled = await enroll(cadences);
-    const syncedRes = await reconcile(cadences);
-    const scheduled = await firstSchedules(cadences);
-    const executed = await executeDues(cadences);
+    const totals = { cadences: 0, enrolled: 0, synced: 0, cancelled: 0, scheduled: 0, executed: 0, failed: 0 };
+    for (const ws of workspaces) {
+      if (await isMsgQuotaExceeded(supabase, ws.id)) continue;
+      const cadences = await loadCadences(ws.id);
+      if (cadences.length === 0) continue;
+      totals.cadences += cadences.length;
+
+      const enrolled = await enroll(cadences, ws.id);
+      const syncedRes = await reconcile(cadences, ws.id);
+      const scheduled = await firstSchedules(cadences, ws.id);
+      const executed = await executeDues(cadences, ws.id);
+
+      totals.enrolled += enrolled.enrolled;
+      totals.synced += syncedRes.synced;
+      totals.cancelled += syncedRes.cancelled;
+      totals.scheduled += scheduled.scheduled;
+      totals.executed += executed.executed;
+      totals.failed += executed.failed;
+      if (executed.executed > 0) bumpUsage(supabase, ws.id, { p_out: executed.executed });
+    }
 
     return jsonResponse(200, {
       ok: true,
-      cadences: cadences.length,
-      enrolled: enrolled.enrolled,
-      synced: syncedRes.synced,
-      cancelled: syncedRes.cancelled,
-      scheduled: scheduled.scheduled,
-      executed: executed.executed,
-      failed: executed.failed,
+      workspaces: workspaces.length,
+      cadences: totals.cadences,
+      enrolled: totals.enrolled,
+      synced: totals.synced,
+      cancelled: totals.cancelled,
+      scheduled: totals.scheduled,
+      executed: totals.executed,
+      failed: totals.failed,
     });
-  } catch (err) {
-    console.error("CADENCE_RUNNER_ERROR", err);
-    return jsonResponse(500, { error: "internal error" });
-  }
-});
