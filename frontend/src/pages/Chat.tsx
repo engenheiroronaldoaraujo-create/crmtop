@@ -939,7 +939,9 @@ export default function ChatPage() {
   const toggleSDR = async () => {
     if (!selectedId) return
     setSdrToggling(true)
-    const willPause = sdrStatus === "active" || sdrStatus === null
+    // OPT-IN por conversa: o SDR só entra se o humano ATIVAR aqui.
+    // Sem linha (null) ou pausado → ativa. Ativo → pausa.
+    const willPause = sdrStatus === "active"
     try {
       // Pausar/retomar o SDR via RPC.
       //
@@ -954,13 +956,47 @@ export default function ChatPage() {
       })
       if (error) throw error
       setSdrStatus(willPause ? "paused_human" : "active")
-      toast.success(willPause ? "SDR pausado nesta conversa" : "SDR reativado nesta conversa")
+      toast.success(willPause ? "SDR pausado nesta conversa" : "SDR ativado nesta conversa — a IA vai responder")
     } catch (e: any) {
       toast.error(e.message)
     } finally {
       setSdrToggling(false)
     }
   }
+
+  // Guarda anti-interrupção: se o humano está digitando/gravando, o SDR
+  // nunca pode entrar. Pausa automaticamente (uma vez por conversa) e
+  // exige reativação manual pelo botão "SDR".
+  const typingPauseRef = useRef<string | null>(null)
+  const pauseSdrForHumanTyping = useCallback(async () => {
+    if (!selectedId || sdrStatus !== "active") return
+    if (typingPauseRef.current === selectedId) return
+    typingPauseRef.current = selectedId
+    try {
+      const { error } = await supabase.rpc("set_sdr_pause", {
+        p_conversation_id: selectedId,
+        p_paused: true,
+      })
+      if (error) throw error
+      setSdrStatus("paused_human")
+      toast.info("SDR pausado — você assumiu a conversa")
+    } catch {
+      // best-effort: o gate do backend (exige 'active') já bloqueia a IA
+      // mesmo se esta pausa falhar; não quebra a digitação.
+      typingPauseRef.current = null
+    }
+  }, [selectedId, sdrStatus])
+
+  // Reseta o guarda ao trocar de conversa.
+  useEffect(() => {
+    typingPauseRef.current = null
+  }, [selectedId])
+
+  // Detecta digitação: texto no composer ou gravação de áudio em curso.
+  const isHumanTyping = text.trim().length > 0 || recorder.status === "recording" || Boolean(recorder.recording)
+  useEffect(() => {
+    if (isHumanTyping) void pauseSdrForHumanTyping()
+  }, [isHumanTyping, pauseSdrForHumanTyping])
 
   // Realtime da régua de follow-up: badge/contador atualizam quando o runner
   // envia uma tentativa, o lead responde ou alguém cancela.
@@ -1324,6 +1360,8 @@ export default function ChatPage() {
     if (!selected || !recorder.recording || sendingAudio) return
     const targetPhone = canSendNow()
     if (targetPhone === null) return
+    // Humano assumiu: garante SDR pausado antes de enviar.
+    void pauseSdrForHumanTyping()
 
     const rec = recorder.recording
     const conversationId = selected.id
@@ -1392,6 +1430,8 @@ export default function ChatPage() {
     if (!text.trim() && !pendingFile) return
     const targetPhone = canSendNow()
     if (targetPhone === null) return
+    // Humano assumiu: garante SDR pausado antes de enviar.
+    void pauseSdrForHumanTyping()
 
     // UI otimista: a bolha aparece na hora com ⏱ pendente; o status vira ✓
     // quando o proxy confirma e a bolha real substitui via realtime.

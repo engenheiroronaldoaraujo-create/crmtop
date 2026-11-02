@@ -670,11 +670,15 @@ async function postProcessInbound(args: {
           .eq("conversation_id", conversationId)
           .maybeSingle()
 
-        const isPaused = sdrConv && ["paused_human", "completed", "transferred"].includes(sdrConv.status)
+        // OPT-IN por conversa: sem status 'active' explícito (ativado pelo
+        // humano no chat), o SDR nunca entra — nem mesmo na primeira
+        // mensagem. Se o humano está digitando, o frontend já pausou
+        // (paused_human), então aqui basta exigir 'active'.
+        const isActive = sdrConv?.status === "active"
         const inCooldown = sdrConv?.last_auto_reply_at &&
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 
-        if (!isPaused && !inCooldown) {
+        if (isActive && !inCooldown) {
           await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, evolutionId)
         }
       }
