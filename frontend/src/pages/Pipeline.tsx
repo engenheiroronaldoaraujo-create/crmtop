@@ -19,6 +19,7 @@ import {
   Trash2,
   Settings,
   AlertTriangle,
+  Megaphone,
   ChevronUp,
   ChevronDown,
 } from "lucide-react"
@@ -77,11 +78,61 @@ function contactPhone(c: { phone?: string | null; lid?: string | null; jid?: str
   return "Telefone não identificado"
 }
 
-function daysIdleLastContact(opp: Opportunity, lastContactMap: Map<string, string> | undefined): number {
-  const last = (opp.conversation_id ? lastContactMap?.get(opp.conversation_id) : undefined) ?? opp.created_at
-  if (!last) return 0
-  const diff = Date.now() - new Date(last).getTime()
+type LastContactInfo = {
+  last_message_at: string | null
+  last_message_preview: string | null
+  source: string | null
+  source_meta: Record<string, unknown> | null
+}
+
+function shortDate(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return "—"
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+}
+
+function fullDate(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return "—"
+  return d.toLocaleString("pt-BR", {
+    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit",
+  })
+}
+
+function daysSince(iso: string | null | undefined): number {
+  if (!iso) return 0
+  const diff = Date.now() - new Date(iso).getTime()
+  if (Number.isNaN(diff)) return 0
   return Math.max(0, Math.floor(diff / 86_400_000))
+}
+
+/** Última interação real: mensagem da conversa ou, na falta dela, a criação do card. */
+function lastInteraction(opp: Opportunity, map: Map<string, LastContactInfo> | undefined): string | null {
+  return (opp.conversation_id ? map?.get(opp.conversation_id)?.last_message_at : undefined) ?? opp.created_at ?? null
+}
+
+function daysIdleLastContact(opp: Opportunity, lastContactMap: Map<string, LastContactInfo> | undefined): number {
+  return daysSince(lastInteraction(opp, lastContactMap))
+}
+
+/** Origem da campanha (rede/campanha) a partir da conversa ou do metadata do SDR. */
+function attributionOf(opp: Opportunity, info: LastContactInfo | undefined): { label: string; detail: string } | null {
+  const meta = (info?.source_meta ?? opp.metadata ?? {}) as Record<string, unknown>
+  const source = info?.source ?? (meta.source as string | null)
+  const network = (meta.network ?? meta.network_raw) as string | null
+  if (!source && !network) return null
+  const label = network === "google" ? "Google Ads" : network === "meta" ? "Meta Ads" :
+    source === "ad" ? "Anúncio" : source === "landing" ? "Landing" :
+    source === "campaign" ? "Campanha" : source === "manual" ? "Manual" : null
+  if (!label) return null
+  const bits: string[] = []
+  if (source) bits.push(`Origem: ${source}`)
+  if (meta.utm_campaign) bits.push(`Campanha: ${String(meta.utm_campaign)}`)
+  if (meta.utm_source) bits.push(`UTM: ${String(meta.utm_source)}`)
+  if (meta.ad_id) bits.push(`Ad ID: ${String(meta.ad_id)}`)
+  return { label, detail: bits.join(" · ") }
 }
 
 function idleBadge(days: number): { className: string; label: string } | null {
@@ -101,19 +152,29 @@ const TEMP_BADGE: Record<string, { className: string; label: string }> = {
 // Opportunity Card
 // ---------------------------------------------------------------------------
 
-function sdrMetadataTooltip(
-  meta: Record<string, string | null> | null | undefined,
-  contact?: { business_type?: string | null; team_size?: number | null; extra_info?: string | null } | null,
-): string | undefined {
-  const lines: string[] = []
+function cardTooltip(opp: Opportunity, info: LastContactInfo | undefined): string {
+  const meta = opp.metadata
+  const contact = opp.contact
+  const lines: string[] = [
+    `Entrada no funil: ${fullDate(opp.created_at)}`,
+    `Tempo no funil: ${daysSince(opp.created_at)} dia(s)`,
+  ]
+  if (info?.last_message_at) {
+    lines.push(`Última conversa: ${fullDate(info.last_message_at)}`)
+    if (info.last_message_preview) lines.push(`Prévia: ${info.last_message_preview.slice(0, 140)}`)
+  }
+  if (opp.qualified_at) lines.push(`Qualificado em: ${fullDate(opp.qualified_at)}`)
+  if (opp.expected_close_date) lines.push(`Previsão de fechamento: ${shortDate(opp.expected_close_date)}`)
+  const attr = attributionOf(opp, info)
+  if (attr) lines.push(`${attr.label}${attr.detail ? ` — ${attr.detail}` : ""}`)
   if (contact?.business_type) lines.push(`Ramo de atividade: ${contact.business_type}`)
   if (contact?.team_size != null) lines.push(`Técnicos/equipes: ${contact.team_size}`)
-  if (meta?.service_type) lines.push(`Tipo de servico: ${meta.service_type}`)
+  if (meta?.service_type) lines.push(`Tipo de serviço: ${meta.service_type}`)
   if (meta?.current_tool) lines.push(`Ferramenta atual: ${meta.current_tool}`)
   if (meta?.main_need) lines.push(`Necessidade: ${meta.main_need}`)
   if (meta?.additional_info) lines.push(`Info adicional: ${meta.additional_info}`)
   if (contact?.extra_info && contact.extra_info !== meta?.additional_info) lines.push(`Info adicional: ${contact.extra_info}`)
-  return lines.length > 0 ? lines.join("\n") : undefined
+  return lines.join("\n")
 }
 
 function OpportunityCard({
@@ -144,14 +205,16 @@ function OpportunityCard({
   onDelete?: (o: Opportunity) => void
   tags?: { tag_id: string; tag?: { name: string; color: string } }[]
   insight?: { priority: string; days_stalled: number } | null
-  lastContactMap?: Map<string, string>
+  lastContactMap?: Map<string, LastContactInfo>
   onCreateMeeting?: (o: Opportunity) => void
   onCreateTask?: (o: Opportunity) => void
   onCreateFollowUp?: (o: Opportunity) => void
 }) {
   const contact = opportunity.contact
   const assignee = opportunity.assignee
+  const info = opportunity.conversation_id ? lastContactMap?.get(opportunity.conversation_id) : undefined
   const idle = idleBadge(daysIdleLastContact(opportunity, lastContactMap))
+  const attr = attributionOf(opportunity, info)
 
   return (
     <Draggable draggableId={opportunity.id} index={index}>
@@ -167,7 +230,7 @@ function OpportunityCard({
         >
           <Card
             className="cursor-grab border-border/60 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
-            title={sdrMetadataTooltip(opportunity.metadata, contact)}
+            title={cardTooltip(opportunity, info)}
           >
             <CardContent className="p-3">
               <div className="flex items-start justify-between gap-2">
@@ -284,6 +347,45 @@ function OpportunityCard({
                 </DropdownMenu>
               </div>
 
+              {/* Datas e contexto: o que importa para priorizar o lead. */}
+              <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 border-t border-border/60 pt-2 text-[10px] text-muted-foreground">
+                <span className="flex items-center gap-1" title={`Entrada no funil: ${fullDate(opportunity.created_at)}`}>
+                  <Calendar className="h-3 w-3 shrink-0" />
+                  Entrada {shortDate(opportunity.created_at)}
+                </span>
+                <span
+                  className="flex items-center gap-1"
+                  title={info?.last_message_at ? `Última conversa: ${fullDate(info.last_message_at)}` : "Ainda sem conversa"}
+                >
+                  <MessageCircle className="h-3 w-3 shrink-0" />
+                  Últ. conversa {info?.last_message_at ? shortDate(info.last_message_at) : "—"}
+                </span>
+                <span className="flex items-center gap-1" title="Dias desde a entrada no funil">
+                  <Clock className="h-3 w-3 shrink-0" />
+                  {daysSince(opportunity.created_at)}d no funil
+                </span>
+                {opportunity.expected_close_date && (
+                  <span className="flex items-center gap-1" title="Previsão de fechamento">
+                    <Calendar className="h-3 w-3 shrink-0" />
+                    Previsão {shortDate(opportunity.expected_close_date)}
+                  </span>
+                )}
+                {attr && (
+                  <span className="col-span-2 flex items-center gap-1 font-medium text-foreground/80" title={attr.detail || undefined}>
+                    <Megaphone className="h-3 w-3 shrink-0" />
+                    {attr.label}
+                  </span>
+                )}
+              </div>
+              {info?.last_message_preview && (
+                <p
+                  className="mt-1.5 truncate rounded bg-muted/60 px-1.5 py-1 text-[10px] italic text-muted-foreground"
+                  title={info.last_message_preview}
+                >
+                  “{info.last_message_preview}”
+                </p>
+              )}
+
               {opportunity.value != null && (
                 <div className="mt-2 flex items-center gap-1 text-sm font-bold text-green-700 dark:text-green-400">
                   <DollarSign className="h-3.5 w-3.5" />
@@ -358,7 +460,7 @@ function KanbanColumn({
   opportunities: Opportunity[]
   oppTagsMap: Map<string, any[]>
   oppInsightsMap: Map<string, { priority: string; days_stalled: number }>
-  lastContactMap?: Map<string, string>
+  lastContactMap?: Map<string, LastContactInfo>
   onEdit: (o: Opportunity) => void
   onWin: (o: Opportunity) => void
   onLose: (o: Opportunity) => void
@@ -1264,7 +1366,7 @@ function QualifiedLeadsPanel({
   open: boolean
   onOpenChange: (v: boolean) => void
   opportunities: Opportunity[]
-  lastContactMap?: Map<string, string>
+  lastContactMap?: Map<string, LastContactInfo>
 }) {
   const qualified = useMemo(() => {
     return opportunities
@@ -1396,7 +1498,7 @@ export default function PipelinePage() {
   // Qualified leads panel
   const [qualifiedOpen, setQualifiedOpen] = useState(false)
   // Last contact (message) date per conversation
-  const [lastContactMap, setLastContactMap] = useState<Map<string, string>>(new Map())
+  const [lastContactMap, setLastContactMap] = useState<Map<string, LastContactInfo>>(new Map())
 
   // Load contacts and profiles.
   //
@@ -1558,15 +1660,22 @@ export default function PipelinePage() {
       .map((o) => o.conversation_id)
       .filter((id): id is string => !!id)
     if (convIds.length === 0) { setLastContactMap(new Map()); return }
-    const map = new Map<string, string>()
+    const map = new Map<string, LastContactInfo>()
     for (let i = 0; i < convIds.length; i += 200) {
       const chunk = convIds.slice(i, i + 200)
       supabase
         .from("conversations")
-        .select("id, last_message_at")
+        .select("id, last_message_at, last_message_preview, source, source_meta")
         .in("id", chunk)
         .then(({ data }) => {
-          for (const row of data ?? []) map.set(row.id, row.last_message_at)
+          for (const row of data ?? []) {
+            map.set(row.id, {
+              last_message_at: row.last_message_at,
+              last_message_preview: row.last_message_preview,
+              source: row.source,
+              source_meta: row.source_meta,
+            })
+          }
           setLastContactMap(new Map(map))
         })
     }
