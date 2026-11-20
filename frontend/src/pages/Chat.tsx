@@ -763,7 +763,9 @@ export default function ChatPage() {
       .order("last_message_at", { ascending: false, nullsFirst: false })
       .limit(500)
     if (isNetworkFilter(sourceFilter)) {
-      req = req.eq("source", "ad").eq("source_meta->network", sourceFilter)
+      // `->>` extrai texto; `->` retornaria jsonb e o PostgREST tentaria
+      // interpretar "google" como JSON (erro: invalid input syntax for type json).
+      req = req.eq("source", "ad").eq("source_meta->>network", sourceFilter)
     } else if (sourceFilter !== "all") {
       req = req.eq("source", sourceFilter)
     }
