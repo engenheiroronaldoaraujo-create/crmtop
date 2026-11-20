@@ -561,11 +561,10 @@ async function postProcessInbound(args: {
           .eq("conversation_id", conversationId)
           .maybeSingle()
 
-        // `status='active'` continua sendo a única forma de entrar. Para
-        // orgânicas/manual, esse status vem do botão "SDR Ativo" do humano;
-        // para ad/landing, da ativação automática acima. Se o humano está
-        // digitando, o frontend já pausou (paused_human) antes de chegar aqui.
-        const isActive = sdrConv?.status === "active"
+        // 'active' (SDR no comando) e 'transferred' (já encaminhou, mas ainda
+        // responde para não deixar o lead no vazio) podem entrar.
+        // 'paused_human' = humano assumiu: never.
+        const isActive = sdrConv?.status === "active" || sdrConv?.status === "transferred"
         const inCooldown = sdrConv?.last_auto_reply_at &&
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 

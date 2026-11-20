@@ -699,19 +699,17 @@ async function processMessage(
 
   // 4. Check conversation SDR state (OPT-IN por conversa).
   //
-  // Regra: o SDR NUNCA entra sozinho. Sem linha em `sdr_conversations` ou
-  // com qualquer status diferente de 'active', ele não responde. Só o
-  // humano ativa pelo botão "SDR Ativo" no chat (RPC `set_sdr_pause`).
-  // Se o humano está digitando, o frontend pausa (paused_human) antes —
-  // então aqui basta exigir 'active'.
+  // 'active' = SDR no comando. 'transferred' = já encaminhou ao especialista,
+  // mas continua respondendo o lead (sem agendar) para não deixá-lo no vazio
+  // enquanto o humano não entra. 'paused_human' = humano assumiu: PARA.
   const { data: sdrConv } = await supabase
     .from("sdr_conversations")
     .select("*")
     .eq("conversation_id", conversationId)
     .maybeSingle()
 
-  // Sem ativação explícita → nunca responde (exceto teste forçado).
-  if (!options.force && (!sdrConv || sdrConv.status !== "active")) {
+  const canReply = sdrConv && ["active", "transferred"].includes(sdrConv.status)
+  if (!options.force && !canReply) {
     const reason = !sdrConv ? "SDR aguardando ativação humana" : `SDR ${sdrConv.status}`
     return { action: "skip", response: reason }
   }
