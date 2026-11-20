@@ -765,7 +765,11 @@ export default function ChatPage() {
     if (isNetworkFilter(sourceFilter)) {
       // `->>` extrai texto; `->` retornaria jsonb e o PostgREST tentaria
       // interpretar "google" como JSON (erro: invalid input syntax for type json).
-      req = req.eq("source", "ad").eq("source_meta->>network", sourceFilter)
+      // O fallback em detected_via cobre conversas antigas gravadas antes de
+      // existir a chave `network` (detected_via='padrao_ctwa' = Meta CTWA).
+      req = sourceFilter === "meta"
+        ? req.eq("source", "ad").or("source_meta->>network.eq.meta,source_meta->>detected_via.eq.padrao_ctwa")
+        : req.eq("source", "ad").eq("source_meta->>network", sourceFilter)
     } else if (sourceFilter !== "all") {
       req = req.eq("source", sourceFilter)
     }
