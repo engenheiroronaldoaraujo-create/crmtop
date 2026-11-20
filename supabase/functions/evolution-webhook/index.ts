@@ -262,6 +262,12 @@ function mapMessageType(raw: RawMessage): {
       mediaMessage: null,
     };
   }
+  // Reação com emoji (👍❤️😂) — vinha como `unknown` vazio e o chat mostrava
+  // "Mensagem não suportada". Vira bolha de texto com o emoji.
+  if (message.reactionMessage) {
+    const text = String((message.reactionMessage as EvolutionMedia & { text?: unknown }).text ?? "");
+    if (text) return { type: "text", content: text, mediaMessage: null };
+  }
   const mediaTypes: Record<string, string> = {
     imageMessage: "image",
     audioMessage: "audio",
