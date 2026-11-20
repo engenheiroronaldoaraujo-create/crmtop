@@ -31,12 +31,18 @@ import {
 
 const PRES_DAYS = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"]
 
+// Mesmas opções dos filtros do Chat, para manter os dois painéis em consonância.
 const SDR_SOURCES = [
-  { value: "ad", label: "Anúncio", hint: "Click-to-WhatsApp (Google Ads e Meta Ads)" },
-  { value: "organic", label: "Orgânico", hint: "Mensagem espontânea" },
-  { value: "campaign", label: "Campanha", hint: "Origem legada de disparo" },
+  { value: "ad", label: "Todos os anúncios", hint: "Google Ads e Meta Ads (click-to-WhatsApp)" },
+  { value: "campaign", label: "Campanhas", hint: "Origem legada de disparo" },
   { value: "landing", label: "Landing page", hint: "Formulário do site (lead-webhook)" },
+  { value: "organic", label: "Orgânico", hint: "Mensagem espontânea" },
   { value: "manual", label: "Manual", hint: "Contato criado no CRM" },
+] as const
+
+const SDR_NETWORKS = [
+  { value: "google", label: "Google Ads" },
+  { value: "meta", label: "Meta Ads" },
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -263,29 +269,25 @@ export default function SDRSettings() {
       setSettings({ ...settings, ...patch })
       toast.success("Configuracoes salvas")
     } catch (e: any) {
-      // Fallback: se o sdr-engine em produção ainda é o código antigo
-      // (sem `allowed_sources` no whitelist → 400 "No valid fields to update"),
-      // tenta gravar direto na tabela (RLS: admin). Isso desbloqueia o
-      // checkbox assim que a migration 067 for aplicada, mesmo antes do
-      // redeploy da function.
+      // Fallback: se o sdr-engine em produção ainda é o código antigo (sem
+      // estes campos no whitelist → 400 "No valid fields to update"), grava
+      // direto na tabela (RLS: admin) como fazia a migration 067.
       const msg = String(e?.message ?? "")
-      if ("allowed_sources" in patch && /no valid fields/i.test(msg) && settings?.id) {
+      const filterPatch: Record<string, unknown> = {}
+      if ("allowed_sources" in patch) filterPatch.allowed_sources = patch.allowed_sources
+      if ("allowed_networks" in patch) filterPatch.allowed_networks = patch.allowed_networks
+      if (Object.keys(filterPatch).length > 0 && /no valid fields/i.test(msg) && settings?.id) {
         try {
           const { error } = await supabase
             .from("sdr_settings")
-            .update({ allowed_sources: patch.allowed_sources })
+            .update(filterPatch)
             .eq("id", settings.id)
           if (error) throw error
           setSettings({ ...settings, ...patch })
           toast.success("Configuracoes salvas")
           return
         } catch (e2: any) {
-          const msg2 = String(e2?.message ?? "")
-          if (/allowed_sources/i.test(msg2) || /column/i.test(msg2)) {
-            toast.error("Rode a migration 067 no SQL Editor do Supabase e recarregue a página.")
-          } else {
-            toast.error(msg2 || msg)
-          }
+          toast.error(String(e2?.message ?? msg))
           return
         }
       }
@@ -417,30 +419,55 @@ export default function SDRSettings() {
             <Separator />
             <div className="space-y-2">
               <Label className="text-sm font-medium">Origens que o SDR responde</Label>
-              <p className="text-xs text-muted-foreground">Desmarque uma origem para o SDR ignorar essas conversas.</p>
+              <p className="text-xs text-muted-foreground">Mesmos filtros do chat. Desmarque para o SDR ignorar essas conversas.</p>
               <div className="space-y-2 pt-1">
-                {SDR_SOURCES.map((s) => {
+                {(() => {
                   const allowed: string[] = Array.isArray(settings.allowed_sources)
                     ? settings.allowed_sources
                     : ["organic", "ad", "campaign", "landing", "manual"]
-                  const checked = allowed.includes(s.value)
+                  const networks: string[] = Array.isArray(settings.allowed_networks)
+                    ? settings.allowed_networks
+                    : ["google", "meta"]
                   return (
-                    <label key={s.value} className="flex items-center justify-between gap-2 cursor-pointer">
-                      <span className="text-sm">{s.label} <span className="text-xs text-muted-foreground">— {s.hint}</span></span>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          const next = e.target.checked
-                            ? [...allowed, s.value]
-                            : allowed.filter((v) => v !== s.value)
-                          handleSave({ allowed_sources: next })
-                        }}
-                        className="rounded"
-                      />
-                    </label>
+                    <>
+                      {SDR_SOURCES.map((s) => (
+                        <label key={s.value} className="flex items-center justify-between gap-2 cursor-pointer">
+                          <span className="text-sm">{s.label} <span className="text-xs text-muted-foreground">— {s.hint}</span></span>
+                          <input
+                            type="checkbox"
+                            checked={allowed.includes(s.value)}
+                            onChange={(e) => handleSave({
+                              allowed_sources: e.target.checked
+                                ? [...allowed, s.value]
+                                : allowed.filter((v) => v !== s.value),
+                            })}
+                            className="rounded"
+                          />
+                        </label>
+                      ))}
+                      <div className="ml-3 space-y-2 border-l-2 border-border pl-3 pt-1">
+                        <p className="text-xs font-medium text-muted-foreground">
+                          Redes de anúncio (quando “Todos os anúncios” está marcado)
+                        </p>
+                        {SDR_NETWORKS.map((n) => (
+                          <label key={n.value} className="flex items-center justify-between gap-2 cursor-pointer">
+                            <span className="text-sm">{n.label}</span>
+                            <input
+                              type="checkbox"
+                              checked={networks.includes(n.value)}
+                              onChange={(e) => handleSave({
+                                allowed_networks: e.target.checked
+                                  ? [...networks, n.value]
+                                  : networks.filter((v) => v !== n.value),
+                              })}
+                              className="rounded"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </>
                   )
-                })}
+                })()}
               </div>
             </div>
           </CardContent>

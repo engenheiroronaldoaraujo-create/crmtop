@@ -342,6 +342,8 @@ export type SDRSettings = {
   meeting_interval_min: number
   max_messages_per_conversation: number
   cooldown_seconds: number
+  allowed_sources: string[]
+  allowed_networks: string[]
   tone: string
   system_prompt: string | null
   code_prompt: string | null

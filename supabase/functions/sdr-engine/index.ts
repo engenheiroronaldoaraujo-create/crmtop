@@ -680,10 +680,19 @@ async function processMessage(
     const allowed: string[] | null = Array.isArray((settings as any)?.allowed_sources)
       ? (settings as any).allowed_sources as string[]
       : null
-    if (allowed) {
-      const source = (convRow as any)?.source ?? "organic"
-      if (!allowed.includes(source)) {
-        return { action: "skip", response: `Origem ${source} não habilitada para SDR` }
+    const source = (convRow as any)?.source ?? "organic"
+    if (allowed && !allowed.includes(source)) {
+      return { action: "skip", response: `Origem ${source} não habilitada para SDR` }
+    }
+    // Mesmo critério dos filtros do chat: dentro de 'ad', separa Google/Meta.
+    const allowedNetworks: string[] | null = Array.isArray((settings as any)?.allowed_networks)
+      ? (settings as any).allowed_networks as string[]
+      : null
+    if (source === "ad" && allowedNetworks) {
+      const meta = (convRow as any)?.source_meta ?? {}
+      const network = (meta.network as string | null) ?? "meta" // legado = Meta CTWA
+      if (!allowedNetworks.includes(network)) {
+        return { action: "skip", response: `Rede ${network} não habilitada para SDR` }
       }
     }
   }
@@ -1409,6 +1418,7 @@ Deno.serve(async (req) => {
         const allowedFields = [
           "enabled", "test_mode", "timezone", "instance_id",
           "allowed_sources",
+          "allowed_networks",
           "schedule_sunday", "schedule_monday", "schedule_tuesday",
           "schedule_wednesday", "schedule_thursday", "schedule_friday", "schedule_saturday",
           "schedule_start_time", "schedule_end_time",

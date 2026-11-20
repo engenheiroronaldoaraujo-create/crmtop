@@ -12,9 +12,12 @@ export type ActivationDecision = "activate" | "preserve" | "skip";
 
 export interface ActivationArgs {
   source: string | null;
+  /** Rede do anúncio em source_meta (google | meta); null = legado sem rede. */
+  network: string | null;
   enabled: boolean;
   testMode: boolean;
   allowedSources: string[] | null;
+  allowedNetworks: string[] | null;
   existingStatus: string | null;
 }
 
@@ -23,6 +26,11 @@ export function shouldAutoActivateSdr(args: ActivationArgs): ActivationDecision 
   if (!args.enabled || args.testMode) return "skip";
   if (!args.source || !["ad", "landing"].includes(args.source)) return "skip";
   if (args.allowedSources && !args.allowedSources.includes(args.source)) return "skip";
+  if (args.source === "ad" && args.allowedNetworks) {
+    // Conversa antiga sem `network` veio de Meta CTWA (único suporte na época).
+    const network = args.network ?? "meta";
+    if (!args.allowedNetworks.includes(network)) return "skip";
+  }
   // Linha existente = humano (ou o próprio SDR) já decidiu. Nunca reativar
   // uma conversa pausada/transferida.
   if (args.existingStatus) return "preserve";
@@ -41,22 +49,28 @@ export async function maybeAutoActivateSdr(
     enabled?: boolean;
     test_mode?: boolean;
     allowed_sources?: string[] | null;
+    allowed_networks?: string[] | null;
   } | null,
 ): Promise<ActivationDecision> {
   const [
     { data: conv },
     { data: existing },
   ] = await Promise.all([
-    supabase.from("conversations").select("source").eq("id", conversationId).maybeSingle(),
+    supabase.from("conversations").select("source, source_meta").eq("id", conversationId).maybeSingle(),
     supabase.from("sdr_conversations").select("status").eq("conversation_id", conversationId).maybeSingle(),
   ]);
+  const meta = ((conv as { source_meta?: unknown } | null)?.source_meta ?? {}) as Record<string, unknown>;
 
   const decision = shouldAutoActivateSdr({
     source: (conv as { source?: string | null } | null)?.source ?? null,
+    network: (meta.network as string | null) ?? null,
     enabled: Boolean(settings?.enabled),
     testMode: Boolean(settings?.test_mode),
     allowedSources: Array.isArray(settings?.allowed_sources)
       ? settings!.allowed_sources as string[]
+      : null,
+    allowedNetworks: Array.isArray(settings?.allowed_networks)
+      ? settings!.allowed_networks as string[]
       : null,
     existingStatus: (existing as { status?: string | null } | null)?.status ?? null,
   });
