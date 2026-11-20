@@ -44,7 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Antes o `fetchProfile` não era aguardado: existia uma janela em que
     // `loading === false` e `profile === null`. O `RequireAdmin` avalia
     // `profile?.role !== "admin"` nessa janela e expulsava o admin da rota
-    // (`/settings`, `/campaigns`, `/groups`, `/automations`) com `replace` —
+    // (`/settings`) com `replace` —
     // sem volta atrás. Bastava recarregar a página para ser jogado para "/".
     supabase.auth.getSession().then(async ({ data }) => {
       if (!active) return

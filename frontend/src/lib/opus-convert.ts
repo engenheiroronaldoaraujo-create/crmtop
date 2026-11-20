@@ -144,16 +144,8 @@ export async function toOggOpus(blob: Blob): Promise<Blob> {
   }
 }
 
-/**
- * Motivo da última falha de conversão, ou null se deu certo. O hook usa para
- * mostrar um aviso honesto no preview em vez de mandar o usuário para o
- * WhatsApp sem saber que o container é o errado.
- */
+/** Motivo da última falha de conversão, ou null se deu certo. */
 let lastConversionError: string | null = null
-
-export function getLastConversionError(): string | null {
-  return lastConversionError
-}
 
 /**
  * Aplica a conversão respeitando o teto de duração, para não pagar conversão

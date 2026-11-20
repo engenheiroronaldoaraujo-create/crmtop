@@ -70,32 +70,6 @@ export function adminUsersSetRole(user_id: string, role: "admin" | "vendedor") {
   return postJson("admin-users", { action: "set-role", user_id, role })
 }
 
-// ----- multi-tenant (workspaces) -----
-// postJson/createWorkspace/inviteMember já incluem o JWT do usuário via
-// getAccessToken() (Authorization: Bearer <token>) — checagem de permissão
-// é feita server-side na edge function admin-users.
-
-export function createWorkspace(name: string) {
-  return postJson("admin-users", { action: "create-workspace", name })
-}
-
-export function inviteMember(
-  workspaceId: string,
-  email: string,
-  role: "admin" | "vendedor",
-  temp_password: string,
-  full_name?: string,
-) {
-  return postJson("admin-users", {
-    action: "create",
-    email,
-    full_name: full_name ?? email.split("@")[0],
-    role,
-    temp_password,
-    workspace_id: workspaceId,
-  })
-}
-
 // ----- evolution-proxy (any authenticated user) -----
 
 export function proxyCreateInstance(instance_name: string, phone_number?: string) {
@@ -171,49 +145,6 @@ export function proxyLinkConversationPhone(conversation_id: string, phone: strin
   })
 }
 
-// ----- Grupos (@g.us) — posts programados + DM a quem comentar -----
-
-export function proxyListGroups(instance_id: string) {
-  return postJson("evolution-proxy", { action: "list-groups", instance_id })
-}
-
-export function groupPostCreate(input: {
-  instance_id: string
-  group_jid: string
-  group_name?: string | null
-  content: string
-  scheduled_at: string
-  window_hours?: number
-  dm_delay_min_s?: number
-  dm_delay_max_s?: number
-  dm_template?: string
-  pacing_seconds?: number
-  file?: File | null
-}) {
-  const formData = new FormData()
-  formData.append("action", "group-post-create")
-  formData.append("instance_id", input.instance_id)
-  formData.append("group_jid", input.group_jid)
-  formData.append("group_name", input.group_name ?? "")
-  formData.append("content", input.content)
-  formData.append("scheduled_at", input.scheduled_at)
-  if (input.window_hours !== undefined) formData.append("window_hours", String(input.window_hours))
-  if (input.dm_delay_min_s !== undefined) formData.append("dm_delay_min_s", String(input.dm_delay_min_s))
-  if (input.dm_delay_max_s !== undefined) formData.append("dm_delay_max_s", String(input.dm_delay_max_s))
-  if (input.dm_template !== undefined) formData.append("dm_template", input.dm_template)
-  if (input.pacing_seconds !== undefined) formData.append("pacing_seconds", String(input.pacing_seconds))
-  if (input.file) formData.append("file", input.file, input.file.name)
-  return postForm("evolution-proxy", formData)
-}
-
-export function groupPostCancel(post_id: string) {
-  return postJson("evolution-proxy", { action: "group-post-cancel", post_id })
-}
-
-export function groupPostDmCancel(engagement_id: string) {
-  return postJson("evolution-proxy", { action: "group-post-dm-cancel", engagement_id })
-}
-
 /**
  * Envia uma gravação do vendedor como bolha de voz.
  * `durationMs` é medido no cliente (o Evolution não devolve duração) e
@@ -268,10 +199,6 @@ export function sdrGetSettings() {
   return postJson("sdr-engine", { action: "get_settings", data: {} })
 }
 
-export function sdrGetDefaultPrompt() {
-  return postJson("sdr-engine", { action: "get_default_prompt", data: {} })
-}
-
 export function sdrUpdateSettings(settings: Record<string, unknown>) {
   return postJson("sdr-engine", { action: "update_settings", data: settings })
 }
@@ -290,97 +217,4 @@ export function sdrRequalifyRecent(days = 30) {
 
 export function sdrRequalifyStats(days = 30) {
   return postJson("sdr-engine", { action: "requalify_stats", data: { days } })
-}
-
-// ---------------------------------------------------------------------------
-// Zernio (WhatsApp oficial / Meta Cloud API)
-// ---------------------------------------------------------------------------
-
-export function zernioSetApiKey(api_key: string) {
-  return postJson("zernio-proxy", { action: "set-api-key", api_key })
-}
-
-export function zernioGetConfig() {
-  return postJson("zernio-proxy", { action: "get-config" })
-}
-
-export function zernioConnectStart(redirect_url: string) {
-  return postJson("zernio-proxy", { action: "connect-start", redirect_url })
-}
-
-export function zernioConnectComplete(input: {
-  account_id: string
-  profile_id?: string
-  username?: string
-}) {
-  return postJson("zernio-proxy", { action: "connect-complete", ...input })
-}
-
-export function zernioConnectResync() {
-  return postJson("zernio-proxy", { action: "connect-resync" })
-}
-
-export function zernioDisconnect() {
-  return postJson("zernio-proxy", { action: "disconnect" })
-}
-
-export function zernioSetupWebhook() {
-  return postJson("zernio-proxy", { action: "setup-webhook" })
-}
-
-export function zernioSyncTemplates() {
-  return postJson("zernio-proxy", { action: "sync-templates" })
-}
-
-export function zernioCreateTemplate(input: {
-  name: string
-  category: string
-  language: string
-  body_text: string
-  footer_text?: string
-}) {
-  return postJson("zernio-proxy", { action: "create-template", ...input })
-}
-
-export function zernioImportLibraryTemplate(input: {
-  name: string
-  language?: string
-  button_url?: string
-  button_phone?: string
-}) {
-  return postJson("zernio-proxy", { action: "import-library-template", ...input })
-}
-
-export function zernioCampaignCreate(input: {
-  name: string
-  description?: string
-  template_name: string
-  template_language: string
-  variable_mapping: Record<string, unknown>
-  scheduled_at?: string | null
-  pacing_batch_size?: number
-  pacing_interval_seconds?: number
-  recipients: Array<{ contact_id?: string | null; phone: string; name?: string | null; email?: string | null }>
-}) {
-  return postJson("zernio-proxy", { action: "campaign-create", ...input })
-}
-
-export function zernioCampaignSend(campaign_id: string) {
-  return postJson("zernio-proxy", { action: "campaign-send", campaign_id })
-}
-
-export function zernioCampaignSchedule(campaign_id: string, scheduled_at: string) {
-  return postJson("zernio-proxy", { action: "campaign-schedule", campaign_id, scheduled_at })
-}
-
-export function zernioCampaignCancel(campaign_id: string) {
-  return postJson("zernio-proxy", { action: "campaign-cancel", campaign_id })
-}
-
-export function zernioCampaignSync(campaign_id: string) {
-  return postJson("zernio-proxy", { action: "campaign-sync", campaign_id })
-}
-
-export function zernioCampaignTest(campaign_id: string, phone: string) {
-  return postJson("zernio-proxy", { action: "campaign-test", campaign_id, phone })
 }

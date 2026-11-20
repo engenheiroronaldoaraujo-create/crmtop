@@ -9,7 +9,6 @@
 // Ao mudar um limite aqui, mudar também no original e rodar
 // `deno test supabase/functions/_shared/audio_test.ts`.
 
-export const MAX_AUDIO_BYTES = 20 * 1024 * 1024
 export const MAX_AUDIO_DURATION_MS = 5 * 60 * 1000
 export const MIN_AUDIO_DURATION_MS = 500
 

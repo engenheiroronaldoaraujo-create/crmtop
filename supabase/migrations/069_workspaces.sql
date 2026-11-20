@@ -3,6 +3,10 @@
 -- Evolution e IA seguem centralizados no dono (sem workspace_secrets).
 -- Transcrição: ligada para todos (default google/gemini-2.5-flash-lite).
 
+-- No Supabase, pgcrypto fica no schema `extensions` (fora do search_path
+-- default). Sem isso, `gen_random_bytes` falha com SQLSTATE 42883.
+set search_path = public, extensions;
+
 create table if not exists public.workspaces (
   id uuid primary key default gen_random_uuid(),
   name text not null,

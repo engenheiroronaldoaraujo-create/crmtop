@@ -9,6 +9,7 @@
 // associação LID→telefone já é conhecida.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { mergeConversationAttribution } from "./attribution.ts";
 import { phoneLookupVariants } from "./evolution-identity.ts";
 
 export function serviceClient() {
@@ -180,11 +181,28 @@ export async function upsertConversation(
 ): Promise<string> {
   const { data: existing } = await supabase
     .from("conversations")
-    .select("id")
+    .select("id, source, source_meta")
     .eq("contact_id", contactId)
     .eq("instance_id", instanceId)
     .maybeSingle();
-  if (existing) return existing.id;
+  if (existing) {
+    // Atribuição pode chegar DEPOIS da criação da conversa: o lead preenche a
+    // landing (source='landing') e depois clica no anúncio no WhatsApp, ou o
+    // payload oficial da Meta aparece só numa mensagem posterior. Mesclar sem
+    // sobrescrever atribuição oficial nem marcação manual.
+    const merged = mergeConversationAttribution(existing as {
+      source?: string | null;
+      source_meta?: unknown;
+    }, origin);
+    if (merged) {
+      const { error: updErr } = await supabase
+        .from("conversations")
+        .update(merged)
+        .eq("id", existing.id);
+      if (updErr) console.warn("CONVERSATION_ATTRIBUTION_MERGE_FAILED", updErr.message);
+    }
+    return existing.id;
+  }
 
   // Sem origem explícita (anúncio), herda a origem do contato: contato
   // cadastrado manualmente no CRM gera conversa 'manual', não 'organic'.

@@ -1,5 +1,7 @@
 ﻿import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { detectAdAttribution } from "../_shared/attribution.ts";
 import { serviceClient, upsertContact, upsertConversation, type Supabase } from "../_shared/contacts.ts";
+import { maybeAutoActivateSdr } from "../_shared/sdr-activation.ts";
 import {
   isRelevantJid,
   normalizePhoneStrict,
@@ -7,12 +9,6 @@ import {
   phoneLookupVariants,
   resolveSendTarget,
 } from "../_shared/evolution-identity.ts";
-import {
-  engagementDueAt,
-  extractQuotedId,
-  isGroupJid,
-  isWithinEngagementWindow,
-} from "../_shared/group-posts.ts";
 import { createLidCacheStore, resolveLidPhone } from "../_shared/lid-phone-resolver.ts";
 import {
   DEFAULT_TRANSCRIPTION_MODEL,
@@ -28,12 +24,6 @@ const EVOLUTION_API_KEY = Deno.env.get("EVOLUTION_API_KEY") ?? "";
 const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") ?? "";
 
 const STORAGE_BUCKET = "whatsapp-media";
-
-// Primeira mensagem pré-preenchida pelo anúncio click-to-WhatsApp da Meta
-// (o lead clica e a WhatsApp sugere o texto; raramente editado). Também
-// cobre variações quando o lead adiciona algo antes/depois.
-const CTWA_FIRST_MSG_PATTERN =
-  /posso ter mais informa|pelo an[uú]ncio|vi o an[uú]ncio|seu an[uú]ncio/i;
 
 // Agenda trabalho pós-inserção (transcrição, SDR, automação) sem bloquear a
 // resposta ao webhook. No runtime Deno/Supabase `EdgeRuntime.waitUntil` mantém
@@ -293,90 +283,6 @@ function mapMessageType(raw: RawMessage): {
 }
 
 // ---------------------------------------------------------------------------
-// Grupos (@g.us) — engajamento em posts programados
-// ---------------------------------------------------------------------------
-
-/**
- * Marca engajamento de quem comentou um post programado publicado: reply ao
- * post OU qualquer mensagem dentro da janela (window_hours). 1 linha por
- * (post, contato) — reentrega do webhook cai no dedup (ignoreDuplicates).
- * Grupo não vira conversa/contato de funil: só registra o engajamento para
- * a DM programada do group-dm-runner.
- */
-async function handleGroupMessage(
-  supabase: Supabase,
-  instanceId: string,
-  groupJid: string,
-  raw: RawMessage,
-  workspaceId: string | null = null,
-): Promise<void> {
-  const fromMe = Boolean(raw.key?.fromMe);
-  if (fromMe) return; // ecos dos nossos envios (inclusive o publish) não contam
-
-  const participant = raw.key?.participant ?? (raw as Record<string, unknown>).participant as string | undefined;
-  if (!participant) {
-    console.warn("GROUP_MESSAGE_NO_PARTICIPANT", groupJid, raw.key?.id ?? "");
-    return;
-  }
-  const identity = normalizeWhatsAppIdentity({ remoteJid: participant });
-  const { phone, lid } = identity;
-  if (!phone && !lid) return;
-
-  const { type, content } = mapMessageType(raw);
-  if (type === "unknown" && !content) return; // reações e eventos sem texto
-
-  const evolutionId = raw.key?.id ?? null;
-  const ts = raw.messageTimestamp ? Number(raw.messageTimestamp) : null;
-  const commentedAt = ts ? new Date(ts * 1000) : new Date();
-
-  const { data: posts } = await supabase
-    .from("group_posts")
-    .select("id, published_message_id, published_at, window_hours, dm_delay_min_s, dm_delay_max_s")
-    .eq("instance_id", instanceId)
-    .eq("group_jid", groupJid)
-    .eq("status", "published")
-    .not("published_at", "is", null)
-    .limit(20);
-  if (!posts || posts.length === 0) return;
-
-  const quotedId = extractQuotedId(raw.message);
-  const rawPushName = raw.pushName ?? null;
-  const pushName = rawPushName && !/^\d{8,}$/.test(rawPushName) ? rawPushName : null;
-  const contactId = await upsertContact(supabase, phone, lid, pushName, null, workspaceId);
-
-  for (const post of posts) {
-    const publishedAt = new Date(post.published_at as string);
-    if (!isWithinEngagementWindow(publishedAt, commentedAt, post.window_hours as number)) continue;
-    const via = quotedId && post.published_message_id && quotedId === post.published_message_id
-      ? "reply"
-      : "window";
-    const { data: inserted } = await supabase.from("group_post_engagements").upsert(
-      {
-        post_id: post.id,
-        contact_id: contactId,
-        commented_at: commentedAt.toISOString(),
-        comment_message_id: evolutionId,
-        via,
-        dm_status: "pending",
-        dm_due_at: engagementDueAt(
-          commentedAt,
-          post.dm_delay_min_s as number,
-          post.dm_delay_max_s as number,
-        ).toISOString(),
-      },
-      { onConflict: "post_id, contact_id", ignoreDuplicates: true },
-    ).select("id").maybeSingle();
-    if (inserted?.id) {
-      console.info("GROUP_POST_ENGAGED", post.id, contactId, via);
-      void supabase.rpc("recalc_group_post_stats", { p_post_id: post.id }).then(
-        () => {},
-        (e: unknown) => console.error("GROUP_POST_STATS_FAILED", String(e)),
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Processamento de mensagem
 // ---------------------------------------------------------------------------
 
@@ -388,12 +294,8 @@ async function processMessage(
   workspaceId: string | null = null,
 ): Promise<void> {
   const jid = raw.key?.remoteJid ?? "";
-  // Grupos têm fluxo próprio (engajamento em posts programados): nunca viram
-  // conversa/contato de funil — isRelevantJid rejeita @g.us abaixo.
-  if (isGroupJid(jid)) {
-    await handleGroupMessage(supabase, instanceId, jid, raw, workspaceId);
-    return;
-  }
+  // Grupos (@g.us) são rejeitados por isRelevantJid — o CRM trata apenas
+  // conversas 1:1 (.leads de anúncio/landing).
   if (!isRelevantJid(jid)) {
     // Nunca descartar em silêncio: quedas de entrega só são diagnosticáveis
     // se o drop aparecer nos logs.
@@ -461,27 +363,17 @@ async function processMessage(
   const contactId = await upsertContact(supabase, phone, lid, pushName, jid, workspaceId);
   console.info(fromMe ? "EVOLUTION_MESSAGE_RECEIVED_OUTBOUND" : "EVOLUTION_MESSAGE_RECEIVED_INBOUND", evolutionId);
 
-  // Origem da conversa — aplicada apenas na CRIAÇÃO (upsertConversation não
-  // sobrescreve existentes). Dois caminhos, em ordem de confiança:
-  // 1. Atribuição oficial da Meta (key.advertiser, click-to-WhatsApp);
-  // 2. Heurística: o anúncio CTA da Meta pré-preenche a 1ª mensagem do lead
-  //    ("Olá! Posso ter mais informações sobre isso?") — padrão único, não
-  //    digita-se organicamente. Marcamos como 'ad' com detected_via.
+  // Origem da conversa — Meta CTWA (key.advertiser), Google Ads (UTMs/gclid)
+  // ou heurística da 1ª mensagem pré-preenchida. A mesclagem em conversas
+  // existentes fica em `_shared/attribution.ts` / `upsertConversation`: um
+  // lead que veio da landing e depois clicou no anúncio não perde a origem.
   const advertiser = !fromMe ? raw.key?.advertiser ?? raw.advertiser : undefined;
-  const hasAttribution = Boolean(advertiser?.id || advertiser?.source);
-  const ctwaHeuristic = !fromMe && CTWA_FIRST_MSG_PATTERN.test(content);
-  const origin = !fromMe && (hasAttribution || ctwaHeuristic)
-    ? {
-        source: "ad" as const,
-        meta: {
-          ad_id: advertiser?.id ?? null,
-          network: advertiser?.source ?? null,
-          cta_source_url: advertiser?.cta_source_url ?? null,
-          detected_via: hasAttribution ? "meta_attribution" : "padrao_ctwa",
-        },
-      }
-    : undefined;
-  const conversationId = await upsertConversation(supabase, contactId, instanceId, origin, workspaceId);
+  const origin = detectAdAttribution({
+    advertiser,
+    content,
+    isInbound: !fromMe,
+  });
+  const conversationId = await upsertConversation(supabase, contactId, instanceId, origin ?? undefined, workspaceId);
 
   let mediaUrl: string | null = null;
   let audioBase64: string | null = null;
@@ -547,21 +439,7 @@ async function processMessage(
     bumpUsage(supabase, workspaceId, fromMe ? { p_out: 1 } : { p_in: 1 });
   }
 
-  // Régua "sem resposta": eco outbound de mensagem enviada fora do CRM (ex.:
-  // direto do celular do SDR) reinicia o relógio da régua ativa da conversa.
-  // Mensagens do próprio runner caem no dedup acima (a bolha já foi inserida
-  // pelo runner) e não chegam aqui — ele agenda a próxima checagem sozinho.
-  if (isNewMessage && fromMe) {
-    scheduleBackground((async () => {
-      const { error: nrErr } = await supabase.rpc("noreply_touch", {
-        p_conversation_id: conversationId,
-        p_sent_at: sentAt,
-      });
-      if (nrErr) console.error("NOREPLY_TOUCH_FAILED", nrErr.message);
-    })());
-  }
-
-  // Enriquecimento (transcrição → SDR → automação) roda em background para o
+  // Enriquecimento (transcrição → SDR) roda em background para o
   // webhook responder já com a mensagem persistida (evita retry/queda de
   // entrega por timeout na Evolution). Só em linha NOVA (dedup).
   if (isNewMessage && !fromMe) {
@@ -605,19 +483,6 @@ async function postProcessInbound(args: {
     evolutionId, type, audioBase64, audioMimetype, hasPhone, workspaceId,
   } = args;
   let sdrContent = args.content;
-
-  // Régua "sem resposta": o lead respondeu — encerra o ciclo ativo. Se a
-  // resposta vem APÓS a régua esgotada, apenas registra (activity_log) para
-  // o humano revisar o card no funil — sem auto-retorno de estágio.
-  try {
-    const { data: nrResult } = await supabase.rpc("noreply_mark_replied", {
-      p_conversation_id: conversationId,
-      p_message_id: messageId,
-    });
-    if (nrResult && nrResult !== "none") console.info("NOREPLY_REPLY_DETECTED", nrResult);
-  } catch (e) {
-    console.warn("NOREPLY_MARK_REPLIED_FAILED", String(e));
-  }
 
   // Transcrição de áudio inbound (best-effort, só em linha nova).
   if (type === "audio" && audioBase64 && messageId) {
@@ -664,22 +529,26 @@ async function postProcessInbound(args: {
         : sdrQuery.single());
 
       if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
+        // Leads de anúncio/landing são atendidos na 1ª mensagem. A decisão
+        // nunca reativa uma conversa que o humano pausou/transferiu.
+        await maybeAutoActivateSdr(supabase, conversationId, sdrSettings)
+
         const { data: sdrConv } = await supabase
           .from("sdr_conversations")
           .select("status, last_auto_reply_at")
           .eq("conversation_id", conversationId)
           .maybeSingle()
 
-        // OPT-IN por conversa: sem status 'active' explícito (ativado pelo
-        // humano no chat), o SDR nunca entra — nem mesmo na primeira
-        // mensagem. Se o humano está digitando, o frontend já pausou
-        // (paused_human), então aqui basta exigir 'active'.
+        // `status='active'` continua sendo a única forma de entrar. Para
+        // orgânicas/manual, esse status vem do botão "SDR Ativo" do humano;
+        // para ad/landing, da ativação automática acima. Se o humano está
+        // digitando, o frontend já pausou (paused_human) antes de chegar aqui.
         const isActive = sdrConv?.status === "active"
         const inCooldown = sdrConv?.last_auto_reply_at &&
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 
         if (isActive && !inCooldown) {
-          await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, evolutionId)
+          await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, evolutionId, workspaceId ?? null)
         }
       }
     } catch (e) {
@@ -687,46 +556,6 @@ async function postProcessInbound(args: {
     }
   }
 
-  // Automação (engine de regras). Best-effort; nunca derruba o restante.
-  //
-  // Dois bugs que escondiam a falha total deste caminho:
-  // 1. `.catch()` preso ao promise do fetch nunca dispara num 401 — resposta
-  //    HTTP é promise resolvido. O status era descartado em silêncio.
-  // 2. O header Authorization faltava; sem ele o gate do plataforma devolvia
-  //    401 antes do handler rodar (mesmo padrão da chamada ao sdr-engine
-  //    acima, que manda Bearer <service_role>).
-  try {
-    // O segredo vai no HEADER, não na query string.
-    //
-    // Na URL ele vazava para os logs: o `catch` logava `String(e)` e o erro
-    // de rede do Deno inclui a URL completa (`...automation-engine?token=SEGREDO`).
-    // No header não aparece em access log, `Referer` nem histórico.
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/automation-engine`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-webhook-token": WEBHOOK_SECRET,
-        "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-      },
-      body: JSON.stringify({
-        event: "messages.upsert",
-        instance: instanceName,
-        data: { conversation_id: conversationId, contact_id: contactId, text: sdrContent, media_type: type },
-      }),
-    });
-    if (!res.ok) {
-      // Sem o corpo não dá pra saber se foi 401 do gate ou erro da regra.
-      const body = await res.text().catch(() => "");
-      console.error("AUTOMATION_KICK_FAILED", res.status, body.slice(0, 200));
-    }
-  } catch (e) {
-    // Só o nome/tipo do erro: a mensagem do Deno carrega a URL (e o segredo).
-    console.warn(
-      "AUTOMATION_KICK_NETWORK_ERROR",
-      e instanceof Error ? e.name : "unknown",
-      e instanceof Error ? e.message.replace(/https?:\/\/\S+/g, "<url>").slice(0, 200) : "",
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +569,7 @@ async function callSDREngine(
   messageContent: string,
   instanceName: string,
   messageId: string | null,
+  workspaceId: string | null,
 ): Promise<void> {
   console.info("SDR_ENGINE_CALL_START", { conversationId, instanceName, messageId })
   try {
@@ -757,6 +587,7 @@ async function callSDREngine(
           message_content: messageContent,
           instance_name: instanceName,
           message_id: messageId,
+          workspace_id: workspaceId,
         },
       }),
     })

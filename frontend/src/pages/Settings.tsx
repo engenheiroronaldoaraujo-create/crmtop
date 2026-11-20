@@ -12,9 +12,6 @@ const WhatsAppSettings = lazy(() => import("@/pages/WhatsAppSettings"))
 const AISettings = lazy(() => import("@/pages/AISettings"))
 const SDRSettings = lazy(() => import("@/pages/SDRSettings"))
 const TemplatesSettings = lazy(() => import("@/pages/TemplatesSettings"))
-const ApkSettings = lazy(() => import("@/pages/ApkSettings"))
-const CadencesSettings = lazy(() => import("@/pages/CadencesSettings"))
-const NoreplySettings = lazy(() => import("@/pages/NoreplySettings"))
 
 function TabFallback() {
   return (
@@ -41,9 +38,6 @@ export default function SettingsPage() {
             <TabsTrigger value="users">Usuários</TabsTrigger>
             <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>
             <TabsTrigger value="templates">Templates</TabsTrigger>
-            <TabsTrigger value="app">App Android</TabsTrigger>
-            <TabsTrigger value="cadences">Cadências</TabsTrigger>
-            <TabsTrigger value="noreply">Follow-up sem resposta</TabsTrigger>
             <TabsTrigger value="ai">Inteligência Artificial</TabsTrigger>
             <TabsTrigger value="sdr">SDR IA</TabsTrigger>
           </TabsList>
@@ -60,21 +54,6 @@ export default function SettingsPage() {
           <TabsContent value="templates">
             <Suspense fallback={<TabFallback />}>
               <TemplatesSettings />
-            </Suspense>
-          </TabsContent>
-          <TabsContent value="app">
-            <Suspense fallback={<TabFallback />}>
-              <ApkSettings />
-            </Suspense>
-          </TabsContent>
-          <TabsContent value="cadences">
-            <Suspense fallback={<TabFallback />}>
-              <CadencesSettings />
-            </Suspense>
-          </TabsContent>
-          <TabsContent value="noreply">
-            <Suspense fallback={<TabFallback />}>
-              <NoreplySettings />
             </Suspense>
           </TabsContent>
           <TabsContent value="ai">

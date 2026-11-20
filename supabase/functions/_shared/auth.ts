@@ -3,14 +3,14 @@
 // Autorização server-side das Edge Functions.
 //
 // Antes cada função tinha sua própria cópia de `requireUser`/`requireAdmin`
-// (admin-users, evolution-proxy, zernio-proxy, ai-service, deal-inspector) e
-// o sdr-engine não tinha nenhuma. Aí a segurança virou função da função:
-// um endpoint novo sem checagem é um endpoint aberto.
+// (admin-users, evolution-proxy, ai-service, deal-inspector) e o sdr-engine
+// não tinha nenhuma. Aí a segurança virou função da função: um endpoint novo
+// sem checagem é um endpoint aberto.
 //
 // Regra do projeto:
-//   - a plataforma (verify_jwt) é a 1ª camada, mas 11 das 14 funções
-//     desligaram verify_jwt porque são chamadas server-to-server pelo
-//     pg_cron/webhook. A camada real é SEMPRE esta;
+//   - a plataforma (verify_jwt) é a 1ª camada; as funções chamadas por
+//     webhook (verify_jwt=false) validam o token internamente aqui. A camada
+//     real é SEMPRE esta;
 //   - o papel (admin/vendedor) é sempre lido de `profiles.role` no banco,
 //     nunca de claim do cliente.
 

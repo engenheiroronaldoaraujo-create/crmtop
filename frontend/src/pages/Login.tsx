@@ -3,7 +3,6 @@ import { useLocation, useNavigate } from "react-router-dom"
 import { MessageCircle } from "lucide-react"
 
 import { useAuth } from "@/hooks/use-auth"
-import { APK_DOWNLOAD_URL } from "@/lib/apk"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -88,12 +87,6 @@ export default function LoginPage() {
           </form>
         </CardContent>
       </Card>
-      <a
-        href={APK_DOWNLOAD_URL}
-        className="text-sm text-primary underline underline-offset-4"
-      >
-        Baixar app Android (APK)
-      </a>
     </div>
   )
 }

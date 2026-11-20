@@ -119,50 +119,6 @@ export function useContactTags(contactId: string | null) {
 }
 
 // ---------------------------------------------------------------------------
-// useOpportunityTags
-// ---------------------------------------------------------------------------
-
-export function useOpportunityTags(opportunityId: string | null) {
-  const [oppTags, setOppTags] = useState<(any)[]>([])
-  const [loading, setLoading] = useState(true)
-
-  const refresh = useCallback(async () => {
-    if (!opportunityId) { setOppTags([]); setLoading(false); return }
-    setLoading(true)
-    const { data } = await supabase
-      .from("opportunity_tags")
-      .select("*, tag:tags(*)")
-      .eq("opportunity_id", opportunityId)
-    setOppTags(data ?? [])
-    setLoading(false)
-  }, [opportunityId])
-
-  useEffect(() => { refresh() }, [refresh])
-
-  const addTag = useCallback(async (tagId: string) => {
-    if (!opportunityId) return
-    const { error } = await supabase
-      .from("opportunity_tags")
-      .insert({ opportunity_id: opportunityId, tag_id: tagId })
-    if (error && error.code !== "23505") throw error
-    await refresh()
-  }, [opportunityId, refresh])
-
-  const removeTag = useCallback(async (tagId: string) => {
-    if (!opportunityId) return
-    const { error } = await supabase
-      .from("opportunity_tags")
-      .delete()
-      .eq("opportunity_id", opportunityId)
-      .eq("tag_id", tagId)
-    if (error) throw error
-    await refresh()
-  }, [opportunityId, refresh])
-
-  return { oppTags, loading, refresh, addTag, removeTag }
-}
-
-// ---------------------------------------------------------------------------
 // useGlobalSearch
 // ---------------------------------------------------------------------------
 

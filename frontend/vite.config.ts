@@ -1,8 +1,7 @@
-/// <reference types="vitest" />
 import path from "path"
 import { fileURLToPath } from "url"
 import react from "@vitejs/plugin-react"
-import { defineConfig } from "vite"
+import { defineConfig } from "vitest/config"
 import { VitePWA } from "vite-plugin-pwa"
 import { execSync } from "child_process"
 

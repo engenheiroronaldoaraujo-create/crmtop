@@ -12,7 +12,7 @@ import {
   Trash2,
   RefreshCw,
 } from "lucide-react"
-import { sdrGetSettings, sdrGetDefaultPrompt, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR, sdrRequalifyRecent, sdrRequalifyStats } from "@/lib/api"
+import { sdrGetSettings, sdrUpdateSettings, sdrGetMetrics, sdrTestSDR, sdrRequalifyRecent, sdrRequalifyStats } from "@/lib/api"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -32,9 +32,9 @@ import {
 const PRES_DAYS = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"]
 
 const SDR_SOURCES = [
-  { value: "ad", label: "Anúncio", hint: "Click-to-WhatsApp (Meta Ads)" },
+  { value: "ad", label: "Anúncio", hint: "Click-to-WhatsApp (Google Ads e Meta Ads)" },
   { value: "organic", label: "Orgânico", hint: "Mensagem espontânea" },
-  { value: "campaign", label: "Campanha", hint: "Disparo via Zernio" },
+  { value: "campaign", label: "Campanha", hint: "Origem legada de disparo" },
   { value: "landing", label: "Landing page", hint: "Formulário do site (lead-webhook)" },
   { value: "manual", label: "Manual", hint: "Contato criado no CRM" },
 ] as const
@@ -235,7 +235,6 @@ export default function SDRSettings() {
   const [requalifyStats, setRequalifyStats] = useState<{ analyzed: number; qualified: number; partial: number; skipped: number; errors: number } | null>(null)
   const [qualStats, setQualStats] = useState<{ conversations?: number; contacts?: number; complete?: number; partial?: number; missing?: number; error?: string } | null>(null)
   const [testing, setTesting] = useState(false)
-  const [defaultPrompt, setDefaultPrompt] = useState<string | null>(null)
   const [knowledgeFile, setKnowledgeFile] = useState<File | null>(null)
 
   const loadSettings = useCallback(async () => {
@@ -257,17 +256,6 @@ export default function SDRSettings() {
   }, [])
 
   useEffect(() => { loadSettings(); loadMetrics() }, [loadSettings, loadMetrics])
-
-  // Busca o prompt padrão do código uma vez, para exibição no campo vazio.
-  const loadDefaultPrompt = useCallback(async () => {
-    try {
-      const res = await sdrGetDefaultPrompt()
-      setDefaultPrompt(res.prompt ?? null)
-    } catch {
-      // silencioso
-    }
-  }, [])
-  useEffect(() => { loadDefaultPrompt() }, [loadDefaultPrompt])
 
   const handleSave = async (patch: Record<string, unknown>) => {
     try {
@@ -481,33 +469,15 @@ export default function SDRSettings() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <Label className="text-sm">Prompt principal</Label>
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    disabled={defaultPrompt === null || (settings.code_prompt ?? "") === (defaultPrompt ?? "")}
-                    onClick={async () => {
-                      if (defaultPrompt == null) return
-                      try {
-                        await sdrUpdateSettings({ code_prompt: defaultPrompt })
-                        setSettings({ ...settings, code_prompt: defaultPrompt })
-                        toast.success("Prompt padrão restaurado no campo")
-                      } catch (e: any) { toast.error(e.message) }
-                    }}
-                  >
-                    Restaurar padrão do código
-                  </Button>
-                </div>
               </div>
               <Textarea
                 className="min-h-[180px] font-mono text-xs"
-                value={settings.code_prompt ?? defaultPrompt ?? ""}
+                value={settings.code_prompt ?? ""}
                 onChange={(e) => handleSave({ code_prompt: e.target.value })}
-                placeholder={defaultPrompt ?? "Carregando prompt do código..."}
+                placeholder="Prompt principal do SDR (fonte única — sem fallback no código)..."
               />
               <p className="text-xs text-muted-foreground">
-                Vazio = usa o prompt da Sofia do código. O texto acima é o padrão carregado do código.
+                Fonte única do atendimento. Se vazio, o SDR não responde (fail-closed).
               </p>
             </div>
             <div className="space-y-2">

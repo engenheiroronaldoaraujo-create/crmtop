@@ -32,7 +32,6 @@ import {
   ZapOff,
   Mic,
   Square,
-  Timer,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -69,13 +68,11 @@ import type {
   Opportunity,
   Pipeline,
   PipelineStage,
-  NoreplyState,
 } from "@/lib/types"
 import { useAuth } from "@/hooks/use-auth"
 import { useContactTags, useTags } from "@/hooks/use-tags"
 import { useTemplates } from "@/hooks/use-templates"
 import { useAI } from "@/hooks/use-ai"
-import { useNoreplyActiveStates } from "@/hooks/use-noreply"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -110,11 +107,20 @@ import {
 
 type Filter = "all" | "mine" | "unassigned"
 
-type SourceFilter = "all" | ConversationSource
+type SourceFilter = "all" | ConversationSource | "google" | "meta"
+
+const NETWORK_FILTERS = ["google", "meta"] as const
+type NetworkFilter = typeof NETWORK_FILTERS[number]
+
+function isNetworkFilter(v: string): v is NetworkFilter {
+  return (NETWORK_FILTERS as readonly string[]).includes(v)
+}
 
 const SOURCE_OPTIONS: [SourceFilter, string][] = [
   ["all", "Todas as origens"],
-  ["ad", "Anúncios"],
+  ["ad", "Todos os anúncios"],
+  ["google", "Google Ads"],
+  ["meta", "Meta Ads"],
   ["campaign", "Campanhas"],
   ["landing", "Landing page"],
   ["organic", "Orgânico"],
@@ -136,6 +142,29 @@ const SOURCE_MARK_OPTIONS: [ConversationSource, string][] = [
 ]
 
 const SOURCE_FILTER_KEY = "chat-source-filter"
+
+/** Resumo da atribuição de anúncio/UTM gravada em conversations.source_meta. */
+function attributionLabel(conv: Conversation): string | null {
+  if (!conv.source || conv.source === "organic" || conv.source === "manual") return null
+  const meta = (conv.source_meta ?? {}) as Record<string, unknown>
+  const network = meta.network ?? meta.network_raw
+  const campaign = meta.utm_campaign ?? meta.ad_id ?? meta.click_id
+  const parts: string[] = []
+  if (network) parts.push(String(network).toUpperCase())
+  if (campaign) parts.push(String(campaign))
+  return parts.length ? parts.join(" · ") : null
+}
+
+function attributionTitle(conv: Conversation): string {
+  const meta = (conv.source_meta ?? {}) as Record<string, unknown>
+  return [
+    `Origem: ${SOURCE_MARK_OPTIONS.find(([k]) => k === conv.source)?.[1] ?? conv.source}`,
+    meta.detected_via ? `Detecção: ${String(meta.detected_via)}` : null,
+    meta.utm_source ? `UTM: ${String(meta.utm_source)}` : null,
+    meta.ad_id ? `Ad ID: ${String(meta.ad_id)}` : null,
+    meta.click_id ? `Click ID: ${String(meta.click_id)}` : null,
+  ].filter(Boolean).join("\n")
+}
 
 function initialSourceFilter(): SourceFilter {
   const stored = localStorage.getItem(SOURCE_FILTER_KEY)
@@ -438,17 +467,6 @@ function MessageStatus({ status }: { status: Message["status"] }) {
   }
 }
 
-/** Rótulo do prazo da próxima tentativa da régua ("próxima em ~2d"). */
-function formatNoreplyNext(iso: string | null): string {
-  if (!iso) return ""
-  const ms = new Date(iso).getTime() - Date.now()
-  if (ms <= 0) return "· próxima tentativa a caminho"
-  const hours = Math.max(1, Math.round(ms / 3600_000))
-  if (hours < 24) return `· próxima em ~${hours}h`
-  const days = Math.round(hours / 24)
-  return `· próxima em ~${days} ${days === 1 ? "dia" : "dias"}`
-}
-
 /**
  * Item da lista de conversas — memoizado.
  *
@@ -460,15 +478,11 @@ const ConversationItem = memo(function ConversationItem({
   selected,
   onSelect,
   tags = [],
-  noreply,
-  noreplyMax = 0,
 }: {
   conv: Conversation
   selected: boolean
   onSelect: (id: string) => void
   tags?: Tag[]
-  noreply?: NoreplyState
-  noreplyMax?: number
 }) {
   const name = conv.contact ? contactDisplayName(conv.contact) : conv.contact_id
   const closed = conv.status === "closed"
@@ -503,16 +517,6 @@ const ConversationItem = memo(function ConversationItem({
               <Badge variant="secondary" className="h-4 shrink-0 gap-1 rounded-full bg-violet-100 px-1.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
                 <Megaphone className="h-2.5 w-2.5" />
                 {SOURCE_BADGES[conv.source]}
-              </Badge>
-            )}
-            {noreply?.status === "active" && (
-              <Badge
-                variant="secondary"
-                title="Régua de follow-up automático em andamento nesta conversa"
-                className="h-4 shrink-0 gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-500/15 dark:text-amber-300"
-              >
-                <Timer className="h-2.5 w-2.5" />
-                {noreply.attempts_made}/{noreplyMax || "?"}
               </Badge>
             )}
           </p>
@@ -613,15 +617,6 @@ export default function ChatPage() {
   const [oppStageId, setOppStageId] = useState("")
   const [oppAllProfiles, setOppAllProfiles] = useState<Pick<Profile, "id" | "full_name">[]>([])
   void oppAllProfiles // reserved for assign dialog
-
-  // --- Régua de follow-up sem resposta (badges + cancelar por conversa) ---
-  const {
-    byConversation: noreplyByConversation,
-    maxAttempts: noreplyMaxAttempts,
-    refresh: refreshNoreplyStates,
-    cancel: cancelNoreplyState,
-  } = useNoreplyActiveStates()
-  const selectedNoreply = selectedId ? noreplyByConversation.get(selectedId) : undefined
 
   // --- Tags ---
   const { tags: allTags } = useTags()
@@ -767,7 +762,11 @@ export default function ChatPage() {
       .select("*, contact:contacts(*), assignee:profiles(id, full_name)")
       .order("last_message_at", { ascending: false, nullsFirst: false })
       .limit(500)
-    if (sourceFilter !== "all") req = req.eq("source", sourceFilter)
+    if (isNetworkFilter(sourceFilter)) {
+      req = req.eq("source", "ad").eq("source_meta->network", sourceFilter)
+    } else if (sourceFilter !== "all") {
+      req = req.eq("source", sourceFilter)
+    }
     const { data, error } = await req
     if (error) {
       toast.error(error.message)
@@ -997,43 +996,6 @@ export default function ChatPage() {
   useEffect(() => {
     if (isHumanTyping) void pauseSdrForHumanTyping()
   }, [isHumanTyping, pauseSdrForHumanTyping])
-
-  // Realtime da régua de follow-up: badge/contador atualizam quando o runner
-  // envia uma tentativa, o lead responde ou alguém cancela.
-  useEffect(() => {
-    let timer: number | undefined
-    let alive = true
-    const schedule = () => {
-      window.clearTimeout(timer)
-      timer = window.setTimeout(() => {
-        if (alive) refreshNoreplyStates()
-      }, 1500)
-    }
-    const channel = supabase
-      .channel("crm-noreply-states")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "noreply_states" },
-        schedule,
-      )
-      .subscribe()
-    return () => {
-      alive = false
-      window.clearTimeout(timer)
-      supabase.removeChannel(channel)
-    }
-  }, [refreshNoreplyStates])
-
-  const cancelNoreply = async () => {
-    const st = selectedNoreply
-    if (!st || st.status !== "active") return
-    try {
-      await cancelNoreplyState(st.id)
-      toast.success("Follow-up automático cancelado para esta conversa")
-    } catch (e: any) {
-      toast.error(e?.message ?? "Falha ao cancelar follow-up")
-    }
-  }
 
   // Realtime: conversation list updates — debounce para não re-buscar a lista
   // inteira a cada evento de um burst (ex.: reconciliação de madrugada).
@@ -1664,8 +1626,6 @@ export default function ChatPage() {
                 selected={c.id === selectedId}
                 onSelect={handleSelect}
                 tags={convTagsMap[c.contact_id ?? ""] ?? []}
-                noreply={noreplyByConversation.get(c.id)}
-                noreplyMax={noreplyMaxAttempts}
               />
             ))
           )}
@@ -1729,6 +1689,14 @@ export default function ChatPage() {
                       : "WhatsApp desconectado"
                     : "sem instância"}
                 </p>
+                {attributionLabel(selected) && (
+                  <p
+                    className="truncate text-[11px] font-semibold text-violet-600 dark:text-violet-300"
+                    title={attributionTitle(selected)}
+                  >
+                    {SOURCE_BADGES[selected.source] ?? "Origem"} · {attributionLabel(selected)}
+                  </p>
+                )}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1857,23 +1825,6 @@ export default function ChatPage() {
                 )}
               </div>
             </header>
-
-            {/* Régua de follow-up automático ativa nesta conversa */}
-            {selectedNoreply?.status === "active" && (
-              <div className="flex items-center justify-between gap-2 border-b border-border bg-amber-50 px-4 py-1.5 dark:bg-amber-500/10">
-                <p className="flex min-w-0 items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300">
-                  <Timer className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">
-                    <b>Follow-up automático</b> — tentativa {selectedNoreply.attempts_made}
-                    {noreplyMaxAttempts ? ` de ${noreplyMaxAttempts}` : ""}
-                    {" "}{formatNoreplyNext(selectedNoreply.next_check_at)}
-                  </span>
-                </p>
-                <Button variant="outline" size="sm" className="h-6 shrink-0" onClick={cancelNoreply}>
-                  Cancelar follow-up
-                </Button>
-              </div>
-            )}
 
             {/* Etiquetas do contato */}
             {selected?.contact_id && (

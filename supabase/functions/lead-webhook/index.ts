@@ -20,6 +20,7 @@
 //
 // GET sem body = healthcheck (exige token também).
 
+import { normalizeNetwork } from "../_shared/attribution.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, upsertContact } from "../_shared/contacts.ts";
 import { normalizePhoneStrict } from "../_shared/evolution-identity.ts";
@@ -124,6 +125,9 @@ Deno.serve(async (req) => {
     const v = str((body as Record<string, unknown>)[k]);
     if (v) utm[k] = v;
   }
+  // Rede normalizada para o painel de campanhas (o UTM bruto também fica).
+  const network = normalizeNetwork(str(utm.utm_source));
+  if (network) utm.network = network;
 
   // --- 1. Upsert contato (merge-aware, sem duplicar por variante do 9º dígito) ---
   //
@@ -262,32 +266,38 @@ Deno.serve(async (req) => {
   if (wantChat) {
     try {
       // Instância: a informada, senão a conectada, senão a primeira.
+      // O workspace da instância é necessário: o sdr-engine não responde
+      // conversas sem workspace conhecido (quota de IA).
       let instanceId: string | null = null;
+      let workspaceId: string | null = null;
       if (instanceNameInput) {
         const { data: inst } = await supabase
           .from("whatsapp_instances")
-          .select("id")
+          .select("id, workspace_id")
           .eq("instance_name", instanceNameInput)
           .maybeSingle();
         instanceId = inst?.id ?? null;
+        workspaceId = (inst as { workspace_id?: string | null } | null)?.workspace_id ?? null;
         if (!instanceId) chatSkipped = `instance '${instanceNameInput}' não encontrada`;
       } else {
         const { data: connected } = await supabase
           .from("whatsapp_instances")
-          .select("id")
+          .select("id, workspace_id")
           .eq("status", "connected")
           .order("created_at")
           .limit(1)
           .maybeSingle();
         instanceId = connected?.id ?? null;
+        workspaceId = (connected as { workspace_id?: string | null } | null)?.workspace_id ?? null;
         if (!instanceId) {
           const { data: first } = await supabase
             .from("whatsapp_instances")
-            .select("id")
+            .select("id, workspace_id")
             .order("created_at")
             .limit(1)
             .maybeSingle();
           instanceId = first?.id ?? null;
+          workspaceId = (first as { workspace_id?: string | null } | null)?.workspace_id ?? null;
         }
       }
 
@@ -308,6 +318,7 @@ Deno.serve(async (req) => {
               instance_id: instanceId,
               source: "landing",
               source_meta: { origin: "landing", created_via: "lead-webhook", ...utm },
+              ...(workspaceId ? { workspace_id: workspaceId } : {}),
             })
             .select("id")
             .single();
@@ -337,6 +348,7 @@ Deno.serve(async (req) => {
               type: "text",
               content,
               sent_at: sentAt,
+              ...(workspaceId ? { workspace_id: workspaceId } : {}),
             })
             .select("id")
             .single();

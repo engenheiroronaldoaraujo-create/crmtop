@@ -3,6 +3,9 @@
 -- o workspace default (00000000-0000-0000-0000-000000000001) + RLS por workspace.
 -- Evolution e IA seguem centralizados (sem segredo por workspace).
 
+-- `gen_random_bytes` vem do pgcrypto, que no Supabase vive em `extensions`.
+set search_path = public, extensions;
+
 -- 1. Colunas ---------------------------------------------------------------
 do $$
 declare

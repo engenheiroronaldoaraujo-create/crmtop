@@ -61,9 +61,9 @@ jobs:
       # Edge Functions: deploy de todas.
       #
       # SEM `--no-verify-jwt`: o deploy respeita o `verify_jwt` de cada
-      # função no config.toml (false nas 11 server-to-server, true em
-      # sdr-engine / ai-service / deal-inspector). Passar a flag abriria
-      # as três últimas para chamadas sem autenticação.
+      # função no config.toml (false em evolution-webhook/proxy, admin-users e
+      # lead-webhook; true em sdr-engine e ai-service, que são chamados pelo
+      # navegador com Bearer JWT). Passar a flag abriria estas últimas.
       - name: Deploy das Edge Functions
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

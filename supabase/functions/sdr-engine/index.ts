@@ -1,87 +1,13 @@
+import { attributionContextLines } from "../_shared/attribution.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { serviceClient, type Supabase } from "../_shared/contacts.ts";
 import { getOpenRouterKey } from "../_shared/secrets.ts";
-import { isServiceRole, requireAdmin, requireUser } from "../_shared/auth.ts";
+import { isServiceRole, requireAdmin } from "../_shared/auth.ts";
 import { bumpUsage, isAiQuotaExceeded } from "../_shared/workspace.ts";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 let cachedModel: string | null = null
-
-// ---------------------------------------------------------------------------
-// System prompt (protected - never modified by user)
-// ---------------------------------------------------------------------------
-
-const SYSTEM_PROMPT = `FORMATO DE RESPOSTA OBRIGATORIO:
-Responda APENAS com JSON valido e nada mais.
-Sem markdown, sem \`\`\`json, sem texto antes ou depois do JSON.
-O JSON deve ter EXATAMENTE estes campos:
-{
-  "response": "mensagem para enviar ao lead",
-  "intent": "qualification|pricing|human_request|other",
-  "temperature": "cold|warm|hot",
-  "suggested_action": "continue|transfer_human|schedule_callback",
-  "confidence": 0.9,
-  "extracted_info": {
-    "service_type": null,
-    "team_size": null,
-    "current_tool": null,
-    "main_need": null,
-    "additional_info": null
-  }
-}
-Nao adicione explicacoes fora do JSON.
-
-Voce e a Sofia, do ATENDATOP. Sistema para prestadores de servico.
-
-LINGUAGEM (REGRA INQUEBRAVEL):
-- Responda SEMPRE em portugues do Brasil.
-- Nunca use ingles, nem palavras ou frases em outro idioma.
-- So troque de idioma se o PRÓPRIO lead escrever em outro idioma (espelha o idioma dele).
-
-Seu papel:
-- Receber o lead com cordialidade
-- Entender rapidamente o servico que ele presta
-- Descobrir como ele controla sua operacao hoje
-- Identificar uma ou duas necessidades relevantes
-- Apresentar SOMENTE funcionalidades que facam sentido
-- Informar que um especialista ira entrar em contato
-
-MISSAO DE QUALIFICACAO (obrigatoria):
-Antes de transferir para o especialista, colete estes 3 pontos:
-1. RAMO DE ATIVIDADE: qual servico o lead presta (ex: empresa de ar-condicionado, eletricista, dedetizacao...)
-2. QUANTIDADE: quantos tecnicos/equipes ele tem na operacao (numero; pergunte com naturalidade, ex: "quantos tecnicos voce tem na equipe?")
-3. INFORMACOES ADICIONAIS: qualquer detalhe relevante que o lead passar (como opera hoje, dores, volume, expectativa)
-
-Preencha extracted_info em CADA resposta (use os valores ja coletados antes; null do que ainda nao sabe).
-- team_size deve ser numero (se "so eu mesmo", use 1; se "umas 5", use 5)
-- additional_info = resumo curto das informacoes extras passadas (nao duplicando main_need)
-Somente use suggested_action transfer_human quando:
-- o lead pedir humano/preco explicitamente, OU
-- tiver interesse claro e os 3 pontos estiverem coletados, OU
-- o lead já respondeu tudo mesmo sem você insistir (nao insista mais de 2 vezes pelo mesmo dado)
-Se pedir transferencia e faltar dado essencial, colete ou aceite o que tiver e informe a transferencia de qualquer forma.
-
-Regras:
-- Uma pergunta por vez, sempre
-- Nao repita perguntas ja feitas
-- Seja breve e natural como WhatsApp
-- Nao fale precos, planos ou descontos
-- Nao invente funcionalidades
-- Nao invente horarios
-
-Fluxo:
-1. Cumprimentar e entender o servico
-2. Perguntar como controla a operacao
-3. Identificar necessidade
-4. Mencionar funcionalidade relevante do AtendaTop
-5. Quando perceber interesse suficiente, informe:
-   "Obrigada pelas informacoes! Um dos nossos especialistas vai entrar em contato para te mostrar como o AtendaTop pode ajudar na sua operacao. Pode aguardar!"
-
-Se perguntarem preco: "Um especialista vai te orientar melhor sobre isso."
-Se pedirem humano: "Certo, um especialista ira retornar em breve!"
-
-Apenas o JSON.`;
 
 // ---------------------------------------------------------------------------
 // OpenRouter call
@@ -419,6 +345,7 @@ async function saveQualification(
   conversationId: string | null,
   extractedInfo: Record<string, string | null> | undefined,
   temperature: string,
+  attributionMeta: Record<string, string | null> = {},
 ): Promise<void> {
   if (!extractedInfo || typeof extractedInfo !== "object") return
 
@@ -454,6 +381,8 @@ async function saveQualification(
       if (k === "team_size" && teamSize != null) mergedMeta[k] = String(teamSize)
     }
     mergedMeta.team_size = teamSize != null ? String(teamSize) : mergedMeta.team_size
+    // Atribuição do anúncio viaja junto com a qualificação para o funil.
+    Object.assign(mergedMeta, attributionMeta)
 
     const complete = isQualificationComplete({
       business_type: mergedMeta.service_type,
@@ -598,6 +527,108 @@ interface ProcessOptions {
    * vive só na chamada — nada global é tocado.
    */
   force?: boolean;
+  workspaceId?: string | null;
+}
+
+/** Config por workspace (multi-tenant); legado sem workspace cai na global. */
+async function loadSdrSettings(
+  supabase: Supabase,
+  workspaceId: string | null,
+): Promise<Record<string, any>> {
+  if (workspaceId) {
+    const { data } = await supabase
+      .from("sdr_settings")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .limit(1)
+      .maybeSingle()
+    if (data) return data as Record<string, any>
+  }
+  const { data } = await supabase
+    .from("sdr_settings")
+    .select("*")
+    .limit(1)
+    .maybeSingle()
+  // Objeto vazio mantém o fail-closed dos guards (`!settings.enabled`).
+  return (data as Record<string, any>) ?? {}
+}
+
+/**
+ * agenda_demo/callback de verdade: antes o SDR só criava a oportunidade e
+ * dizia ao lead que um especialista iria ligar — nada era agendado.
+ * Usa os presentation_slots ativos; o próximo horário livre em até 14 dias.
+ */
+async function createSdrSchedule(
+  supabase: Supabase,
+  opportunityId: string | null,
+  contactId: string,
+  action: "schedule_demo" | "schedule_callback",
+  slots: Array<{ day_of_week: number; start_time: string; end_time: string }>,
+  settings: Record<string, any>,
+): Promise<void> {
+  if (!opportunityId || !Array.isArray(slots) || slots.length === 0) return
+  try {
+    const now = new Date()
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now)
+    const dowNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    const todayDow = dowNames.indexOf(parts.find((p) => p.type === "weekday")?.value ?? "Mon")
+    const nowMin = Number(parts.find((p) => p.type === "hour")?.value ?? 0) * 60 +
+      Number(parts.find((p) => p.type === "minute")?.value ?? 0)
+    const dateStr = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(now)
+    const [y, mo, d] = dateStr.split("-").map(Number)
+
+    let startUtc: Date | null = null
+    for (let offset = 0; offset < 14 && !startUtc; offset++) {
+      const dow = (todayDow + offset + 7) % 7
+      const candidates = slots
+        .filter((s) => Number(s.day_of_week) === dow)
+        .map((s) => {
+          const [h, m] = String(s.start_time).split(":").map(Number)
+          return { h: h || 0, m: m || 0 }
+        })
+        .filter((c) => offset > 0 || c.h * 60 + c.m > nowMin + 30)
+        .sort((a, b) => (a.h * 60 + a.m) - (b.h * 60 + b.m))
+      if (candidates.length === 0) continue
+      // America/Sao_Paulo não tem DST desde 2019: UTC-3 o ano todo.
+      startUtc = new Date(Date.UTC(y, mo - 1, d + offset, candidates[0].h + 3, candidates[0].m))
+    }
+    if (!startUtc) return
+
+    const duration = Number(settings.meeting_duration_minutes) || 30
+    const endUtc = new Date(startUtc.getTime() + duration * 60_000)
+    if (action === "schedule_demo") {
+      await supabase.from("meetings").insert({
+        opportunity_id: opportunityId,
+        contact_id: contactId,
+        title: "Apresentação AtendaTop (agendada pelo SDR)",
+        description: "Reunião agendada automaticamente pelo SDR IA.",
+        start_at: startUtc.toISOString(),
+        end_at: endUtc.toISOString(),
+        status: "scheduled",
+      })
+    } else {
+      await supabase.from("opportunity_tasks").insert({
+        opportunity_id: opportunityId,
+        contact_id: contactId,
+        title: "Retorno de callback (agendado pelo SDR)",
+        task_type: "follow_up",
+        due_at: startUtc.toISOString(),
+        status: "pending",
+        priority: "high",
+      })
+    }
+    console.info("SDR_SCHEDULE_CREATED", action, startUtc.toISOString())
+  } catch (e) {
+    console.warn("SDR_SCHEDULE_FAILED", String(e))
+  }
 }
 
 async function processMessage(
@@ -608,13 +639,18 @@ async function processMessage(
   instanceName: string,
   messageId: string,
   options: ProcessOptions = {},
+  workspaceId: string | null = null,
 ): Promise<{ action: string; response?: string }> {
-  // 1. Check SDR settings
-  const { data: settings } = await supabase
-    .from("sdr_settings")
-    .select("*")
-    .limit(1)
-    .single()
+  // 1. Check SDR settings — escopo do workspace da conversa, não um `.single()`
+  // global (que podia aplicar o prompt/modelo de outro tenant ou até lançar).
+  const settings = await loadSdrSettings(supabase, workspaceId ?? options.workspaceId ?? null)
+
+  // Uma única leitura da conversa serve para origem, workspace e prompt.
+  const { data: convRow } = await supabase
+    .from("conversations")
+    .select("source, source_meta, workspace_id")
+    .eq("id", conversationId)
+    .maybeSingle()
 
   if (!options.force) {
     if (!settings || !settings.enabled) {
@@ -645,12 +681,7 @@ async function processMessage(
       ? (settings as any).allowed_sources as string[]
       : null
     if (allowed) {
-      const { data: conv } = await supabase
-        .from("conversations")
-        .select("source")
-        .eq("id", conversationId)
-        .maybeSingle()
-      const source = (conv as any)?.source ?? "organic"
+      const source = (convRow as any)?.source ?? "organic"
       if (!allowed.includes(source)) {
         return { action: "skip", response: `Origem ${source} não habilitada para SDR` }
       }
@@ -704,12 +735,8 @@ async function processMessage(
   // 7.5. Quota de IA do workspace (multi-tenant). Resolve o dono pela
   // conversa; sem workspace conhecido pula sem chamar a LLM, e com quota
   // estourada também (skip com reason, sem consumir OpenRouter).
-  const { data: convWs } = await supabase
-    .from("conversations")
-    .select("workspace_id")
-    .eq("id", conversationId)
-    .maybeSingle()
-  const sdrWorkspaceId = (convWs as { workspace_id: string | null } | null)?.workspace_id ?? null
+  const sdrWorkspaceId = (convRow as { workspace_id?: string | null } | null)?.workspace_id ??
+    workspaceId ?? options.workspaceId ?? null
   if (!sdrWorkspaceId) {
     return { action: "skip", response: "workspace desconhecido" }
   }
@@ -729,9 +756,15 @@ async function processMessage(
   // 8. Get contact context
   const { data: contact } = await supabase
     .from("contacts")
-    .select("name, phone, push_name")
+    .select("name, phone, push_name, opted_out")
     .eq("id", contactId)
     .single()
+
+  // Opt-out ANTES da LLM: antes a checagem ficava no webhook, depois do
+  // retorno do engine — o lead opt-out ainda gastava token e gerava log.
+  if ((contact as any)?.opted_out) {
+    return { action: "skip", response: "Contato com opt-out" }
+  }
 
   // 9. Get available presentation slots
   const now = new Date()
@@ -769,11 +802,21 @@ async function processMessage(
     })
     .join("\n")
 
-  // 11. Build prompt - prompt principal (code_prompt se preenchido, senão o
-  // padrão do código) + prompt adicional (system_prompt) concatenado no final.
-  const basePrompt = settings.code_prompt?.trim()
-    ? settings.code_prompt
-    : SYSTEM_PROMPT
+  // 11. Build prompt - fonte única: painel (sdr_settings.code_prompt)
+  // + prompt adicional (system_prompt) + base de conhecimento.
+  // Fail-closed: sem prompt no painel, não chama a LLM.
+  const basePrompt = settings.code_prompt?.trim() ?? ""
+  if (!basePrompt) {
+    await supabase.from("sdr_logs").insert({
+      conversation_id: conversationId,
+      contact_id: contactId,
+      message_id: messageId,
+      status: "failed",
+      error: "Prompt principal não configurado no painel (sdr_settings.code_prompt)",
+      model: settings.primary_model,
+    }).then(() => {}, () => {})
+    return { action: "error", response: "Prompt principal não configurado no painel" }
+  }
   const extraPrompt = settings.system_prompt?.trim() ?? ""
   const knowledgeBase = settings.knowledge_base?.trim() ?? ""
 
@@ -782,8 +825,22 @@ async function processMessage(
   if (knowledgeBase) promptParts.push(`BASE DE CONHECIMENTO:\n${knowledgeBase}`)
   const systemMsg = promptParts.join("\n\n")
 
+  // A IA precisa saber de onde veio o lead — antes era cega à atribuição e
+  // não podia personalizar o atendimento ("vi que você veio pelo anúncio...").
+  const convMeta = (convRow as any)?.source_meta ?? {}
+  const attributionLines = attributionContextLines(
+    (convRow as any)?.source ?? null,
+    convMeta,
+  )
+  // Metadados da oportunidade: permite atribuir receita do funil ao anúncio.
+  const attributionMeta: Record<string, string | null> = {}
+  if ((convRow as any)?.source) attributionMeta.source = String((convRow as any).source)
+  for (const key of ["network", "ad_id", "click_id", "utm_campaign", "utm_source", "detected_via"]) {
+    if (convMeta[key]) attributionMeta[key] = String(convMeta[key])
+  }
+
   // Use the conversation as the user message (includes the new message naturally)
-  const userMsg = `Conversa até agora:
+  const userMsg = `${attributionLines.length ? attributionLines.join("\n") + "\n\n" : ""}Conversa até agora:
 ${conversationContext || "(primeiro contato)"}
 
 Contato: ${contact?.name ?? contact?.push_name ?? "Desconhecido"}
@@ -800,7 +857,7 @@ Responda a última mensagem do CLIENTE.`
     const result = await callAI(supabase, [
       { role: "system", content: systemMsg },
       { role: "user", content: userMsg },
-    ], { temperature: 0.7, max_tokens: 800 })
+    ], { temperature: 0.7, max_tokens: 800, model: settings.primary_model || undefined })
     aiResponse = result.content
     const reported = (result.usage as any)?.total_tokens
     aiTokens = typeof reported === "number" && reported > 0
@@ -852,7 +909,7 @@ Responda a última mensagem do CLIENTE.`
   }
 
   // 13. Persist qualification data (structured fields + auto-stage)
-  await saveQualification(supabase, contactId, conversationId, parsed.extracted_info, parsed.temperature)
+  await saveQualification(supabase, contactId, conversationId, parsed.extracted_info, parsed.temperature, attributionMeta)
 
   // 14. Handle actions based on suggested_action
   if (parsed.suggested_action === "transfer_human") {
@@ -862,7 +919,7 @@ Responda a última mensagem do CLIENTE.`
       contactId,
       conversationId,
       parsed.temperature,
-      parsed.extracted_info,
+      { ...parsed.extracted_info, ...attributionMeta },
       contact?.push_name ?? null,
       contact?.phone ?? null,
     )
@@ -901,7 +958,7 @@ Responda a última mensagem do CLIENTE.`
       contactId,
       conversationId,
       parsed.temperature,
-      parsed.extracted_info,
+      { ...parsed.extracted_info, ...attributionMeta },
       contact?.push_name ?? null,
       contact?.phone ?? null,
     )
@@ -930,6 +987,16 @@ Responda a última mensagem do CLIENTE.`
         })
         .then(() => {}, () => {})
     }
+
+    // Antes nada era agendado: cria reunião/tarefa no próximo horário livre.
+    await createSdrSchedule(
+      supabase,
+      oppId,
+      contactId,
+      parsed.suggested_action as "schedule_demo" | "schedule_callback",
+      (slots ?? []) as Array<{ day_of_week: number; start_time: string; end_time: string }>,
+      settings,
+    )
   }
 
   // 14. Update conversation state (only for continue/schedule actions, not fallback)
@@ -1298,16 +1365,7 @@ Deno.serve(async (req) => {
     // rota de admin.
     const internal = isServiceRole(req);
     if (!internal) {
-      switch (action) {
-        case "get_default_prompt":
-          // Prompt padrão do código (não é o configurado) — qualquer usuário
-          // autenticado pode ver.
-          await requireUser(req, supabase);
-          break;
-        default:
-          await requireAdmin(req, supabase);
-          break;
-      }
+      await requireAdmin(req, supabase);
     }
 
     switch (action) {
@@ -1315,8 +1373,11 @@ Deno.serve(async (req) => {
         if (!internal) {
           return jsonResponse(403, { error: "forbidden: internal action" });
         }
-        const { conversation_id, contact_id, message_content, instance_name, message_id } = data as any
-        const result = await processMessage(supabase, conversation_id, contact_id, message_content, instance_name, message_id)
+        const { conversation_id, contact_id, message_content, instance_name, message_id, workspace_id } = data as any
+        const result = await processMessage(
+          supabase, conversation_id, contact_id, message_content, instance_name, message_id,
+          {}, workspace_id ?? null,
+        )
         // NOTE: message sending is handled by the webhook (callSDREngine)
         return jsonResponse(200, { ok: true, ...result })
       }
@@ -1335,10 +1396,6 @@ Deno.serve(async (req) => {
         const limit = Number.isFinite(limitRaw) && limitRaw >= 1 ? Math.min(limitRaw, 150) : 100
         const stats = await requalifyRecent(supabase, days, limit)
         return jsonResponse(200, { ok: true, days, ...stats })
-      }
-
-      case "get_default_prompt": {
-        return jsonResponse(200, { ok: true, prompt: SYSTEM_PROMPT })
       }
 
       case "get_settings": {

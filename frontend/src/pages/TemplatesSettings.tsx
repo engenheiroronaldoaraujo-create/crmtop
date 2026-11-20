@@ -9,8 +9,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { ZernioTemplates } from "@/components/ZernioTemplates"
 import {
   Table,
   TableBody,
@@ -208,18 +206,5 @@ function ChatTemplates() {
 }
 
 export default function TemplatesSettings() {
-  return (
-    <Tabs defaultValue="chat">
-      <TabsList>
-        <TabsTrigger value="chat">Respostas do chat</TabsTrigger>
-        <TabsTrigger value="meta">Templates oficiais (Meta)</TabsTrigger>
-      </TabsList>
-      <TabsContent value="chat" className="pt-2">
-        <ChatTemplates />
-      </TabsContent>
-      <TabsContent value="meta" className="pt-2">
-        <ZernioTemplates />
-      </TabsContent>
-    </Tabs>
-  )
+  return <ChatTemplates />
 }
