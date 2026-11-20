@@ -974,7 +974,10 @@ export default function ChatPage() {
   // exige reativação manual pelo botão "SDR".
   const typingPauseRef = useRef<string | null>(null)
   const pauseSdrForHumanTyping = useCallback(async () => {
-    if (!selectedId || sdrStatus !== "active") return
+    if (!selectedId) return
+    // Mesmo sem linha em sdr_conversations (SDR nunca ativo aqui) o humano
+    // assumiu: cria o marcador paused_human para que a auto-ativação de
+    // anúncio/landing nunca ligue a IA depois.
     if (typingPauseRef.current === selectedId) return
     typingPauseRef.current = selectedId
     try {
@@ -990,7 +993,7 @@ export default function ChatPage() {
       // mesmo se esta pausa falhar; não quebra a digitação.
       typingPauseRef.current = null
     }
-  }, [selectedId, sdrStatus])
+  }, [selectedId])
 
   // Reseta o guarda ao trocar de conversa.
   useEffect(() => {

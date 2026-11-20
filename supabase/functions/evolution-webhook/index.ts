@@ -439,6 +439,28 @@ async function processMessage(
     bumpUsage(supabase, workspaceId, fromMe ? { p_out: 1 } : { p_in: 1 });
   }
 
+  // Humano respondeu pelo próprio celular (fora do CRM): se a conversa ainda
+  // não tem decisão de SDR, cria o marcador paused_human. Assim a auto-ativação
+  // de anúncio/landing nunca liga a IA depois que o humano assumiu. Se já
+  // existe linha (inclusive 'active', caso dos ecos do SDR), não mexe.
+  if (isNewMessage && fromMe) {
+    scheduleBackground((async () => {
+      const { data: existing } = await supabase
+        .from("sdr_conversations")
+        .select("status")
+        .eq("conversation_id", conversationId)
+        .maybeSingle();
+      if (existing) return;
+      await supabase.rpc("set_sdr_pause", {
+        p_conversation_id: conversationId,
+        p_paused: true,
+      }).then(
+        () => {},
+        (err) => console.warn("SDR_PAUSE_ON_PHONE_REPLY_FAILED", String(err)),
+      );
+    })());
+  }
+
   // Enriquecimento (transcrição → SDR) roda em background para o
   // webhook responder já com a mensagem persistida (evita retry/queda de
   // entrega por timeout na Evolution). Só em linha NOVA (dedup).
@@ -606,6 +628,19 @@ async function callSDREngine(
         "schedule_callback",
         "schedule_demo",
       ])
+
+      // Re-checagem depois da LLM: se o humano assumiu/pausou enquanto a IA
+      // pensava, a resposta não vai para o lead. 'transferred' é permitido
+      // (foi o próprio SDR que decidiu entregar ao humano nesta resposta).
+      const { data: sdrNow } = await supabase
+        .from("sdr_conversations")
+        .select("status")
+        .eq("conversation_id", conversationId)
+        .maybeSingle();
+      if (sdrNow?.status === "paused_human") {
+        console.info("SDR_SEND_CANCELLED_HUMAN_TOOK_OVER", conversationId);
+        return;
+      }
 
       // Opt-out: lead que pediu para não receber NUNCA recebe auto-reply.
       if (result.response && SEND_ACTIONS.has(result.action)) {

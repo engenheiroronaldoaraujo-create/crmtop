@@ -972,9 +972,9 @@ Responda a última mensagem do CLIENTE.`
       contact?.phone ?? null,
     )
 
-    // Update SDR conversation
+    // Atualiza apenas metadados/oportunidade: NUNCA reativa o SDR aqui.
+    // Se o humano pausou enquanto a IA respondia, ele continua pausado.
     const sdrUpdate: Record<string, unknown> = {
-      status: "active",
       metadata: { extracted_info: parsed.extracted_info, temperature: parsed.temperature },
     }
     if (oppId) sdrUpdate.opportunity_id = oppId

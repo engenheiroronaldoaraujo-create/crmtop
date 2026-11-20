@@ -247,6 +247,19 @@ async function recordOutboundMessage(
       .then(() => {}, () => {});
   }
 
+  // Humano enviou pelo CRM: o SDR fica pausado nesta conversa até o humano
+  // reativar explicitamente. Vale também para conversas que ainda não tinham
+  // linha em sdr_conversations — o RPC cria o marcador paused_human.
+  if (status === "sent" && conversationId) {
+    await supabase.rpc("set_sdr_pause", {
+      p_conversation_id: conversationId,
+      p_paused: true,
+    }).then(
+      () => {},
+      (err) => console.warn("SDR_PAUSE_ON_HUMAN_SEND_FAILED", String(err)),
+    );
+  }
+
   return { conversationId, messageId };
 }
 
