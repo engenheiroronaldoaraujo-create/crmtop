@@ -3,8 +3,8 @@
 //
 // O guard do sdr-engine continua exigindo `sdr_conversations.status='active'`.
 // A única mudança é QUEM cria essa linha: antes só o humano (botão "SDR Ativo"
-// no chat), agora também o webhook — mas somente para conversas de anúncio e
-// somente se o humano ainda não tiver tomado uma decisão.
+// no chat), agora também o webhook — desde que a origem esteja habilitada em
+// allowed_sources e o humano ainda não tenha tomado uma decisão na conversa.
 
 import type { Supabase } from "./contacts.ts";
 
@@ -24,7 +24,9 @@ export interface ActivationArgs {
 /** Decisão pura, sem I/O — testável. */
 export function shouldAutoActivateSdr(args: ActivationArgs): ActivationDecision {
   if (!args.enabled || args.testMode) return "skip";
-  if (!args.source || !["ad", "landing"].includes(args.source)) return "skip";
+  // Autoativa em QUALQUER origem habilitada em allowed_sources. O opt-in
+  // humano continua valendo para pausar: basta o humano digitar/assumir.
+  if (!args.source) return "skip";
   if (args.allowedSources && !args.allowedSources.includes(args.source)) return "skip";
   if (args.source === "ad" && args.allowedNetworks) {
     // Conversa antiga sem `network` veio de Meta CTWA (único suporte na época).

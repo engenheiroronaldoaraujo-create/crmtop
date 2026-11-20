@@ -16,9 +16,11 @@ Deno.test("auto-ativa ad e landing", () => {
   assertEquals(shouldAutoActivateSdr({ ...base, source: "landing" }), "activate");
 });
 
-Deno.test("não ativa origem orgânica/manual", () => {
-  assertEquals(shouldAutoActivateSdr({ ...base, source: "organic" }), "skip");
-  assertEquals(shouldAutoActivateSdr({ ...base, source: "manual" }), "skip");
+Deno.test("auto-ativa orgânica e manual quando habilitadas", () => {
+  const all = ["organic", "ad", "campaign", "landing", "manual"];
+  assertEquals(shouldAutoActivateSdr({ ...base, source: "organic", allowedSources: all }), "activate");
+  assertEquals(shouldAutoActivateSdr({ ...base, source: "manual", allowedSources: all }), "activate");
+  assertEquals(shouldAutoActivateSdr({ ...base, source: "organic", allowedSources: ["ad"] }), "skip");
 });
 
 Deno.test("respeita decisão humana anterior", () => {

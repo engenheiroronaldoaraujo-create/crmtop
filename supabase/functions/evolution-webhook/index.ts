@@ -544,15 +544,16 @@ async function postProcessInbound(args: {
     try {
       const sdrQuery = supabase
         .from("sdr_settings")
-        .select("enabled, test_mode, cooldown_seconds")
+        .select("enabled, test_mode, cooldown_seconds, allowed_sources, allowed_networks")
         .limit(1);
       const { data: sdrSettings } = await (workspaceId
-        ? supabase.from("sdr_settings").select("enabled, test_mode, cooldown_seconds").eq("workspace_id", workspaceId).maybeSingle()
+        ? supabase.from("sdr_settings").select("enabled, test_mode, cooldown_seconds, allowed_sources, allowed_networks").eq("workspace_id", workspaceId).maybeSingle()
         : sdrQuery.single());
 
       if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
-        // Leads de anúncio/landing são atendidos na 1ª mensagem. A decisão
-        // nunca reativa uma conversa que o humano pausou/transferiu.
+        // Auto-ativa na 1a mensagem quando a origem esta habilitada no painel
+        // (allowed_sources/allowed_networks). Nunca reativa conversa que o
+        // humano pausou/transferiu.
         await maybeAutoActivateSdr(supabase, conversationId, sdrSettings)
 
         const { data: sdrConv } = await supabase
