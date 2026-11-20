@@ -230,11 +230,27 @@ export async function upsertConversation(
   if (error) {
     const { data: again } = await supabase
       .from("conversations")
-      .select("id")
+      .select("id, source, source_meta")
       .eq("contact_id", contactId)
       .eq("instance_id", instanceId)
       .maybeSingle();
-    if (again) return again.id;
+    if (again) {
+      // Corrida de inserts concorrentes (burst de reconexão): a linha vencedora
+      // pode ter sido criada sem a atribuição desta mensagem. Mescla igual ao
+      // caminho normal para não perder a origem do anúncio/landing.
+      const merged = mergeConversationAttribution(again as {
+        source?: string | null;
+        source_meta?: unknown;
+      }, origin);
+      if (merged) {
+        const { error: updErr } = await supabase
+          .from("conversations")
+          .update(merged)
+          .eq("id", again.id);
+        if (updErr) console.warn("CONVERSATION_ATTRIBUTION_MERGE_FAILED", updErr.message);
+      }
+      return again.id;
+    }
     throw error;
   }
   return data.id;

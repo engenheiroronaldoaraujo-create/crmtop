@@ -439,25 +439,32 @@ async function processMessage(
     bumpUsage(supabase, workspaceId, fromMe ? { p_out: 1 } : { p_in: 1 });
   }
 
-  // Humano respondeu pelo próprio celular (fora do CRM): se a conversa ainda
-  // não tem decisão de SDR, cria o marcador paused_human. Assim a auto-ativação
-  // de anúncio/landing nunca liga a IA depois que o humano assumiu. Se já
-  // existe linha (inclusive 'active', caso dos ecos do SDR), não mexe.
+  // Humano respondeu pelo próprio celular (fora do CRM): cria o marcador
+  // paused_human se ainda não houver decisão — ou se o SDR estiver ativo/
+  // transferido (humano assumiu de volta). Ecos das próprias mensagens do
+  // SDR (last_sdr_echo_ids) são ignorados para não pausar à toa.
   if (isNewMessage && fromMe) {
     scheduleBackground((async () => {
       const { data: existing } = await supabase
         .from("sdr_conversations")
-        .select("status")
+        .select("status, metadata")
         .eq("conversation_id", conversationId)
         .maybeSingle();
-      if (existing) return;
-      await supabase.rpc("set_sdr_pause", {
-        p_conversation_id: conversationId,
-        p_paused: true,
-      }).then(
-        () => {},
-        (err) => console.warn("SDR_PAUSE_ON_PHONE_REPLY_FAILED", String(err)),
-      );
+      const echoIds = (existing as { metadata?: { last_sdr_echo_ids?: unknown } } | null)
+        ?.metadata?.last_sdr_echo_ids;
+      if (evolutionId && Array.isArray(echoIds) && (echoIds as unknown[]).includes(evolutionId)) {
+        return; // eco da mensagem que o próprio SDR acabou de enviar
+      }
+      const status = (existing as { status?: string } | null)?.status ?? null;
+      if (!existing || status === "active" || status === "transferred") {
+        await supabase.rpc("set_sdr_pause", {
+          p_conversation_id: conversationId,
+          p_paused: true,
+        }).then(
+          () => {},
+          (err) => console.warn("SDR_PAUSE_ON_PHONE_REPLY_FAILED", String(err)),
+        );
+      }
     })());
   }
 
@@ -548,7 +555,7 @@ async function postProcessInbound(args: {
         .limit(1);
       const { data: sdrSettings } = await (workspaceId
         ? supabase.from("sdr_settings").select("enabled, test_mode, cooldown_seconds, allowed_sources, allowed_networks").eq("workspace_id", workspaceId).maybeSingle()
-        : sdrQuery.single());
+        : sdrQuery.maybeSingle());
 
       if (sdrSettings?.enabled && !sdrSettings?.test_mode) {
         // Auto-ativa na 1a mensagem quando a origem esta habilitada no painel
@@ -570,7 +577,10 @@ async function postProcessInbound(args: {
           (Date.now() - new Date(sdrConv.last_auto_reply_at).getTime() < (sdrSettings.cooldown_seconds ?? 5) * 1000)
 
         if (isActive && !inCooldown) {
-          await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, evolutionId, workspaceId ?? null)
+          // messageId = linha da mensagem no banco (uuid). evolutionId vai
+          // separado só para log — antes o evolution id era passado como
+          // message_id e as inserções em sdr_logs falhavam em silêncio.
+          await callSDREngine(supabase, conversationId, contactId, sdrContent, instanceName, messageId, workspaceId ?? null)
         }
       }
     } catch (e) {
@@ -629,16 +639,17 @@ async function callSDREngine(
         "schedule_demo",
       ])
 
-      // Re-checagem depois da LLM: se o humano assumiu/pausou enquanto a IA
-      // pensava, a resposta não vai para o lead. 'transferred' é permitido
-      // (foi o próprio SDR que decidiu entregar ao humano nesta resposta).
+      // Re-checagem depois da LLM: só envia se o SDR ainda estiver no comando.
+      // Allowlist (active/transferred): se o humano assumiu/pausou enquanto
+      // a IA pensava (paused_human, paused_limit, ...), a resposta não vai
+      // para o lead.
       const { data: sdrNow } = await supabase
         .from("sdr_conversations")
         .select("status")
         .eq("conversation_id", conversationId)
         .maybeSingle();
-      if (sdrNow?.status === "paused_human") {
-        console.info("SDR_SEND_CANCELLED_HUMAN_TOOK_OVER", conversationId);
+      if (sdrNow?.status !== "active" && sdrNow?.status !== "transferred") {
+        console.info("SDR_SEND_CANCELLED_STATE_CHANGED", conversationId, sdrNow?.status ?? null);
         return;
       }
 
@@ -690,6 +701,22 @@ async function callSDREngine(
                   // O eco do webhook chegou primeiro e criou a linha com o ID
                   // real (violação de unique): remove a linha-fantasma sem ID.
                   await supabase.from("messages").delete().eq("id", sdrRow.id)
+                } else {
+                  // Registra o eco para o guarda de resposta pelo celular
+                  // distinguir "eco do SDR" de "humano assumiu pelo celular".
+                  const { data: sdrMeta } = await supabase
+                    .from("sdr_conversations")
+                    .select("metadata")
+                    .eq("conversation_id", conversationId)
+                    .maybeSingle()
+                  const prev = ((sdrMeta as { metadata?: unknown } | null)?.metadata ?? {}) as Record<string, unknown>
+                  const ids = Array.isArray(prev.last_sdr_echo_ids) ? prev.last_sdr_echo_ids as unknown[] : []
+                  ids.unshift(echoId)
+                  await supabase
+                    .from("sdr_conversations")
+                    .update({ metadata: { ...prev, last_sdr_echo_ids: ids.slice(0, 5) } })
+                    .eq("conversation_id", conversationId)
+                    .then(() => {}, () => {})
                 }
               }
             } else {

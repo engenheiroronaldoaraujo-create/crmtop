@@ -41,7 +41,8 @@ export function shouldAutoActivateSdr(args: ActivationArgs): ActivationDecision 
 
 /**
  * Aplica a decisão. A inserção é feita pela RPC `sdr_auto_activate` (migration
- * 073) com `ON CONFLICT DO NOTHING` para ser atômica mesmo com webhooks
+ * 077; antes 073, que restringia a ad/landing no banco) com
+ * `ON CONFLICT DO NOTHING` para ser atômica mesmo com webhooks
  * concorrentes/reentregas.
  */
 export async function maybeAutoActivateSdr(

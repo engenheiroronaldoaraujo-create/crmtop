@@ -31,10 +31,13 @@ export interface AttributionInput {
 const META_CTWA_PATTERN =
   /posso ter mais informa|pelo an[uú]ncio|vi o an[uú]ncio|seu an[uú]ncio|an[uú]ncio no (facebook|instagram)/i;
 
-// Google Ads click-to-WhatsApp não tem um texto obrigatório, mas usa frases
-// pré-preenchidas parecidas e marca a URL com utm_source=gclid/fbclid.
+// Google Ads click-to-WhatsApp não tem um texto obrigatório. A heurística de
+// texto fica RESTRITA a frases com menção explícita ao Google — frases
+// genéricas ("gostaria de mais informações") geravam falsos positivos e
+// viravam conversas orgânicas em 'ad'. A via principal de detecção do Google
+// é oficial: gclid/utm_source na URL ou payload do anunciante.
 const GOOGLE_CTWA_PATTERN =
-  /an[uú]ncio no google|vi no google|google ads|gostaria de (mais|receber) informa|gostaria de saber mais|mais informa[cç][oõ]es sobre/i;
+  /an[uú]ncio no google|vi (esse|este|seu) an[uú]ncio no google|google ads/i;
 
 const UTM_KEYS = [
   "utm_source",
@@ -140,6 +143,8 @@ function asMeta(value: unknown): Record<string, unknown> {
  *
  * Regras importantes:
  *  - origem 'manual' (marcada por humano) nunca é sobrescrita;
+ *  - marcação manual (marcado_manualmente) congela a origem — só o humano
+ *    muda de novo pelo dropdown do chat;
  *  - atribuição oficial (meta_attribution/google_attribution) não é rebaixada
  *    por heurística de texto;
  *  - UTMs da landing são preservados quando o anúncio chega depois;
@@ -155,6 +160,9 @@ export function mergeConversationAttribution(
   if (currentSource === "manual") return null;
 
   const currentMeta = asMeta(existing?.source_meta);
+  // Humano marcou a origem pelo chat: auto-merge não mexe mais.
+  if (currentMeta.marcado_manualmente === true) return null;
+
   const incomingMeta = clean(asMeta(incoming.meta));
   const incomingOfficial = /^(meta|google)_attribution$/.test(String(incomingMeta.detected_via ?? ""));
   const currentOfficial = /^(meta|google)_attribution$/.test(String(currentMeta.detected_via ?? ""));
@@ -173,9 +181,14 @@ export function mergeConversationAttribution(
     } else {
       nextMeta = { ...currentMeta, ...incomingMeta };
     }
+  } else if (incoming.source === "landing" && currentSource === "organic") {
+    // Landing também promove a origem (orgânica → landing), como o ad faz.
+    // 'ad' e 'campaign' continuam vencendo: anúncio depois da landing
+    // preserva o anúncio.
+    nextSource = "landing";
+    nextMeta = { ...currentMeta, ...incomingMeta };
   } else if (incoming.source === "landing" && currentSource !== "ad") {
     nextMeta = { ...currentMeta, ...incomingMeta };
-  } else if (incoming.meta && Object.keys(incomingMeta).length > 0) {
     nextMeta = { ...currentMeta, ...incomingMeta };
   } else {
     return null;

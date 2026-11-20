@@ -143,10 +143,16 @@ const SOURCE_MARK_OPTIONS: [ConversationSource, string][] = [
 
 const SOURCE_FILTER_KEY = "chat-source-filter"
 
+/** Garante objeto simples para source_meta (o banco pode ter null; em caso
+ * de linha malformada, evita espalhar lixo no update). */
+function asMetaObject(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+}
+
 /** Resumo da atribuição de anúncio/UTM gravada em conversations.source_meta. */
 function attributionLabel(conv: Conversation): string | null {
   if (!conv.source || conv.source === "organic" || conv.source === "manual") return null
-  const meta = (conv.source_meta ?? {}) as Record<string, unknown>
+  const meta = asMetaObject(conv.source_meta)
   const network = meta.network ?? meta.network_raw
   const campaign = meta.utm_campaign ?? meta.ad_id ?? meta.click_id
   const parts: string[] = []
@@ -156,21 +162,28 @@ function attributionLabel(conv: Conversation): string | null {
 }
 
 function attributionTitle(conv: Conversation): string {
-  const meta = (conv.source_meta ?? {}) as Record<string, unknown>
+  const meta = asMetaObject(conv.source_meta)
   return [
     `Origem: ${SOURCE_MARK_OPTIONS.find(([k]) => k === conv.source)?.[1] ?? conv.source}`,
+    meta.network ?? meta.network_raw ? `Rede: ${String(meta.network ?? meta.network_raw)}` : null,
     meta.detected_via ? `Detecção: ${String(meta.detected_via)}` : null,
-    meta.utm_source ? `UTM: ${String(meta.utm_source)}` : null,
+    meta.utm_source ? `UTM source: ${String(meta.utm_source)}` : null,
+    meta.utm_medium ? `UTM medium: ${String(meta.utm_medium)}` : null,
+    meta.utm_campaign ? `Campanha: ${String(meta.utm_campaign)}` : null,
     meta.ad_id ? `Ad ID: ${String(meta.ad_id)}` : null,
     meta.click_id ? `Click ID: ${String(meta.click_id)}` : null,
   ].filter(Boolean).join("\n")
 }
 
 function initialSourceFilter(): SourceFilter {
-  const stored = localStorage.getItem(SOURCE_FILTER_KEY)
-  return SOURCE_OPTIONS.some(([key]) => key === stored)
-    ? (stored as SourceFilter)
-    : "all"
+  try {
+    const stored = localStorage.getItem(SOURCE_FILTER_KEY)
+    return SOURCE_OPTIONS.some(([key]) => key === stored)
+      ? (stored as SourceFilter)
+      : "all"
+  } catch {
+    return "all"
+  }
 }
 
 const MESSAGE_PAGE_SIZE = 200
@@ -628,9 +641,17 @@ export default function ChatPage() {
   // Mapa contact_id -> tags (para exibir no card da conversa)
   const [convTagsMap, setConvTagsMap] = useState<Record<string, Tag[] | undefined>>({})
 
-  useEffect(() => {
+  // Chave estável do conjunto de contatos: refetch de 1 conversa (realtime)
+  // gera novo array `conversations`, mas os ids são os mesmos — sem isso as
+  // tags seriam recarregadas a cada evento.
+  const contactIdsKey = useMemo(() => {
     const ids = [...new Set(conversations.map((c) => c.contact_id).filter(Boolean))] as string[]
-    if (ids.length === 0) return
+    return ids.sort().join(",")
+  }, [conversations])
+
+  useEffect(() => {
+    if (!contactIdsKey) return
+    const ids = contactIdsKey.split(",")
     // Chunking: até 500 ids numa única URL do PostgREST estoura o limite de
     // URI (413). O Pipeline já fazia chunking de 200; aqui faltava.
     const CHUNK = 200
@@ -655,7 +676,7 @@ export default function ChatPage() {
     }
     void load()
     return () => { cancelled = true }
-  }, [conversations])
+  }, [contactIdsKey])
 
   // Reflete mudanças de etiquetas do contato selecionado no mapa dos cards
   useEffect(() => {
@@ -765,11 +786,11 @@ export default function ChatPage() {
     if (isNetworkFilter(sourceFilter)) {
       // `->>` extrai texto; `->` retornaria jsonb e o PostgREST tentaria
       // interpretar "google" como JSON (erro: invalid input syntax for type json).
-      // O fallback em detected_via cobre conversas antigas gravadas antes de
-      // existir a chave `network` (detected_via='padrao_ctwa' = Meta CTWA).
+      // O fallback em detected_via/gclid cobre conversas antigas gravadas
+      // antes de existir a chave `network`.
       req = sourceFilter === "meta"
         ? req.eq("source", "ad").or("source_meta->>network.eq.meta,source_meta->>detected_via.eq.padrao_ctwa")
-        : req.eq("source", "ad").eq("source_meta->>network", sourceFilter)
+        : req.eq("source", "ad").or("source_meta->>network.eq.google,source_meta->>detected_via.eq.padrao_ctwa_google,source_meta->>gclid.not.is.null")
     } else if (sourceFilter !== "all") {
       req = req.eq("source", sourceFilter)
     }
@@ -783,10 +804,18 @@ export default function ChatPage() {
   }, [sourceFilter])
 
   useEffect(() => {
-    localStorage.setItem(SOURCE_FILTER_KEY, sourceFilter)
+    try {
+      localStorage.setItem(SOURCE_FILTER_KEY, sourceFilter)
+    } catch {
+      // modo privado/bloqueio de storage: filtro segue funcionando na sessão
+    }
   }, [sourceFilter])
 
   const markRead = useCallback(async (id: string) => {
+    // Otimista: zera o badge na hora; o realtime confirma depois.
+    setConversations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, unread_count: 0 } : c)),
+    )
     await supabase.rpc("mark_conversation_read", { p_conversation_id: id })
   }, [])
 
@@ -930,7 +959,8 @@ export default function ChatPage() {
     setLoadingOlder(false)
   }, [selectedId, messages])
 
-  // Load SDR status for selected conversation
+  // Load SDR status for selected conversation + realtime (ativação automática
+  // e pausa por outro dispositivo mudam a linha sem recarregar a página).
   useEffect(() => {
     if (!selectedId) { setSdrStatus(null); return }
     supabase
@@ -939,7 +969,30 @@ export default function ChatPage() {
       .eq("conversation_id", selectedId)
       .maybeSingle()
       .then(({ data }) => setSdrStatus(data?.status ?? null))
+    const channel = supabase
+      .channel(`crm-sdr-status-${selectedId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "sdr_conversations",
+          filter: `conversation_id=eq.${selectedId}`,
+        },
+        (payload) => {
+          const row = (payload.new ?? payload.old) as { status?: string } | null
+          if (row?.status) setSdrStatus(row.status)
+          else if (payload.eventType === "DELETE") setSdrStatus(null)
+        },
+      )
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [selectedId])
+
+  // Guarda anti-interrupção: pausa automática quando o humano digita.
+  const typingPauseRef = useRef<string | null>(null)
 
   const toggleSDR = async () => {
     if (!selectedId) return
@@ -961,6 +1014,11 @@ export default function ChatPage() {
       })
       if (error) throw error
       setSdrStatus(willPause ? "paused_human" : "active")
+      if (!willPause) {
+        // Reativou manualmente: o guarda de digitação pode pausar de novo
+        // se o humano voltar a digitar (antes ficava cego após a 1a pausa).
+        typingPauseRef.current = null
+      }
       toast.success(willPause ? "SDR pausado nesta conversa" : "SDR ativado nesta conversa — a IA vai responder")
     } catch (e: any) {
       toast.error(e.message)
@@ -970,9 +1028,8 @@ export default function ChatPage() {
   }
 
   // Guarda anti-interrupção: se o humano está digitando/gravando, o SDR
-  // nunca pode entrar. Pausa automaticamente (uma vez por conversa) e
+  // nunca pode entrar. Pausa automaticamente (uma vez por ativação) e
   // exige reativação manual pelo botão "SDR".
-  const typingPauseRef = useRef<string | null>(null)
   const pauseSdrForHumanTyping = useCallback(async () => {
     if (!selectedId) return
     // Mesmo sem linha em sdr_conversations (SDR nunca ativo aqui) o humano
@@ -1113,15 +1170,23 @@ export default function ChatPage() {
             prev.some((m) => m.id === msg.id) ? prev : [...prev, msg],
           )
           // A linha real substitui a bolha otimista equivalente (mesmo texto
-          // outbound na mesma conversa).
+          // outbound na mesma conversa). Procura de trás para frente: com dois
+          // textos iguais pendentes ("ok", "ok"), o realtime chega em ordem e
+          // deve casar com o mais recente, não com o primeiro.
           if (msg.direction === "outbound") {
             setOptimisticMsgs((prev) => {
-              const idx = prev.findIndex(
-                (o) =>
+              let idx = -1
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const o = prev[i]
+                if (
                   o.conversation_id === msg.conversation_id &&
                   o.content === msg.content &&
-                  o.status !== "failed",
-              )
+                  o.status !== "failed"
+                ) {
+                  idx = i
+                  break
+                }
+              }
               if (idx === -1) return prev
               const next = [...prev]
               next.splice(idx, 1)
@@ -1183,9 +1248,22 @@ export default function ChatPage() {
     if (error) toast.error(error.message)
   }
 
+  // Chaves de atribuição de anúncio: ao marcar manualmente uma origem que
+  // NÃO é anúncio, elas são descartadas (senão o próximo anúncio inbound
+  // mesclaria e reverteria a marcação).
+  const AD_META_KEYS = [
+    "network", "network_raw", "ad_id", "click_id", "gclid", "fbclid",
+    "cta_source_url", "detected_via", "utm_source", "utm_medium",
+    "utm_campaign", "utm_term", "utm_content",
+  ]
+
   async function handleSetSource(conv: Conversation, source: ConversationSource) {
     if (conv.source === source) return
-    const sourceMeta = { ...(conv.source_meta ?? {}), marcado_manualmente: true }
+    const base = asMetaObject(conv.source_meta)
+    if (source !== "ad") {
+      for (const k of AD_META_KEYS) delete base[k]
+    }
+    const sourceMeta = { ...base, marcado_manualmente: true }
     const { error } = await supabase
       .from("conversations")
       .update({ source, source_meta: sourceMeta })
@@ -1317,6 +1395,18 @@ export default function ChatPage() {
     return selected.contact.phone
   }
 
+  // Pausa o SDR com prazo: o envio não pode esperar o RPC para sempre, mas
+  // também não pode correr com a IA. 2,5s é folga suficiente (p99 < 1s).
+  async function pauseSdrBeforeSend() {
+    try {
+      await Promise.race([
+        pauseSdrForHumanTyping(),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ])
+    } catch {
+      // best-effort: o proxy pausa no servidor de qualquer forma
+    }
+  }
   // Envia a gravação como bolha de voz.
   //
   // Regra deste handler: NUNCA destruir a bolha otimista por otimismo. A
@@ -1331,8 +1421,8 @@ export default function ChatPage() {
     if (!selected || !recorder.recording || sendingAudio) return
     const targetPhone = canSendNow()
     if (targetPhone === null) return
-    // Humano assumiu: garante SDR pausado antes de enviar.
-    void pauseSdrForHumanTyping()
+    // Humano assumiu: garante SDR pausado antes de enviar (com prazo).
+    await pauseSdrBeforeSend()
 
     const rec = recorder.recording
     const conversationId = selected.id
@@ -1401,8 +1491,8 @@ export default function ChatPage() {
     if (!text.trim() && !pendingFile) return
     const targetPhone = canSendNow()
     if (targetPhone === null) return
-    // Humano assumiu: garante SDR pausado antes de enviar.
-    void pauseSdrForHumanTyping()
+    // Humano assumiu: garante SDR pausado antes de enviar (com prazo).
+    await pauseSdrBeforeSend()
 
     // UI otimista: a bolha aparece na hora com ⏱ pendente; o status vira ✓
     // quando o proxy confirma e a bolha real substitui via realtime.
@@ -1482,6 +1572,9 @@ export default function ChatPage() {
         setOptimisticMsgs((prev) =>
           prev.map((m) => (m.id === tempId ? { ...m, status: "sent" as const } : m)),
         )
+        // Reparação determinística como nas mídias: se o realtime cair, a
+        // bolha real vem na releitura em vez de ficar duplicada/pendente.
+        await refreshMessages(selected.id)
       }
       // Nossa resposta remove a moldura verde do card
       setConversations((prev) =>
@@ -1507,6 +1600,8 @@ export default function ChatPage() {
     // telefone (só LID) recebia `""` como destino em vez de um erro claro.
     const targetPhone = canSendNow()
     if (targetPhone === null) return
+    // Humano assumiu: garante SDR pausado antes de reenviar (com prazo).
+    await pauseSdrBeforeSend()
     setOptimisticMsgs((prev) =>
       prev.map((m) => (m.id === msg.id ? { ...m, status: "pending" as const } : m)),
     )

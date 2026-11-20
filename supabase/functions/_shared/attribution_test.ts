@@ -69,6 +69,17 @@ Deno.test("detectAdAttribution — mensagem comum não é anúncio", () => {
   assertEquals(detectAdAttribution({ isInbound: true, content: "Bom dia, tudo bem?" }), null);
 });
 
+Deno.test("detectAdAttribution — frase genérica NÃO é anúncio do Google", () => {
+  assertEquals(
+    detectAdAttribution({ isInbound: true, content: "Gostaria de mais informações sobre o sistema" }),
+    null,
+  );
+  assertEquals(
+    detectAdAttribution({ isInbound: true, content: "Quero saber mais informações, por favor" }),
+    null,
+  );
+});
+
 Deno.test("detectAdAttribution — ignora mensagens outbound", () => {
   assertEquals(
     detectAdAttribution({ isInbound: false, content: "posso ter mais informações?" }),
@@ -107,6 +118,26 @@ Deno.test("mergeConversationAttribution — origem manual é preservada", () => 
     ),
     null,
   );
+});
+
+Deno.test("mergeConversationAttribution — marcação manual congela a origem", () => {
+  assertEquals(
+    mergeConversationAttribution(
+      { source: "organic", source_meta: { marcado_manualmente: true } },
+      { source: "ad", meta: { network: "meta", detected_via: "meta_attribution" } },
+    ),
+    null,
+  );
+});
+
+Deno.test("mergeConversationAttribution — landing promove orgânica", () => {
+  const merged = mergeConversationAttribution(
+    { source: "organic", source_meta: {} },
+    { source: "landing", meta: { utm_source: "google", utm_campaign: "verao" } },
+  );
+  assertEquals(merged?.source, "landing");
+  const meta = merged?.source_meta as Record<string, unknown>;
+  assertEquals(meta.utm_campaign, "verao");
 });
 
 Deno.test("mergeConversationAttribution — sem mudança retorna null", () => {
