@@ -350,9 +350,13 @@ async function processMessage(
     return;
   }
 
+  // Corte por code points, não por unidades UTF-16: slice() puro partia
+  // emoji no meio (surrogate pair) e a bolha/lista mostrava �.
+  const clipPreview = (s: string, n: number): string => Array.from(s ?? "").slice(0, n).join("");
+
   const preview = type === "text"
-    ? content.slice(0, 140)
-    : content.slice(0, 140) || `[${type}]`;
+    ? clipPreview(content, 140)
+    : clipPreview(content, 140) || `[${type}]`;
 
   // Ecos outbound carregam o pushName da própria empresa ("Você") — somente
   // mensagens inbound carregam o nome real do contato.
@@ -742,7 +746,7 @@ async function callSDREngine(
         await supabase.rpc("bump_conversation", {
           p_id: conversationId,
           p_sent_at: new Date().toISOString(),
-          p_preview: String(result.response).slice(0, 140),
+          p_preview: Array.from(String(result.response)).slice(0, 140).join(""),
           p_inbound: false,
         }).then(() => {}, () => {})
 

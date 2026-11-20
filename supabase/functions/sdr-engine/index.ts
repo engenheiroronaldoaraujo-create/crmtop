@@ -898,7 +898,8 @@ async function processMessage(
     .reverse()
     .map((m: any) => {
       const label = m.direction === "inbound" ? "CLIENTE" : "SOFIA"
-      const clip = (s: string) => String(s).slice(0, 500)
+      // Array.from: não parte surrogate pair no meio (emoji virava �).
+      const clip = (s: string) => Array.from(String(s)).slice(0, 500).join("")
       if (m.content) return `${label}: ${clip(m.content)}`
       if (m.type === "audio" && m.transcription) return `${label} (áudio transcrito): ${clip(m.transcription)}`
       if (m.type === "audio") return `${label}: [audio]`

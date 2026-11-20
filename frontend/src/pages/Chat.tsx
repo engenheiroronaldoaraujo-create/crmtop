@@ -172,6 +172,7 @@ function attributionTitle(conv: Conversation): string {
     meta.utm_campaign ? `Campanha: ${String(meta.utm_campaign)}` : null,
     meta.ad_id ? `Ad ID: ${String(meta.ad_id)}` : null,
     meta.click_id ? `Click ID: ${String(meta.click_id)}` : null,
+    conv.last_message_preview ? `Prévia: ${Array.from(String(conv.last_message_preview)).slice(0, 140).join("")}` : null,
   ].filter(Boolean).join("\n")
 }
 
